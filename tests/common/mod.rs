@@ -359,12 +359,32 @@ impl Pty {
     }
 
     /// Waits until `pred(screen)` holds; panics with a screen dump on timeout.
+    /// Waits for the output to go quiet. A frame can arrive in pieces, so
+    /// what a wait is looking for may show before the rest of the frame does,
+    /// and whatever the test checks next would see a half-painted screen.
+    fn settle(&self) {
+        let quiet_for = Duration::from_millis(25);
+        let give_up = Instant::now() + Duration::from_secs(1);
+        let mut seen = self.raw.lock().unwrap().len();
+        let mut quiet_since = Instant::now();
+        while quiet_since.elapsed() < quiet_for && Instant::now() < give_up {
+            thread::sleep(Duration::from_millis(2));
+            let now = self.raw.lock().unwrap().len();
+            if now != seen {
+                seen = now;
+                quiet_since = Instant::now();
+            }
+        }
+    }
+
     pub fn wait_until(&self, what: &str, timeout: Duration, pred: impl Fn(&str) -> bool) {
         let start = Instant::now();
         loop {
-            let s = self.screen();
-            if pred(&s) {
-                return;
+            if pred(&self.screen()) {
+                self.settle();
+                if pred(&self.screen()) {
+                    return;
+                }
             }
             if start.elapsed() > timeout {
                 panic!(
