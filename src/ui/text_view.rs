@@ -101,6 +101,13 @@ pub fn render(app: &App, area: Rect, cells: &mut Cells, theme: &Theme) -> Option
                 cells,
                 theme,
             );
+            if app
+                .reader
+                .as_ref()
+                .is_some_and(|r| !r.focus.contains(&line))
+            {
+                cells.set_style(Rect::new(area.x, y, area.width, 1), theme.reader_dim);
+            }
         } else {
             cells.set_stringn(area.x, y, "~", 1, theme.tilde);
         }

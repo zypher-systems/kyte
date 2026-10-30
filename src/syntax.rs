@@ -5,6 +5,9 @@
 use std::ops::Range;
 use std::path::Path;
 
+/// Code larger than this isn't parsed on every key, because that would lag.
+pub const MAX_LIVE_PARSE_BYTES: usize = 512 * 1024;
+
 /// The line comment for a file, by extension.
 pub fn comment_prefix(path: &Path) -> Option<&'static str> {
     match path.extension()?.to_str()? {
@@ -57,6 +60,44 @@ mod code {
             }
             None
         })
+    }
+
+    /// A named place in the code, if `node` is one.
+    fn crumb(lang: Lang, node: &Node, text: &str) -> Option<String> {
+        let name = |field: &str| {
+            node.child_by_field_name(field)
+                .and_then(|n| n.utf8_text(text.as_bytes()).ok())
+        };
+        let (word, field) = match (lang, node.kind()) {
+            (Lang::Rust, "function_item") => ("fn", "name"),
+            (Lang::Rust, "impl_item") => ("impl", "type"),
+            (Lang::Rust, "trait_item") => ("trait", "name"),
+            (Lang::Rust, "mod_item") => ("mod", "name"),
+            (Lang::Python, "class_definition") => ("class", "name"),
+            (Lang::Python, "function_definition") => ("def", "name"),
+            (Lang::Bash, "function_definition") => ("function", "name"),
+            _ => return None,
+        };
+        Some(format!("{word} {}", name(field)?))
+    }
+
+    /// The named places around `at`, outermost first.
+    pub fn breadcrumb(path: &Path, text: &str, at: usize) -> Vec<String> {
+        let Some(lang) = Lang::from_path(path) else {
+            return Vec::new();
+        };
+        let Some(tree) = parse(lang, text) else {
+            return Vec::new();
+        };
+        let root = tree.root_node();
+        let mut out = Vec::new();
+        let mut node = root.descendant_for_byte_range(at, at);
+        while let Some(n) = node {
+            out.extend(crumb(lang, &n, text));
+            node = n.parent();
+        }
+        out.reverse();
+        out
     }
 
     /// The next larger piece of syntax around `range`.
@@ -129,6 +170,10 @@ mod code {
         None
     }
 
+    pub fn breadcrumb(_: &Path, _: &str, _: usize) -> Vec<String> {
+        Vec::new()
+    }
+
     pub fn expand(_: &Path, _: &str, _: Range<usize>) -> Option<Range<usize>> {
         None
     }
@@ -142,7 +187,7 @@ mod code {
     }
 }
 
-pub use code::{expand, function_at, next_function, prev_function, supported};
+pub use code::{breadcrumb, expand, function_at, next_function, prev_function, supported};
 
 #[cfg(all(test, feature = "highlight"))]
 mod tests {
@@ -211,6 +256,25 @@ mod tests {
         assert_eq!(next_function(path, src, 0), Some(inner));
         let r = function_at(path, src, inner + 3).unwrap();
         assert_eq!(&src[r], "fn inner() {}");
+    }
+
+    #[test]
+    fn breadcrumbs_name_the_places_around_the_cursor() {
+        let src =
+            "mod m {\n    impl Foo {\n        fn bar() {\n            x();\n        }\n    }\n}\n";
+        let at = src.find("x()").unwrap();
+        assert_eq!(
+            breadcrumb(Path::new("a.rs"), src, at),
+            vec!["mod m", "impl Foo", "fn bar"]
+        );
+        let py = "class A:\n    def b(self):\n        pass\n";
+        let at = py.find("pass").unwrap();
+        assert_eq!(
+            breadcrumb(Path::new("a.py"), py, at),
+            vec!["class A", "def b"]
+        );
+        assert!(breadcrumb(Path::new("a.txt"), py, 0).is_empty());
+        assert!(breadcrumb(Path::new("a.rs"), "", 0).is_empty());
     }
 
     #[test]

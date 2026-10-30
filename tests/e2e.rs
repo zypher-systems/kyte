@@ -1024,7 +1024,7 @@ fn ac16_empty_query_does_nothing() {
 
 // ---------------------------------------------------------------- AC-17
 
-const COMMANDS: [&str; 19] = [
+const COMMANDS: [&str; 20] = [
     "Save",
     "Save as",
     "Open file",
@@ -1043,6 +1043,7 @@ const COMMANDS: [&str; 19] = [
     "Toggle tabs and spaces",
     "File history",
     "Delete file history",
+    "Reader mode",
     "Show key help",
 ];
 
@@ -1075,7 +1076,7 @@ fn ac17_palette_lists_every_command() {
         .collect();
     assert!(first_result(&p).contains("▸ Save"), "{}", p.dump());
     // 8 rows are visible at once; scrolling down reveals the rest
-    for _ in 0..18 {
+    for _ in 0..19 {
         p.send_keys(&["Down"]);
         std::thread::sleep(Duration::from_millis(5));
         for c in COMMANDS {
@@ -1614,6 +1615,61 @@ fn break_lock_opens_a_file_held_by_another_kyte() {
     b.send_str("r");
     b.wait_for("1 │ held base", TIMEOUT);
     b.kill9();
+}
+
+// ---------------------------------------------------------------- reader mode
+
+fn open_reader(p: &mut Pty) {
+    open_overlay(p);
+    p.send_str("v");
+    p.wait_for(" READER ", TIMEOUT);
+}
+
+#[test]
+fn reader_dims_what_is_out_of_focus_and_changes_nothing() {
+    let env = Env::new();
+    let f = env.write("r.txt", "first para\nstill first\n\nsecond para\n");
+    let mut p = env.open(&f);
+    let plain = p.fg(0, 6);
+    open_reader(&mut p);
+    p.wait_for("back to editing", TIMEOUT);
+    assert_eq!(p.fg(0, 6), plain, "the paragraph in focus is unchanged");
+    assert_ne!(p.fg(3, 6), plain, "the next one is dimmed");
+    p.send_str("xyz");
+    p.send_keys(&["Down", "Down"]);
+    p.wait_gone("back to editing", TIMEOUT);
+    wait_status(&p, "Ln 3");
+    assert_ne!(p.fg(0, 6), plain, "the focus moved on");
+    assert_eq!(p.fg(3, 6), plain, "and the page didn't");
+    p.send_keys(&["Esc"]);
+    p.wait_gone(" READER ", TIMEOUT);
+    wait_status(&p, "INSERT");
+    assert_eq!(p.fg(0, 6), plain, "nothing stays dimmed");
+    assert!(!status(&p).contains("[+]"));
+    quit_clean(&mut p);
+    assert_eq!(
+        fs::read_to_string(&f).unwrap(),
+        "first para\nstill first\n\nsecond para\n"
+    );
+}
+
+#[test]
+fn reader_steps_through_sections_and_shows_keys_on_request() {
+    let env = Env::new();
+    let f = env.write("r.txt", "one\n\ntwo\n\nthree\n");
+    let mut p = env.open(&f);
+    open_reader(&mut p);
+    p.send_str("n");
+    wait_status(&p, "Ln 3");
+    p.send_str("n");
+    wait_status(&p, "Ln 5");
+    p.send_str("n");
+    p.wait_for("No more sections", TIMEOUT);
+    p.send_str("?");
+    p.wait_for("back to editing", TIMEOUT);
+    p.send_str("q");
+    p.wait_gone(" READER ", TIMEOUT);
+    quit_clean(&mut p);
 }
 
 // ---------------------------------------------------------------- floating menus

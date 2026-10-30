@@ -12,6 +12,17 @@ These replace the matching parts of `ARCHITECTURE`. `docs/ROADMAP.md` holds the 
 - License: MIT. This settles section 16 and the section 4 note.
 - Kyte isn't tied to any one OS. It's meant to be open source for everyone.
 
+## Reader mode
+
+- Esc `v` opens it, which replaces the design's `esc+Home`. It's read-only, so a stray key can't change the file, and Esc leaves the cursor where reading stopped, ready to edit there.
+- A section is the function at the cursor, widened upward over its doc comments and attributes, or a paragraph elsewhere. Outside a function in code, it's the paragraph.
+- Up and Down move the cursor and the focus follows it, so reading through a file walks the spotlight along. `n` and `p` jump. The view scrolls only when a section isn't fully on screen, with two lines above it, because moving the page mid-read loses the reader's place.
+- The breadcrumb goes in the status bar, not a popup, because it's status and there's nothing to pick.
+- The keys are a floating menu by the floating-menus rule, but a menu that stayed up would cover the text being read. So it shows on entry, hides at the first key, and `?` brings it back.
+- Dimming overrides the foreground, syntax colors included, and leaves the background alone, so the focus reads as the only colored part.
+- Code over 512 KiB falls back to paragraphs, because reader mode parses on every key.
+- Idle auto-activation from the design isn't built. It should be off by default, which needs a config file first.
+
 ## Smart Esc layer
 
 - The Esc menu is built from context each time it's drawn: `App::layer_rows` lists what works here, so a key is never offered and then ignored. The core keys stay, in the same place, so muscle memory holds. Context adds to the list, except that a selection replaces it.

@@ -53,6 +53,15 @@ pub fn status_bar(app: &App, area: Rect, cells: &mut Cells, theme: &Theme) {
             history::ago_from_now(timeline.version(*at).time_ms),
             timeline.describe(*at),
         ),
+        Mode::Reader => {
+            let crumbs = app.reader.as_ref().map_or("", |r| r.crumbs.as_str());
+            let place = if crumbs.is_empty() {
+                String::new()
+            } else {
+                format!(" │ {crumbs}")
+            };
+            format!("│ {name}{dirty}{place} │ Ln {l}, Col {c}")
+        }
         _ => format!("│ {name}{dirty} │ Ln {l}, Col {c}{sel}{indent}{eol}"),
     };
     let x = mode.chars().count();
@@ -164,6 +173,16 @@ fn menu_for(app: &App) -> Option<Menu> {
                 ("n", "Skip"),
                 ("a", "Replace all the rest"),
                 ("Esc", "Stop"),
+            ],
+        ),
+        Mode::Reader if app.reader.as_ref().is_some_and(|r| r.show_keys) => beside(
+            "Reader",
+            vec![
+                ("Up Down", "read on"),
+                ("PgUp PgDn", "a screen"),
+                ("n p", "next, previous section"),
+                ("?", "show these keys"),
+                ("Esc", "back to editing"),
             ],
         ),
         Mode::History { .. } => beside(

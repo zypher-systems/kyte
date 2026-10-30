@@ -13,6 +13,7 @@ use crate::history::{self, Change, FileHistory, SharedTimeline, SnapshotKind, Ti
 use crate::input::{normalize, Input, Key, Motion};
 use crate::ops;
 use crate::palette::{Entry, PaletteState};
+use crate::reader::{self, Reader};
 use crate::search;
 use crate::session::{self, Opened};
 use crate::swap::{self, RecoverInfo, SwapStatus, SwapWriter};
@@ -21,6 +22,9 @@ use crate::syntax;
 /// How soon after Esc a `[` or `O` counts as the rest of a split key sequence.
 /// A person can't reach those keys this fast, and they do nothing in the layer.
 const ESC_TAIL_WINDOW: Duration = Duration::from_millis(150);
+
+/// Lines kept above a section when reader mode brings it into view.
+const READER_LINES_ABOVE: usize = 2;
 
 /// How many files the universal palette lists, and how long it may look.
 const PALETTE_MAX_FILES: usize = 20_000;
@@ -39,6 +43,8 @@ pub enum Mode {
     },
     Palette(PaletteState),
     Prompt(Prompt),
+    /// Read-only, with everything outside the current section dimmed.
+    Reader,
     /// Browsing the file's past, at version `at`.
     History {
         timeline: SharedTimeline,
@@ -180,6 +186,8 @@ pub struct App {
     history_failed: bool,
     /// The version being browsed, while `Mode::History` is open.
     version_view: Option<Buffer>,
+    /// Reader mode's state, while it's open.
+    pub reader: Option<Reader>,
     last_fsync: Option<Instant>,
     scroll_top: usize,
     scroll_left: usize,
@@ -198,6 +206,7 @@ pub const LEGEND: &[(&str, &str)] = &[
     ("r", "redo"),
     ("s", "save"),
     ("h", "history"),
+    ("v", "reader mode"),
 ];
 
 /// The double-tap key, listed last.
@@ -222,6 +231,7 @@ impl App {
             history: None,
             history_failed: false,
             version_view: None,
+            reader: None,
             last_fsync: None,
             buffer,
             mode: Mode::Insert,
@@ -436,6 +446,7 @@ impl App {
             Mode::Prompt(Prompt::ReplaceConfirm(run)) => self.replace_confirm_key(key, run),
             Mode::Recover(info) => self.recover_key(key, info),
             Mode::History { timeline, at } => self.history_key(key, timeline, at),
+            Mode::Reader => self.reader_key(key),
             Mode::Prompt(Prompt::ConfirmDeleteHistory) => match key {
                 Key::Char('y') => {
                     self.mode = Mode::Insert;
@@ -779,6 +790,7 @@ impl App {
             'r' => self.redo(),
             's' => self.save(),
             'h' => self.open_history(),
+            'v' => self.open_reader(),
             'i' if self.on_bracket() => self.select_inside_brackets(),
             '#' => self.toggle_comment(),
             'f' if self.code_path().is_some() => self.select_function(),
@@ -1174,6 +1186,7 @@ impl App {
             Command::ToggleLineNumbers => self.show_line_numbers = !self.show_line_numbers,
             Command::ToggleIndent => self.toggle_indent(),
             Command::History => self.open_history(),
+            Command::Reader => self.open_reader(),
             Command::DeleteHistory => {
                 self.mode = Mode::Prompt(Prompt::ConfirmDeleteHistory);
             }
@@ -1302,7 +1315,11 @@ impl App {
             | Mode::Prompt(Prompt::SaveAs { text: typed, .. }) => {
                 typed.push_str(text.lines().next().unwrap_or(""));
             }
-            Mode::Prompt(_) | Mode::Help { .. } | Mode::Recover(_) | Mode::History { .. } => {}
+            Mode::Prompt(_)
+            | Mode::Help { .. }
+            | Mode::Recover(_)
+            | Mode::History { .. }
+            | Mode::Reader => {}
         }
         self.flush_edits();
         Ok(())
@@ -1485,6 +1502,61 @@ impl App {
             let name = path.file_name().unwrap_or_default().to_string_lossy();
             self.set_message(format!("Opened {name}"));
         }
+    }
+
+    fn open_reader(&mut self) {
+        self.buffer.clear_selection();
+        let (focus, crumbs) = reader::section_at(&self.buffer);
+        self.bring_into_view(&focus);
+        self.reader = Some(Reader {
+            focus,
+            crumbs,
+            show_keys: true,
+        });
+        self.mode = Mode::Reader;
+    }
+
+    /// Scrolls to show `lines`, unless they're already on screen. Moving the
+    /// page while someone reads it loses their place.
+    fn bring_into_view(&mut self, lines: &std::ops::Range<usize>) {
+        let bottom = self.scroll_top + self.text_height();
+        if lines.start < self.scroll_top || lines.end > bottom {
+            self.scroll_top = lines.start.saturating_sub(READER_LINES_ABOVE);
+        }
+    }
+
+    fn reader_key(&mut self, key: Key) {
+        let mut show_keys = false;
+        match key {
+            Key::Esc | Key::Char('q') => {
+                self.reader = None;
+                self.mode = Mode::Insert;
+                return;
+            }
+            Key::Char('?') => {
+                show_keys = !self.reader.as_ref().is_some_and(|r| r.show_keys);
+            }
+            Key::Up => self.motion(Motion::Up),
+            Key::Down => self.motion(Motion::Down),
+            Key::PageUp => self.motion(Motion::PageUp),
+            Key::PageDown => self.motion(Motion::PageDown),
+            Key::Char('n') | Key::Char('p') => {
+                match reader::step(&self.buffer, key == Key::Char('n')) {
+                    Some(at) => self.buffer.move_to(at),
+                    None => self.set_message("No more sections"),
+                }
+            }
+            _ => {}
+        }
+        let (focus, crumbs) = reader::section_at(&self.buffer);
+        if self.reader.as_ref().is_none_or(|r| r.focus != focus) {
+            self.bring_into_view(&focus);
+        }
+        self.reader = Some(Reader {
+            focus,
+            crumbs,
+            show_keys,
+        });
     }
 
     /// Opens the timeline at the newest version.
@@ -1733,6 +1805,7 @@ impl App {
             Mode::Prompt(Prompt::SaveAs { .. }) => "SAVE AS",
             Mode::Prompt(Prompt::ConfirmSave { .. }) => "SAVE?",
             Mode::History { .. } => "HISTORY",
+            Mode::Reader => "READER",
             Mode::Prompt(Prompt::ConfirmDeleteHistory) => "DELETE?",
             Mode::Help { .. } => "HELP",
             Mode::Recover(_) => "RECOVER",
@@ -2559,6 +2632,75 @@ mod tests {
         a.buffer.move_to(7);
         esc_then(&mut a, 'f');
         assert_eq!(a.buffer.selection(), Some(6..15));
+    }
+
+    #[test]
+    fn reader_is_read_only_and_esc_returns_to_editing() {
+        let t = Instant::now();
+        let mut a = code_app("/x/a.txt", "one\ntwo\n\nthree\n");
+        esc_then(&mut a, 'v');
+        assert_eq!(a.mode_label(), "READER");
+        assert_eq!(a.reader.as_ref().unwrap().focus, 0..2);
+        for key in [Key::Char('x'), Key::Backspace, Key::Enter, Key::Ctrl('v')] {
+            a.handle_key(key, t).unwrap();
+        }
+        a.handle_paste("pasted".to_string()).unwrap();
+        assert!(!a.buffer.is_dirty());
+        a.handle_key(Key::Esc, t).unwrap();
+        assert_eq!(a.mode, Mode::Insert);
+        assert_eq!(a.reader, None);
+    }
+
+    #[test]
+    fn reader_focus_follows_the_cursor() {
+        let t = Instant::now();
+        let mut a = code_app("/x/a.txt", "one\n\ntwo\n");
+        a.run_command(Command::Reader);
+        a.handle_key(Key::Down, t).unwrap();
+        assert_eq!(a.reader.as_ref().unwrap().focus, 2..3);
+        a.handle_key(Key::Char('p'), t).unwrap();
+        assert_eq!(a.reader.as_ref().unwrap().focus, 0..1);
+        a.handle_key(Key::Char('p'), t).unwrap();
+        assert_eq!(a.message.as_deref(), Some("No more sections"));
+    }
+
+    #[test]
+    fn reader_keys_show_at_first_then_on_request() {
+        let t = Instant::now();
+        let mut a = code_app("/x/a.txt", "one\n");
+        a.run_command(Command::Reader);
+        let shown = |a: &App| a.reader.as_ref().unwrap().show_keys;
+        assert!(shown(&a));
+        a.handle_key(Key::Down, t).unwrap();
+        assert!(!shown(&a));
+        a.handle_key(Key::Char('?'), t).unwrap();
+        assert!(shown(&a));
+        a.handle_key(Key::Char('?'), t).unwrap();
+        assert!(!shown(&a));
+    }
+
+    #[test]
+    fn reader_scrolls_only_when_a_section_is_off_screen() {
+        let t = Instant::now();
+        let text = format!("one\n\ntwo\n{}\n\nfar\n", "x\n".repeat(60));
+        let mut a = code_app("/x/a.txt", &text);
+        a.layout(40, 20);
+        a.run_command(Command::Reader);
+        a.handle_key(Key::Char('n'), t).unwrap();
+        assert_eq!(a.scroll().0, 0, "the next section was already showing");
+        a.handle_key(Key::Char('n'), t).unwrap();
+        assert_eq!(a.scroll().0, 65 - 2, "the far one wasn't");
+    }
+
+    #[test]
+    fn reader_clears_a_selection_it_replaces() {
+        let t = Instant::now();
+        let mut a = code_app("/x/a.txt", "one\n");
+        a.buffer.select_all();
+        a.run_command(Command::Reader);
+        assert_eq!(a.buffer.selection(), None);
+        a.handle_key(Key::Esc, t).unwrap();
+        assert_eq!(a.mode, Mode::Insert);
     }
 
     #[test]

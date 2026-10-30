@@ -97,6 +97,33 @@ fn esc_offers_code_actions_and_they_compose() {
 }
 
 #[test]
+fn reader_focuses_on_a_function_and_shows_where_you_are() {
+    let (_dir, mut p) =
+        open_rust("impl Foo {\n    fn bar() {\n        x();\n    }\n}\n\nfn other() {}\n");
+    p.wait_for("fn other", TIMEOUT);
+    for _ in 0..2 {
+        p.send_keys(&["Down"]);
+    }
+    p.wait_for("Ln 3", TIMEOUT);
+    p.send_keys(&["Esc"]);
+    p.wait_for("reader mode", TIMEOUT);
+    p.send_str("v");
+    p.wait_for("impl Foo › fn bar", TIMEOUT);
+    let col = col_of(&p, 6, "other");
+    assert_eq!(
+        p.fg(6, col),
+        Some(vt100::Color::Idx(240)),
+        "other functions are dimmed, syntax colors included"
+    );
+    p.send_str("n");
+    p.wait_for("fn other", TIMEOUT);
+    p.send_keys(&["Esc"]);
+    p.wait_gone(" READER ", TIMEOUT);
+    p.send_keys(&["C-q"]);
+    p.wait_exit(TIMEOUT);
+}
+
+#[test]
 fn t13_rust_keyword_has_non_default_foreground() {
     let dir = tempfile::tempdir().unwrap();
     let state = dir.path().join("state");

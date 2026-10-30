@@ -190,6 +190,19 @@ History is stored under `$XDG_STATE_HOME/kyte/history/` (default `~/.local/state
 
 A million typed characters take about 34 MB, and a pasted block adds its own size. **It keeps everything you type, in plain text, with no limit on size.** That includes a password you typed and then deleted. **Delete file history** in the palette removes one file's log, and `--no-history` keeps none for a session. Use `--no-history` for files holding secrets.
 
+### Reader mode
+
+Esc `v` (or **Reader mode** in the palette) is for reading code rather than changing it. The text is read-only, and everything outside the current section is dimmed. A section is the function under the cursor, with its doc comments and attributes, in Rust, Python and Bash; elsewhere it's the paragraph. In code, the status bar shows where you are, such as `impl Foo › fn bar`.
+
+| Key | Action |
+| --- | --- |
+| Up, Down, PageUp, PageDown | Read on; the focus follows the cursor |
+| `n`, `p` | Next or previous section |
+| `?` | Show or hide these keys |
+| Esc, `q` | Back to editing, with the cursor where you stopped |
+
+The keys show in a floating box when reader mode opens, and hide at your first key so they don't cover what you're reading. Code over 512 KiB reads by paragraph, because parsing it on every key would lag.
+
 ### Search
 
 Ctrl-F (or Esc `/`) opens `Search:` on the message line, starting from the selected text if there is any. Kyte jumps to the first match as you type and highlights every match on screen. Enter, Down or Ctrl-F jumps to the next match and Up to the previous one, wrapping around. Esc closes the prompt and leaves the cursor on the match, or puts it back where it was if nothing matched.
@@ -263,7 +276,7 @@ These Docker files have not been run yet, because the build machine had no Docke
 - Files over 512 KiB aren't syntax highlighted, because each keystroke re-parses the file. Typing near that size takes up to about 55 ms per key.
 - Search takes under about 30 ms per key on a 38 MB ASCII file. On a file that size with non-ASCII text, ignoring case takes about 240 ms per key.
 - A very long single line costs more per keystroke, depending on what's in it. At the end of a 5 MB line on the build machine, plain ASCII takes about 8 ms, a line full of tabs about 45 ms, and CJK text about 170 ms.
-- Not in this version: reader mode, file tree, light and high-contrast themes, mouse, multiple buffers or splits, LSP, plugins, a config file, soft wrap, CRLF conversion, non-UTF-8 files, RPM/COPR packaging, and use as the default `$EDITOR`.
+- Not in this version: file tree, light and high-contrast themes, mouse, multiple buffers or splits, LSP, plugins, a config file, soft wrap, CRLF conversion, non-UTF-8 files, RPM/COPR packaging, and use as the default `$EDITOR`.
 
 ## Documentation
 

@@ -14,6 +14,7 @@ pub mod history;
 pub mod input;
 pub mod ops;
 pub mod palette;
+pub mod reader;
 pub mod search;
 pub mod session;
 pub mod swap;

@@ -17,6 +17,7 @@ pub struct Theme {
     pub menu_key: Style,
     pub selected: Style,
     pub selection: Style,
+    pub reader_dim: Style,
     pub search_match: Style,
     pub search_current: Style,
     pub modal: Style,
@@ -52,6 +53,7 @@ pub const DARK: Theme = Theme {
         .bg(ix(110))
         .add_modifier(Modifier::BOLD),
     selection: Style::new().bg(ix(60)),
+    reader_dim: Style::new().fg(ix(240)),
     search_match: Style::new().fg(ix(235)).bg(ix(143)),
     search_current: Style::new()
         .fg(ix(235))
