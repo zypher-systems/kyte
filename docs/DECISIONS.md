@@ -12,6 +12,12 @@ These replace the matching parts of `ARCHITECTURE`. `docs/ROADMAP.md` holds the 
 - License: MIT. This settles section 16 and the section 4 note.
 - Kyte isn't tied to any one OS. It's meant to be open source for everyone.
 
+## CI
+
+- That image has no Node, which `actions/checkout` needs, so the job checks out with git.
+- The first runs found test races that never showed on the build machine, because the runner is slower: a popup's title could arrive before its rows. Tests now wait for what they check instead of reading the screen once.
+- The container runs as root, so the tests that need a read-only directory or file skip there. They run only on a normal user's machine, so run `cargo test` locally too.
+
 ## Reviewing outside changes
 
 - Kyte never interrupts for an outside change. A popup could take the next keystroke as an answer while someone is typing, so a status marker reports it, and Esc `c` starts the review. Ctrl-S's overwrite question also offers it. A clean buffer doesn't reload by itself either, for the same reason, and because the user should see what changed.
