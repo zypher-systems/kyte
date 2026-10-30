@@ -35,7 +35,7 @@ Fixed every known way the build could lose or damage work. Each fix has a regres
 - [x] Editing a very long single line stays responsive.
 - [x] Skip or adapt the read-only-directory tests when running as root, so they can pass in CI containers.
 
-## Next: 0.2.0, daily driver
+## Released: 0.2.0, daily driver
 
 - [x] Open a file from inside the editor
 - [x] Selection, cut, copy and paste, including the system clipboard over OSC 52
@@ -45,7 +45,11 @@ Fixed every known way the build could lose or damage work. Each fix has a regres
 - [x] Ctrl-K universal palette
 - [x] Replace the Nano-derived aliases: Ctrl-X, Ctrl-C and Ctrl-V for cut, copy and paste, and Ctrl-O to open a file.
 
-Before moving on, use Kyte for real work on actual terminals with the kitty keyboard protocol, and over SSH and tmux. So far that path has only been emulated.
+## Next: looks
+
+Kyte works, and its appearance is the next thing to improve. The details are still to be decided.
+
+Keep using Kyte for real work along the way, on actual terminals with the kitty keyboard protocol, and over SSH and tmux.
 
 ## Later
 
