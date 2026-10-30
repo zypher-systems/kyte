@@ -1,0 +1,30 @@
+  1 │ Kyte: comfort first, power one key away. write the intro
+  2 │ Kyte starts in plain insert mode, like Nano.
+  3 │ Arrows move, typing types, Ctrl-S saves.
+  4 │   w deletes a word, d a line, k to end of line.
+  5 │ Press Esc twice for the command palette.
+  6 │ fn bracket_demo(x: [u8; 4]) -> u8 {
+  7 │     x[0] + (x[1] * x[2])
+  8 │ }
+  9 │ Unsaved work is written to a swap file,
+ 10 │ so a crash never loses your edits.
+ 11 │ Try the palette: Go to line, Find, Save.
+ 12 │
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+ INSERT │ demo.txt [+] │ Ln 4, Col 42
+

@@ -1,0 +1,30 @@
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~                      ┌ Recover unsaved changes ───────────────────────────┐
+~                      │ Kyte found unsaved changes for:                    │
+~                      │   /tmp/.tmpKLQaSY/demo.txt                         │
+~                      │ Swap file written 2026-10-30 05:45:47 UTC          │
+~                      │                                                    │
+~                      │ r  Recover the unsaved changes                     │
+~                      │ d  Discard them and open the file as it is on disk │
+~                      │ q  Quit without changing anything (also Esc)       │
+~                      └────────────────────────────────────────────────────┘
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+ RECOVER │ demo.txt │ Ln 1, Col 1
+
