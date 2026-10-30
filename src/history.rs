@@ -12,12 +12,14 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ropey::Rope;
 
 use crate::buffer::Edit;
+use crate::diff::diff_lines;
 use crate::fileio::{self, DiskState};
+use crate::review;
 use crate::swap::{frame, name_for, record_at};
 
 const MAGIC: &[u8; 8] = b"KYTEHST1";
@@ -35,6 +37,13 @@ const MARK_CLOSED: u8 = 2;
 const SNAP_CHUNK: usize = 1 << 20;
 /// A rope is kept for every this many versions, so any one is a short replay away.
 const CHECKPOINT_EVERY: usize = 256;
+/// A log over this size is compacted, down to `COMPACT_TO`.
+pub const LOG_LIMIT: u64 = 100_000_000;
+/// Compacting stops short of the limit, so it doesn't run again straight away.
+const COMPACT_TO: u64 = 75_000_000;
+/// How long compacting may look for savings. What it hasn't reached by then
+/// stays as it was, so the worst case is a short pause, not a long one.
+const COMPACT_BUDGET: Duration = Duration::from_secs(3);
 /// Edits further apart than this count as separate bursts of work.
 const BURST_GAP_MS: u64 = 3_000;
 
@@ -137,12 +146,16 @@ fn snapshot_bytes(text: &Rope, kind: SnapshotKind, time: u64) -> Vec<u8> {
     out
 }
 
-fn edit_bytes(e: &Edit, time: u64) -> Vec<u8> {
+fn edit_record(at: usize, del: usize, ins: &str, time: u64) -> Vec<u8> {
     let mut p = payload_head(KIND_EDIT, time);
-    p.extend_from_slice(&(e.at as u64).to_le_bytes());
-    p.extend_from_slice(&(e.removed.chars().count() as u64).to_le_bytes());
-    p.extend_from_slice(e.inserted.as_bytes());
+    p.extend_from_slice(&(at as u64).to_le_bytes());
+    p.extend_from_slice(&(del as u64).to_le_bytes());
+    p.extend_from_slice(ins.as_bytes());
     frame(&p)
+}
+
+fn edit_bytes(e: &Edit, time: u64) -> Vec<u8> {
+    edit_record(e.at, e.removed.chars().count(), &e.inserted, time)
 }
 
 fn mark_bytes(mark: u8, state: DiskState, time: u64) -> Vec<u8> {
@@ -362,14 +375,19 @@ impl FileHistory {
         self.write(&mark_bytes(MARK_SAVED, DiskState::of_rope(text), now_ms()))
     }
 
-    /// Notes where the log ends, so the next session can tell. A session that
-    /// edited nothing has nothing to note.
+    /// Notes where the log ends, so the next session can tell, and trims a
+    /// log that's over the limit. That happens here because a pause at the end
+    /// of a session goes unnoticed, and in the middle of typing it wouldn't. A
+    /// session that edited nothing has nothing to do.
     pub fn close(&mut self, text: &Rope) -> io::Result<()> {
         if self.file.is_none() {
             return Ok(());
         }
-        self.write(&mark_bytes(MARK_CLOSED, DiskState::of_rope(text), now_ms()))?;
-        self.fsync_if_pending()
+        let state = DiskState::of_rope(text);
+        self.write(&mark_bytes(MARK_CLOSED, state, now_ms()))?;
+        self.fsync_if_pending()?;
+        self.file = None;
+        compact(&self.path, LOG_LIMIT, COMPACT_TO)
     }
 
     pub fn fsync_if_pending(&mut self) -> io::Result<()> {
@@ -388,6 +406,7 @@ impl FileHistory {
         self.synced = false;
         self.pending_fsync = false;
         self.base = text.clone();
+        let _ = fs::remove_file(tried_path(&self.path));
         match fs::remove_file(&self.path) {
             Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
             _ => Ok(()),
@@ -401,6 +420,156 @@ impl FileHistory {
     pub fn path(&self) -> &Path {
         &self.path
     }
+}
+
+/// The edits that turn `old` into `new`, one per changed region and last
+/// first, so each position holds when it's applied. They're found by lines
+/// because changes can be far apart: one edit spanning them all would hold
+/// most of the file.
+fn edits_between(old: &str, new: &str) -> Vec<(usize, usize, String)> {
+    let (a, b) = (review::lines(old), review::lines(new));
+    let mut starts = Vec::with_capacity(a.len() + 1);
+    let mut at = 0;
+    starts.push(0);
+    for line in &a {
+        at += line.chars().count();
+        starts.push(at);
+    }
+    diff_lines(&a, &b)
+        .iter()
+        .rev()
+        .map(|h| {
+            let del = starts[h.a.end] - starts[h.a.start];
+            (starts[h.a.start], del, b[h.b.clone()].concat())
+        })
+        .collect()
+}
+
+/// Where a log's size is noted when compacting couldn't get it under the limit.
+fn tried_path(path: &Path) -> PathBuf {
+    path.with_extension("compact-tried")
+}
+
+/// Whether the log has grown enough since a failed try to be worth another.
+fn worth_trying(path: &Path, len: u64) -> bool {
+    let tried = fs::read_to_string(tried_path(path))
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok());
+    tried.is_none_or(|t| len > t + t / 4)
+}
+
+/// Shrinks a log that's over `limit` down towards `target`. The oldest edits
+/// go first: the edits between two kept versions become one per changed
+/// region, unless the originals are smaller. A saved version or an outside
+/// version is always kept, so the log may stay over the limit if those alone
+/// are that large. The new log replaces the old one in one rename, so a crash
+/// leaves one or the other, whole, and a result that isn't smaller is dropped.
+pub fn compact(path: &Path, limit: u64, target: u64) -> io::Result<()> {
+    let len = match fs::metadata(path) {
+        Ok(m) if m.len() > limit && worth_trying(path, m.len()) => m.len(),
+        _ => return Ok(()),
+    };
+    let t = Timeline::load(path)?;
+    if t.len() < 2 {
+        return Ok(());
+    }
+    let deadline = Instant::now() + COMPACT_BUDGET;
+    // Newest first, find where the budget for keeping everything runs out.
+    let size = |v: &Version| -> usize {
+        match &v.change {
+            Change::Edit { ins, .. } => ins.len() + 40,
+            Change::Snapshot { text, .. } => text.len_bytes() + 64,
+        }
+    };
+    let mut budget = target as usize;
+    let mut keep_from = t.len();
+    for i in (0..t.len()).rev() {
+        let s = size(t.version(i));
+        if s > budget {
+            break;
+        }
+        budget -= s;
+        keep_from = i;
+    }
+    let kept_old = |v: &Version| {
+        v.saved
+            || matches!(
+                v.change,
+                Change::Snapshot {
+                    kind: SnapshotKind::Outside,
+                    ..
+                }
+            )
+    };
+    let version_bytes = |v: &Version| -> Vec<u8> {
+        let mut out = match &v.change {
+            Change::Edit { at, del, ins } => edit_record(*at, *del, ins, v.time_ms),
+            Change::Snapshot { kind, text } => snapshot_bytes(text, *kind, v.time_ms),
+        };
+        if v.saved {
+            // Only the mark at the very end needs its real state.
+            out.extend_from_slice(&mark_bytes(MARK_SAVED, DiskState::new(0, 0), v.time_ms));
+        }
+        out
+    };
+    let mut out = MAGIC.to_vec();
+    out.extend_from_slice(&version_bytes(t.version(0)));
+    // The oldest part: only the versions to keep.
+    let mut run_start = 1;
+    for i in 1..keep_from {
+        let v = t.version(i);
+        if !kept_old(v) && i + 1 != keep_from {
+            continue;
+        }
+        let run = run_start..i + 1;
+        let original: Vec<u8> = run.flat_map(|j| version_bytes(t.version(j))).collect();
+        let mut short = Vec::new();
+        let in_time = Instant::now() < deadline;
+        if in_time {
+            let old = t.text_at(run_start - 1).to_string();
+            let new = t.text_at(i).to_string();
+            for (at, del, ins) in edits_between(&old, &new) {
+                short.extend_from_slice(&edit_record(at, del, &ins, v.time_ms));
+            }
+        }
+        if in_time && short.len() < original.len() {
+            out.extend_from_slice(&short);
+            if v.saved {
+                out.extend_from_slice(&mark_bytes(MARK_SAVED, DiskState::new(0, 0), v.time_ms));
+            }
+        } else {
+            out.extend_from_slice(&original);
+        }
+        run_start = i + 1;
+    }
+    // The newest part: every edit, as it was.
+    for i in keep_from.max(1)..t.len() {
+        out.extend_from_slice(&version_bytes(t.version(i)));
+    }
+    // Ends on a mark, so the next session knows what the log ends at.
+    let last = t.len() - 1;
+    let end = DiskState::of_rope(&t.text_at(last));
+    out.extend_from_slice(&mark_bytes(MARK_CLOSED, end, t.version(last).time_ms));
+    if (out.len() as u64) < len {
+        let tmp = path.with_extension("compacting");
+        let mut f = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp)?;
+        f.write_all(&out)?;
+        f.sync_all()?;
+        drop(f);
+        fs::rename(&tmp, path)?;
+    }
+    let now = len.min(out.len() as u64);
+    if now > limit {
+        fs::write(tried_path(path), now.to_string())?;
+    } else {
+        let _ = fs::remove_file(tried_path(path));
+    }
+    Ok(())
 }
 
 /// What made one version.

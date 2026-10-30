@@ -189,7 +189,7 @@ Kyte keeps every edit to a file, across sessions, including edits you later undo
 
 History is stored under `$XDG_STATE_HOME/kyte/history/` (default `~/.local/state/kyte/history/`), one log per file, with mode 0600 in a 0700 directory. It's kept by path, so a renamed file starts a new history; Save as does too. A buffer with no file name has no history until it's saved. Nothing is written until your first edit, so reading a file leaves no trace.
 
-A million typed characters take about 34 MB, and a pasted block adds its own size. **It keeps everything you type, in plain text, with no limit on size.** That includes a password you typed and then deleted. **Delete file history** in the palette removes one file's log, and `--no-history` keeps none for a session. Use `--no-history` for files holding secrets.
+A million typed characters take about 34 MB, and a pasted block adds its own size. When you close a file whose log has passed 100 MB, Kyte trims it towards 75 MB, oldest first: the single edits between old saves collapse into one step per changed area, and recent edits stay as they were. Every saved version and every version a save overwrote is kept, so a log can stay over the limit if those alone are that large. **It keeps what you type in plain text**, and trimming removes old keystrokes from the log but isn't a way to erase something. That includes a password you typed and then deleted. **Delete file history** in the palette removes one file's log, and `--no-history` keeps none for a session. Use `--no-history` for files holding secrets.
 
 ### Reader mode
 

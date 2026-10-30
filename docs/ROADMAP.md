@@ -61,7 +61,7 @@ Kyte's pitch is an editor you can't lose work in and don't have to learn.
 
 ## Next
 
-- [ ] Retention for file history, so logs can't grow without limit
+- [x] Retention for file history, so logs can't grow without limit
 - [ ] Re-record the demo, which still shows the footer legend (needs `agg`)
 
 Looks are still open too, with details to be decided. Keep using Kyte for real work along the way, on actual terminals with the kitty keyboard protocol, and over SSH and tmux.

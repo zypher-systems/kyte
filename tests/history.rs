@@ -5,7 +5,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use kyte::buffer::Edit;
-use kyte::history::{log_path_in, Change, FileHistory, SnapshotKind, Timeline};
+use kyte::history::{compact, log_path_in, Change, FileHistory, SnapshotKind, Timeline};
 use ropey::Rope;
 
 fn r(s: &str) -> Rope {
@@ -287,6 +287,213 @@ fn deleting_the_history_starts_it_again() {
     assert_eq!(text(&tl, 0), "ab");
     h.delete(&r("abc")).unwrap();
     h.delete(&r("abc")).unwrap();
+}
+
+/// A log of sessions: `saves` saved versions, with `typing` edits between.
+fn long_log(t: &T, saves: usize, typing: usize) -> Vec<String> {
+    let mut text = String::from("start\n");
+    let mut h = t.writer(&text);
+    let mut saved = Vec::new();
+    for s in 0..saves {
+        for i in 0..typing {
+            let c = char::from(b'a' + (i % 26) as u8).to_string();
+            h.append(&[ins(text.chars().count(), &c)]).unwrap();
+            text.push_str(&c);
+        }
+        h.mark_saved(&r(&text)).unwrap();
+        saved.push(text.clone());
+        let _ = s;
+    }
+    h.close(&r(&text)).unwrap();
+    saved
+}
+
+fn saved_texts(tl: &Timeline) -> Vec<String> {
+    (0..tl.len())
+        .filter(|i| tl.version(*i).saved)
+        .map(|i| text(tl, i))
+        .collect()
+}
+
+#[test]
+fn a_log_under_the_limit_is_left_alone() {
+    let t = setup();
+    long_log(&t, 2, 50);
+    let before = fs::read(t.log()).unwrap();
+    compact(&t.log(), 1 << 30, 1 << 29).unwrap();
+    assert_eq!(fs::read(t.log()).unwrap(), before);
+}
+
+#[test]
+fn compacting_shrinks_the_log_and_keeps_every_saved_version() {
+    let t = setup();
+    let saved = long_log(&t, 10, 400);
+    let before_len = fs::metadata(t.log()).unwrap().len();
+    let before = t.timeline();
+    assert!(before.len() > 4_000);
+    compact(&t.log(), 1_000, 4_000).unwrap();
+    let after = t.timeline();
+    assert!(fs::metadata(t.log()).unwrap().len() < before_len / 4);
+    assert!(after.len() < before.len() / 2, "{}", after.len());
+    assert_eq!(saved_texts(&after), saved, "no saved version is lost");
+    assert_eq!(
+        text(&after, after.len() - 1),
+        text(&before, before.len() - 1),
+        "the newest version is untouched"
+    );
+}
+
+#[test]
+fn compacting_keeps_recent_edits_and_drops_old_ones_first() {
+    let t = setup();
+    long_log(&t, 2, 2_000);
+    let before = t.timeline();
+    compact(&t.log(), 1_000, 20_000).unwrap();
+    let after = t.timeline();
+    let (n, m) = (before.len(), after.len());
+    assert!(m < n, "something was dropped");
+    for back in 1..200 {
+        assert_eq!(
+            text(&before, n - back),
+            text(&after, m - back),
+            "{back} back"
+        );
+    }
+}
+
+#[test]
+fn compacting_keeps_timestamps() {
+    let t = setup();
+    let mut h = t.writer("");
+    h.append_at(&[ins(0, "a")], 1_000).unwrap();
+    h.mark_saved(&r("a")).unwrap();
+    for i in 1..300 {
+        h.append_at(&[ins(i, "b")], 2_000).unwrap();
+    }
+    let saved_time = t.timeline().version(1).time_ms;
+    drop(h);
+    compact(&t.log(), 10, 2_000).unwrap();
+    let after = t.timeline();
+    assert_eq!(after.version(1).time_ms, saved_time);
+    assert!(after.version(1).saved);
+}
+
+#[test]
+fn outside_versions_survive_compacting() {
+    let t = setup();
+    let mut h = t.writer("v1");
+    for i in 0..500 {
+        h.append(&[ins(2 + i, "x")]).unwrap();
+    }
+    let mine = format!("v1{}", "x".repeat(500));
+    h.note_outside(&r("theirs"), &r(&mine)).unwrap();
+    for i in 0..500 {
+        h.append(&[ins(502 + i, "y")]).unwrap();
+    }
+    drop(h);
+    compact(&t.log(), 10, 2_000).unwrap();
+    let tl = t.timeline();
+    assert!((0..tl.len()).any(|i| text(&tl, i) == "theirs"));
+}
+
+#[test]
+fn a_new_session_carries_on_after_compacting_without_another_copy() {
+    let t = setup();
+    let saved = long_log(&t, 3, 300);
+    let last = saved.last().unwrap().clone();
+    compact(&t.log(), 100, 1_000).unwrap();
+    let size = fs::metadata(t.log()).unwrap().len();
+    let mut h = t.writer(&last);
+    h.append(&[ins(0, "!")]).unwrap();
+    assert!(
+        fs::metadata(t.log()).unwrap().len() - size < 100,
+        "no snapshot"
+    );
+    let tl = t.timeline();
+    assert_eq!(text(&tl, tl.len() - 1), format!("!{last}"));
+}
+
+#[test]
+fn compacting_leaves_no_stray_file_and_stays_private() {
+    let t = setup();
+    long_log(&t, 2, 300);
+    compact(&t.log(), 100, 500).unwrap();
+    let stray = fs::read_dir(&t.dir)
+        .unwrap()
+        .flatten()
+        .any(|e| e.file_name().to_string_lossy().ends_with(".compacting"));
+    assert!(!stray);
+    assert_eq!(
+        fs::metadata(t.log()).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+}
+
+#[test]
+fn a_saved_version_too_large_for_the_limit_is_still_kept() {
+    let t = setup();
+    let big = "x".repeat(50_000);
+    let mut h = t.writer("");
+    h.append(&[ins(0, &big)]).unwrap();
+    h.mark_saved(&r(&big)).unwrap();
+    for i in 0..200 {
+        h.append(&[ins(50_000 + i, "y")]).unwrap();
+    }
+    drop(h);
+    compact(&t.log(), 100, 200).unwrap();
+    assert!(saved_texts(&t.timeline()).contains(&big));
+}
+
+/// A log whose edits are scattered across a file with many saves, the case
+/// where collapsing can't help much.
+fn scattered_log(t: &T, rounds: usize) -> Vec<String> {
+    let base = "line of text\n".repeat(400);
+    let mut rope = r(&base);
+    let mut h = t.writer(&base);
+    let mut saved = Vec::new();
+    for round in 0..rounds {
+        for i in 0..40 {
+            let at = (round * 41 + i) * 7919 % rope.len_chars();
+            rope.insert(at, "x");
+            h.append(&[ins(at, "x")]).unwrap();
+        }
+        h.mark_saved(&rope).unwrap();
+        saved.push(rope.to_string());
+    }
+    h.close(&rope).unwrap();
+    saved
+}
+
+#[test]
+fn scattered_edits_never_make_a_log_bigger() {
+    let t = setup();
+    let saved = scattered_log(&t, 30);
+    let before = fs::metadata(t.log()).unwrap().len();
+    compact(&t.log(), 100, 200).unwrap();
+    assert!(fs::metadata(t.log()).unwrap().len() <= before);
+    assert_eq!(saved_texts(&t.timeline()), saved);
+}
+
+#[test]
+fn a_log_that_cant_shrink_isnt_retried_until_it_grows() {
+    let t = setup();
+    long_log(&t, 400, 1);
+    compact(&t.log(), 100, 200).unwrap();
+    let tried = t.log().with_extension("compact-tried");
+    assert!(tried.exists(), "still over the limit, so it's noted");
+    let size = fs::metadata(t.log()).unwrap().len();
+    fs::write(&tried, size.to_string()).unwrap();
+    let before = fs::read(t.log()).unwrap();
+    compact(&t.log(), 100, 200).unwrap();
+    assert_eq!(fs::read(t.log()).unwrap(), before, "not worth another try");
+    let mut h = t.writer(saved_last(&t).as_str());
+    h.delete(&r("")).unwrap();
+    assert!(!tried.exists(), "deleting the history clears the note");
+}
+
+fn saved_last(t: &T) -> String {
+    let tl = t.timeline();
+    text(&tl, tl.len() - 1)
 }
 
 #[test]

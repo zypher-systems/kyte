@@ -12,6 +12,17 @@ These replace the matching parts of `ARCHITECTURE`. `docs/ROADMAP.md` holds the 
 - License: MIT. This settles section 16 and the section 4 note.
 - Kyte isn't tied to any one OS. It's meant to be open source for everyone.
 
+## History retention
+
+- A log over 100 MB is compacted to about 75 MB, by decision. That's far past what typing reaches, about 3 million characters, so in practice it catches repeated large pastes.
+- Compacting keeps saved versions and outside versions always, and the newest edits as they were, as far as the budget goes. Older runs of edits between kept versions become one edit per changed region, found with the line diff. This honours "keep every edit" for recent work and every version the user ever saved, without file copies of each.
+- A first version used one edit spanning each run. On a real 112 MB log with scattered edits it grew the log to 525 MB, because that edit holds most of the file every time. Small test logs couldn't show this. So a run keeps its original edits when they're smaller, a result that isn't smaller is thrown away, and `tests/history.rs` covers scattered edits.
+- Measured on 112 MB logs with 1,000 saves: edits in runs, like typing, shrink to 71 MB in about 1.2 seconds with every saved version identical. Edits scattered evenly across the file can't shrink, so that log stays as it is, after at most about 3 seconds of looking.
+- It can leave a log over the limit if the kept versions alone are that large, because the rule is to keep them. A kept version loses its "outside" label in the timeline, since it's stored as an edit.
+- It runs when a file is closed, because a pause there goes unnoticed and one at the first keystroke wouldn't, and it stops looking for savings after 3 seconds. So a long session can run past the limit until it ends. Nothing else is paid unless a log is over the limit.
+- A log that can't get under the limit gets a small `.compact-tried` note with its size, and isn't tried again until it has grown by a quarter, so a hopeless log doesn't pause every exit.
+- The rewrite goes to a temporary file and renames over the log, so a crash leaves one or the other, whole.
+
 ## More languages
 
 - Added JavaScript, TypeScript, TSX, JSON, C, C++, Go, HTML, CSS, TOML, YAML and Markdown, which replaces the "three languages" default from the design. Every grammar is a default dependency, because a plain-looking file is the first thing a new user sees.
@@ -70,7 +81,7 @@ These replace the matching parts of `ARCHITECTURE`. `docs/ROADMAP.md` holds the 
 
 ## File history
 
-- Every edit is kept, by decision: not only saves and crashes. So a file's log grows with every keystroke, and nothing prunes it yet. Measured with a million single-character edits on a 30 KB file: the log is 34 MB (34 bytes per edit), the timeline opens in 105 ms, any version shows in about 8 µs, and a session's first edit takes 31 ms, because it reads the log. Later edits take under a microsecond.
+- Every edit is kept, by decision: not only saves and crashes. So a file's log grows with every keystroke, until retention trims the oldest (below). Measured with a million single-character edits on a 30 KB file: the log is 34 MB (34 bytes per edit), the timeline opens in 105 ms, any version shows in about 8 µs, and a session's first edit takes 31 ms, because it reads the log. Later edits take under a microsecond.
 - The log is separate from the swap. The swap is short-lived and protects the session; the log is permanent. Keeping them apart leaves tested crash recovery alone, at the cost of writing each edit twice.
 - A log is written only from the first edit on, so opening a file costs nothing and leaves nothing behind. The first edit reads the log, drops a torn tail, and stores the current text only if the log doesn't already end there. So a file changed between sessions becomes a version of its own, and a normal reopen adds just the edit.
 - The log's end state comes from its last snapshot or mark. After a crash the log ends in edits, so the state isn't known and the next session stores a snapshot. That's one file copy, only after a crash.
