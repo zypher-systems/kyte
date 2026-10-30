@@ -92,6 +92,7 @@ Environment variables: `KYTE_STATE_DIR` (where swap files go; overrides the defa
 | Ctrl-R | Replace |
 | Esc, Ctrl-Space | Open the operator layer |
 | Alt-*key* | Same as Esc then *key* |
+| Ctrl-K | Open the universal palette |
 | Ctrl-P | Open the command palette |
 
 Pasted text (bracketed paste) is inserted as one block and undone with a single Ctrl-Z.
@@ -138,6 +139,18 @@ Kyte works out whether a file indents with tabs or spaces, and how many, from it
 **Open file** (Ctrl-O) asks for a path, starting in the current file's directory. Tab completes it. A path that doesn't exist yet opens as a new file. Kyte holds one file at a time, so opening another replaces the current one, and if you have unsaved changes it asks first: `y` saves them, `n` discards them, Esc cancels. If the new file left a crashed session behind, Kyte offers to recover it; quitting that offer closes Kyte.
 
 **Go to line** asks for a 1-based line number. Numbers past the end go to the last line, and anything that is not a number shows an error. **Show key help** shows the key table; Esc closes it.
+
+### Universal palette
+
+Ctrl-K opens one box for getting anywhere. Type to search commands and files together, or start with a marker:
+
+| You type | Kyte offers |
+| --- | --- |
+| Part of a command or file name | Matching commands and files. A command wins a tie |
+| `:42` | Go to line 42 |
+| `/text` | Search for `text` |
+
+Files are listed from the directory you started Kyte in, nearest first. Hidden files, `target` and `node_modules` are left out, and the list stops at 20,000 files or 100 ms, so a very large directory shows only part of its tree. Choosing a file works like Ctrl-O, including the question about unsaved changes.
 
 ### Search
 
@@ -211,7 +224,7 @@ These Docker files have not been run yet, because the build machine had no Docke
 - Linux only (the swap lock checks `/proc`).
 - Search takes under about 30 ms per key on a 38 MB ASCII file. On a file that size with non-ASCII text, ignoring case takes about 240 ms per key.
 - A very long single line costs more per keystroke, depending on what's in it. At the end of a 5 MB line on the build machine, plain ASCII takes about 8 ms, a line full of tabs about 45 ms, and CJK text about 170 ms.
-- Not in this version: reader mode, file tree, the Ctrl-K universal palette, light and high-contrast themes, undo history that survives a restart, mouse, multiple buffers or splits, LSP, plugins, a config file, soft wrap, CRLF conversion, non-UTF-8 files, RPM/COPR packaging, and use as the default `$EDITOR`.
+- Not in this version: reader mode, file tree, light and high-contrast themes, undo history that survives a restart, mouse, multiple buffers or splits, LSP, plugins, a config file, soft wrap, CRLF conversion, non-UTF-8 files, RPM/COPR packaging, and use as the default `$EDITOR`.
 
 ## Documentation
 

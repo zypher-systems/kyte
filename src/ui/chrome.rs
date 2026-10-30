@@ -186,29 +186,22 @@ pub fn palette(app: &App, text_area: Rect, cells: &mut Cells, theme: &Theme) -> 
     let rows = state.results.len().clamp(1, VISIBLE_ROWS) as u16;
     let w = 54.min(text_area.width.saturating_sub(2)).max(10);
     let area = centered(text_area, w, rows + 3);
-    let inner = modal_box(
-        area,
-        cells,
-        "Command palette",
-        theme.palette,
-        theme.palette_border,
-    );
+    let title = if state.is_universal() {
+        "Commands, files, :line, /text"
+    } else {
+        "Command palette"
+    };
+    let inner = modal_box(area, cells, title, theme.palette, theme.palette_border);
     let input = format!("> {}", state.query);
     let iw = inner.width as usize;
     cells.set_stringn(inner.x, inner.y, &input, iw, theme.palette);
     if state.results.is_empty() {
         if inner.height > 1 {
-            cells.set_stringn(
-                inner.x,
-                inner.y + 1,
-                "  No matching command",
-                iw,
-                theme.palette,
-            );
+            cells.set_stringn(inner.x, inner.y + 1, "  No match", iw, theme.palette);
         }
     } else {
         let off = state.scroll_offset();
-        for (i, cmd) in state
+        for (i, entry) in state
             .results
             .iter()
             .enumerate()
@@ -222,8 +215,9 @@ pub fn palette(app: &App, text_area: Rect, cells: &mut Cells, theme: &Theme) -> 
             let sel = i == state.selected;
             let style = if sel { theme.selected } else { theme.palette };
             let marker = if sel { "▸ " } else { "  " };
-            let label = format!("{marker}{}", cmd.label());
-            let hint = cmd.hint();
+            let hint = entry.hint();
+            let label = fit_label(&entry.label(), iw.saturating_sub(hint.len() + 4));
+            let label = format!("{marker}{label}");
             let pad = iw.saturating_sub(label.chars().count() + hint.len() + 1);
             let line = format!("{label}{}{hint} ", " ".repeat(pad));
             cells.set_style(Rect::new(inner.x, y, inner.width, 1), style);
@@ -232,6 +226,17 @@ pub fn palette(app: &App, text_area: Rect, cells: &mut Cells, theme: &Theme) -> 
     }
     let cx = inner.x + (input.chars().count() as u16).min(inner.width.saturating_sub(1));
     Some((cx, inner.y))
+}
+
+/// `text` within `width` cells. A long path keeps its end, where the file
+/// name is.
+fn fit_label(text: &str, width: usize) -> String {
+    let n = text.chars().count();
+    if n <= width || width < 2 {
+        return text.to_string();
+    }
+    let tail: String = text.chars().skip(n + 1 - width).collect();
+    format!("…{tail}")
 }
 
 /// The "Show key help" modal.

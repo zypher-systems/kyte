@@ -12,6 +12,15 @@ These replace the matching parts of `ARCHITECTURE`. `docs/ROADMAP.md` holds the 
 - License: MIT. This settles section 16 and the section 4 note.
 - Kyte isn't tied to any one OS. It's meant to be open source for everyone.
 
+## 0.2.0 universal palette
+
+- Ctrl-K searches commands and files together, with `:N` for a line and `/text` for search. The concept page wasn't available when this was built, so this is the working definition; change it here if the concept says otherwise.
+- Esc Esc and Ctrl-P stay commands-only. That keeps a short, predictable list, and it keeps what the Esc layer's legend promises.
+- A command wins a tie against a file, because the command list is small and it's the more common aim.
+- The scan walks the working directory breadth-first, so the nearest files survive the limits of 20,000 files and 100 ms, and it blocks the key press for no longer than that. It runs on every Ctrl-K, so new files show up. Symlinks aren't followed, since one could point back up the tree. `.gitignore` isn't read; hidden files, `target` and `node_modules` are left out by name.
+- The file list sits behind an `Arc`, because `App` clones the mode on each key.
+- The fuzzy scorer now counts any non-alphanumeric character as a word start, not just a space, so `/`, `-` and `.` help file names.
+
 ## 0.2.0 indent
 
 - Tab replaces the "Tab inserts a real tab" rule of the MVP where the file uses spaces. The indent is read from the file, using the first 10,000 lines: the majority of indented lines picks tabs or spaces, and the most common step between neighbouring lines picks the width. Steps of one space are skipped, because they're usually comment alignment. With no signal, spaces default to 4. A file with no indent at all uses tabs, as before.

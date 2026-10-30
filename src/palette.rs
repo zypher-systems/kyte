@@ -1,9 +1,13 @@
 //! Command palette: a small subsequence scorer and the palette state.
 
+use std::sync::Arc;
+
 use crate::command::{Command, REGISTRY};
 
 /// Rows of results the popup shows at once.
 pub const VISIBLE_ROWS: usize = 8;
+/// Results kept for the universal palette.
+const MAX_RESULTS: usize = 200;
 
 /// Case-insensitive subsequence score of `query` against `candidate`.
 /// Higher is better; `None` when `query` is not a subsequence. Matches at the
@@ -20,7 +24,7 @@ pub fn score(query: &str, candidate: &str) -> Option<i64> {
         total += 1;
         if pos == 0 {
             total += 10;
-        } else if c[pos - 1] == ' ' {
+        } else if !c[pos - 1].is_alphanumeric() {
             total += 3;
         }
         if prev.is_some_and(|p| p + 1 == pos) {
@@ -43,12 +47,83 @@ pub fn filter(query: &str) -> Vec<Command> {
     scored.into_iter().map(|(_, _, c)| c).collect()
 }
 
+/// One row of the palette.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Entry {
+    Command(Command),
+    /// A file, relative to the working directory.
+    File(String),
+    /// `:N` in the universal palette.
+    Line(usize),
+    /// `/text` in the universal palette.
+    Find(String),
+}
+
+impl Entry {
+    pub fn label(&self) -> String {
+        match self {
+            Entry::Command(c) => c.label().to_string(),
+            Entry::File(p) => p.clone(),
+            Entry::Line(n) => format!("Go to line {n}"),
+            Entry::Find(q) => format!("Find {q}"),
+        }
+    }
+
+    pub fn hint(&self) -> &'static str {
+        match self {
+            Entry::Command(c) => c.hint(),
+            Entry::File(_) => "file",
+            Entry::Line(_) | Entry::Find(_) => "",
+        }
+    }
+}
+
+/// A file's score: the better of its name and its whole path.
+fn file_score(query: &str, path: &str) -> Option<i64> {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    score(query, name).max(score(query, path))
+}
+
+/// Every entry for `query`: `:N` and `/text` are direct, and anything else
+/// searches commands and files together. Commands win ties, because they're
+/// the shorter list and the more common aim.
+fn universal_filter(query: &str, files: &[String]) -> Vec<Entry> {
+    if let Some(rest) = query.strip_prefix(':') {
+        return crate::command::parse_line_number(rest)
+            .map(|n| vec![Entry::Line(n)])
+            .unwrap_or_default();
+    }
+    if let Some(rest) = query.strip_prefix('/') {
+        return if rest.is_empty() {
+            Vec::new()
+        } else {
+            vec![Entry::Find(rest.to_string())]
+        };
+    }
+    let mut scored: Vec<(i64, usize, Entry)> = REGISTRY
+        .iter()
+        .enumerate()
+        .filter_map(|(i, c)| score(query, c.label()).map(|s| (s, i, Entry::Command(*c))))
+        .collect();
+    let base = scored.len() + REGISTRY.len();
+    scored.extend(
+        files.iter().enumerate().filter_map(|(i, f)| {
+            file_score(query, f).map(|s| (s, base + i, Entry::File(f.clone())))
+        }),
+    );
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    scored.truncate(MAX_RESULTS);
+    scored.into_iter().map(|(_, _, e)| e).collect()
+}
+
 /// State of the open palette.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaletteState {
     pub query: String,
     pub selected: usize,
-    pub results: Vec<Command>,
+    pub results: Vec<Entry>,
+    /// The universal palette's file list; `None` for the command palette.
+    files: Option<Arc<Vec<String>>>,
 }
 
 impl Default for PaletteState {
@@ -56,15 +131,36 @@ impl Default for PaletteState {
         PaletteState {
             query: String::new(),
             selected: 0,
-            results: filter(""),
+            results: filter("").into_iter().map(Entry::Command).collect(),
+            files: None,
         }
     }
 }
 
 impl PaletteState {
+    /// The Ctrl-K palette over `files`.
+    pub fn universal(files: Vec<String>) -> PaletteState {
+        let mut state = PaletteState {
+            files: Some(Arc::new(files)),
+            ..PaletteState::default()
+        };
+        state.set_query(String::new());
+        state
+    }
+
+    pub fn is_universal(&self) -> bool {
+        self.files.is_some()
+    }
+
     pub fn set_query(&mut self, q: String) {
         self.query = q;
-        self.results = filter(&self.query);
+        self.results = match &self.files {
+            Some(files) => universal_filter(&self.query, files),
+            None => filter(&self.query)
+                .into_iter()
+                .map(Entry::Command)
+                .collect(),
+        };
         self.selected = 0;
     }
 
@@ -90,8 +186,15 @@ impl PaletteState {
         }
     }
 
+    pub fn selected_entry(&self) -> Option<&Entry> {
+        self.results.get(self.selected)
+    }
+
     pub fn selected_command(&self) -> Option<Command> {
-        self.results.get(self.selected).copied()
+        match self.selected_entry() {
+            Some(Entry::Command(c)) => Some(*c),
+            _ => None,
+        }
     }
 
     /// First result row shown, so the selection stays visible.
@@ -108,6 +211,79 @@ mod tests {
     fn empty_query_keeps_registry_order() {
         assert_eq!(filter(""), REGISTRY.to_vec());
         assert_eq!(PaletteState::default().results.len(), 17);
+    }
+
+    fn universal(files: &[&str]) -> PaletteState {
+        PaletteState::universal(files.iter().map(|f| f.to_string()).collect())
+    }
+
+    fn typed(s: &mut PaletteState, text: &str) {
+        for c in text.chars() {
+            s.push(c);
+        }
+    }
+
+    #[test]
+    fn universal_lists_commands_then_files() {
+        let s = universal(&["src/app.rs", "README.md"]);
+        assert!(s.is_universal());
+        assert_eq!(s.results[0], Entry::Command(Command::Save));
+        assert_eq!(s.results.len(), REGISTRY.len() + 2);
+        assert_eq!(
+            s.results.last(),
+            Some(&Entry::File("README.md".to_string()))
+        );
+        assert!(!PaletteState::default().is_universal());
+    }
+
+    #[test]
+    fn universal_finds_files_by_name_and_path() {
+        let mut s = universal(&["docs/guide.md", "src/ui/theme.rs", "src/app.rs"]);
+        typed(&mut s, "theme");
+        assert_eq!(
+            s.selected_entry(),
+            Some(&Entry::File("src/ui/theme.rs".to_string()))
+        );
+        s.set_query("src/ap".to_string());
+        assert_eq!(
+            s.selected_entry(),
+            Some(&Entry::File("src/app.rs".to_string()))
+        );
+    }
+
+    #[test]
+    fn universal_prefers_a_command_on_a_tie() {
+        let mut s = universal(&["save"]);
+        typed(&mut s, "save");
+        assert_eq!(s.selected_command(), Some(Command::Save));
+    }
+
+    #[test]
+    fn colon_goes_to_a_line_and_slash_finds_text() {
+        let mut s = universal(&["a.txt"]);
+        typed(&mut s, ":42");
+        assert_eq!(s.results, vec![Entry::Line(42)]);
+        s.set_query(":x".to_string());
+        assert!(s.results.is_empty());
+        s.set_query("/needle in".to_string());
+        assert_eq!(s.results, vec![Entry::Find("needle in".to_string())]);
+        s.set_query("/".to_string());
+        assert!(s.results.is_empty());
+    }
+
+    #[test]
+    fn command_palette_ignores_colon_and_files() {
+        let mut s = PaletteState::default();
+        typed(&mut s, ":4");
+        assert!(s.results.is_empty());
+    }
+
+    #[test]
+    fn universal_results_are_capped() {
+        let files: Vec<String> = (0..1000).map(|i| format!("f{i}")).collect();
+        let mut s = PaletteState::universal(files);
+        typed(&mut s, "f");
+        assert_eq!(s.results.len(), MAX_RESULTS);
     }
 
     #[test]

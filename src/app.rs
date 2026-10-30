@@ -11,7 +11,7 @@ use crate::command::{self, Command};
 use crate::fileio::{self, DiskState};
 use crate::input::{normalize, Input, Key, Motion};
 use crate::ops;
-use crate::palette::PaletteState;
+use crate::palette::{Entry, PaletteState};
 use crate::search;
 use crate::session::{self, Opened};
 use crate::swap::{self, RecoverInfo, SwapStatus, SwapWriter};
@@ -19,6 +19,10 @@ use crate::swap::{self, RecoverInfo, SwapStatus, SwapWriter};
 /// How soon after Esc a `[` or `O` counts as the rest of a split key sequence.
 /// A person can't reach those keys this fast, and they do nothing in the layer.
 const ESC_TAIL_WINDOW: Duration = Duration::from_millis(150);
+
+/// How many files the universal palette lists, and how long it may look.
+const PALETTE_MAX_FILES: usize = 20_000;
+const PALETTE_SCAN_BUDGET: Duration = Duration::from_millis(100);
 
 /// Text-area rows when the terminal size is not known yet.
 const DEFAULT_TEXT_HEIGHT: usize = 28;
@@ -452,6 +456,7 @@ impl App {
                 self.mode = Mode::Overlay { opened_at: now };
             }
             Key::Ctrl('p') => self.open_palette(),
+            Key::Ctrl('k') => self.open_universal(),
             Key::Ctrl('f') => self.open_search(),
             Key::Ctrl('r') => self.open_replace(),
             Key::Char(c) => b.insert_str(&c.to_string(), GroupKind::Typing),
@@ -846,6 +851,39 @@ impl App {
         self.mode = Mode::Palette(PaletteState::default());
     }
 
+    /// Ctrl-K: commands, files under the working directory, `:line` and `/text`.
+    fn open_universal(&mut self) {
+        let files = std::env::current_dir()
+            .map(|d| fileio::list_files(&d, PALETTE_MAX_FILES, PALETTE_SCAN_BUDGET))
+            .unwrap_or_default();
+        self.mode = Mode::Palette(PaletteState::universal(files));
+    }
+
+    /// Runs the palette's selected row (the palette is already closed).
+    fn run_entry(&mut self, entry: Entry) {
+        match entry {
+            Entry::Command(c) => self.run_command(c),
+            Entry::File(path) => {
+                if let Err(e) = self.submit_open(&path) {
+                    self.set_error(e);
+                }
+            }
+            Entry::Line(n) => self.go_to_line(n),
+            Entry::Find(query) => {
+                self.buffer.clear_selection();
+                let origin = self.buffer.cursor();
+                self.incremental(&query, origin);
+                self.mode = Mode::Prompt(Prompt::Search { query, origin });
+            }
+        }
+    }
+
+    fn go_to_line(&mut self, n: usize) {
+        let last = self.buffer.line_count();
+        let start = self.buffer.line_start(n.min(last) - 1);
+        self.buffer.move_to(start);
+    }
+
     fn palette_key(&mut self, key: Key, mut state: PaletteState) {
         match key {
             Key::Esc => {
@@ -853,9 +891,9 @@ impl App {
                 return;
             }
             Key::Enter => {
-                if let Some(cmd) = state.selected_command() {
+                if let Some(entry) = state.selected_entry().cloned() {
                     self.mode = Mode::Insert;
-                    self.run_command(cmd);
+                    self.run_entry(entry);
                     return;
                 }
             }
@@ -903,10 +941,7 @@ impl App {
             }
             Key::Enter => match command::parse_line_number(&text) {
                 Ok(n) => {
-                    let last = self.buffer.line_count();
-                    let line = n.min(last) - 1;
-                    let start = self.buffer.line_start(line);
-                    self.buffer.move_to(start);
+                    self.go_to_line(n);
                     self.mode = Mode::Insert;
                     return;
                 }
@@ -1882,6 +1917,38 @@ mod tests {
         }
         a.handle_key(Key::Enter, t).unwrap();
         assert!(matches!(a.mode, Mode::Prompt(Prompt::SaveAs { .. })));
+    }
+
+    #[test]
+    fn ctrl_k_jumps_to_a_line_and_searches() {
+        let t = Instant::now();
+        let mut a = app("one\ntwo\nthree\n");
+        a.handle_key(Key::Ctrl('k'), t).unwrap();
+        assert!(matches!(&a.mode, Mode::Palette(s) if s.is_universal()));
+        typ(&mut a, ":3");
+        a.handle_key(Key::Enter, t).unwrap();
+        assert_eq!(a.buffer.line_col(), (3, 1));
+        assert_eq!(a.mode, Mode::Insert);
+        a.handle_key(Key::Ctrl('k'), t).unwrap();
+        typ(&mut a, "/two");
+        a.handle_key(Key::Enter, t).unwrap();
+        assert_eq!(a.buffer.line_col(), (2, 1), "wraps to find it");
+        assert_eq!(a.search_query(), Some("two"));
+        a.handle_key(Key::Esc, t).unwrap();
+        assert_eq!(a.mode, Mode::Insert);
+    }
+
+    #[test]
+    fn ctrl_k_runs_commands_and_esc_closes_it() {
+        let t = Instant::now();
+        let mut a = app("x");
+        a.handle_key(Key::Ctrl('k'), t).unwrap();
+        typ(&mut a, "toggle line");
+        a.handle_key(Key::Enter, t).unwrap();
+        assert!(!a.show_line_numbers);
+        a.handle_key(Key::Ctrl('k'), t).unwrap();
+        a.handle_key(Key::Esc, t).unwrap();
+        assert_eq!(a.mode, Mode::Insert);
     }
 
     #[test]

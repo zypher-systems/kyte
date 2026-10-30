@@ -116,6 +116,7 @@ pub const KEY_HELP: &[(&str, &str)] = &[
     ("Ctrl-Q", "quit (asks if unsaved)"),
     ("Ctrl-Z, Ctrl-Y", "undo, redo"),
     ("Ctrl-F, Ctrl-R", "search, replace"),
+    ("Ctrl-K", "commands, files, :line, /text"),
     ("Ctrl-P", "command palette"),
     ("Esc, Ctrl-Space, Alt-key", "operator layer:"),
     ("  w  d  k", "del word, del line, del to end"),

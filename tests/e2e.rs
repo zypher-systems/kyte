@@ -1614,6 +1614,100 @@ fn break_lock_opens_a_file_held_by_another_kyte() {
     b.kill9();
 }
 
+// ---------------------------------------------------------------- universal palette
+
+/// Kyte on `file`, with the working directory set to `cwd`.
+fn open_in(env: &Env, cwd: &Path, file: &Path) -> Pty {
+    let pty = Pty::spawn(
+        Spawn::new(bin())
+            .env("KYTE_STATE_DIR", env.state.to_string_lossy())
+            .arg("--no-kitty")
+            .arg(file.to_str().unwrap())
+            .cwd(cwd),
+    );
+    pty.wait_for("Ln 1, Col 1", TIMEOUT);
+    pty
+}
+
+#[test]
+fn ctrl_k_opens_a_file_by_name_from_the_working_directory() {
+    let env = Env::new();
+    let project = env.path("proj");
+    fs::create_dir_all(project.join("src")).unwrap();
+    let a = project.join("a.txt");
+    fs::write(&a, "first\n").unwrap();
+    fs::write(project.join("src/widget.rs"), "fn widget() {}\n").unwrap();
+    let mut p = open_in(&env, &project, &a);
+    p.send_keys(&["C-k"]);
+    p.wait_for("Commands, files, :line, /text", TIMEOUT);
+    p.send_str("widget");
+    p.wait_for("▸ src/widget.rs", TIMEOUT);
+    p.send_keys(&["Enter"]);
+    p.wait_for("1 │ fn widget() {}", TIMEOUT);
+    wait_status(&p, "widget.rs");
+    quit_clean(&mut p);
+}
+
+#[test]
+fn ctrl_k_with_unsaved_changes_asks_before_it_opens_a_file() {
+    let env = Env::new();
+    let project = env.path("proj");
+    fs::create_dir(&project).unwrap();
+    let a = project.join("a.txt");
+    fs::write(&a, "first\n").unwrap();
+    fs::write(project.join("other.txt"), "second\n").unwrap();
+    let mut p = open_in(&env, &project, &a);
+    p.send_str("edit ");
+    wait_status(&p, "[+]");
+    p.send_keys(&["C-k"]);
+    p.wait_for("Commands, files", TIMEOUT);
+    p.send_str("other");
+    p.wait_for("▸ other.txt", TIMEOUT);
+    p.send_keys(&["Enter"]);
+    p.wait_for("Unsaved changes", TIMEOUT);
+    p.send_str("y");
+    p.wait_for("1 │ second", TIMEOUT);
+    assert_eq!(fs::read_to_string(&a).unwrap(), "edit first\n");
+    quit_clean(&mut p);
+}
+
+#[test]
+fn ctrl_k_goes_to_a_line_and_finds_text() {
+    let env = Env::new();
+    let f = env.write("k.txt", "one\ntwo\nthree\n");
+    let mut p = env.open(&f);
+    p.send_keys(&["C-k"]);
+    p.wait_for("Commands, files", TIMEOUT);
+    p.send_str(":3");
+    p.wait_for("▸ Go to line 3", TIMEOUT);
+    p.send_keys(&["Enter"]);
+    wait_status(&p, "Ln 3, Col 1");
+    p.send_keys(&["C-k"]);
+    p.wait_for("Commands, files", TIMEOUT);
+    p.send_str("/two");
+    p.wait_for("▸ Find two", TIMEOUT);
+    p.send_keys(&["Enter"]);
+    p.wait_for("Search: two", TIMEOUT);
+    wait_status(&p, "Ln 2, Col 1");
+    p.send_keys(&["Esc"]);
+    wait_status(&p, "INSERT");
+    quit_clean(&mut p);
+}
+
+#[test]
+fn esc_esc_stays_the_command_palette() {
+    let env = Env::new();
+    let f = env.write("k.txt", "x\n");
+    let mut p = env.open(&f);
+    open_palette(&mut p);
+    assert!(p.screen().contains("Command palette"));
+    p.send_str(":3");
+    p.wait_for("No match", TIMEOUT);
+    p.send_keys(&["Esc"]);
+    p.wait_gone("Command palette", TIMEOUT);
+    quit_clean(&mut p);
+}
+
 // ---------------------------------------------------------------- indent
 
 #[test]

@@ -1,11 +1,13 @@
 //! Opening files (UTF-8 only), atomic save, and the state directory (section 6).
 
+use std::collections::VecDeque;
 use std::fmt;
 use std::fs::{self, File, Metadata, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::fs::{fchown, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use ropey::Rope;
 use rustix::fs::{access, fsetxattr, getxattr, listxattr, Access, XattrFlags};
@@ -97,6 +99,45 @@ pub fn expand_tilde(text: &str) -> PathBuf {
         (Some(rest), Some(h)) => h.join(rest),
         _ => PathBuf::from(text),
     }
+}
+
+/// Directories too noisy to be worth listing.
+const SKIPPED_DIRS: &[&str] = &["node_modules", "target"];
+
+/// Files under `root`, as sorted relative paths, for the universal palette.
+/// Hidden files and build directories are left out. It stops at `max` files
+/// or after `budget`, nearest files first, so a huge tree can't stall the editor.
+pub fn list_files(root: &Path, max: usize, budget: Duration) -> Vec<String> {
+    let start = Instant::now();
+    let mut files = Vec::new();
+    let mut dirs = VecDeque::from([PathBuf::new()]);
+    'walk: while let Some(rel) = dirs.pop_front() {
+        let Ok(entries) = fs::read_dir(root.join(&rel)) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if files.len() >= max || start.elapsed() > budget {
+                break 'walk;
+            }
+            let name = entry.file_name();
+            let text = name.to_string_lossy();
+            if text.starts_with('.') {
+                continue;
+            }
+            // Symlinks are skipped: one could point back up the tree.
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            let path = rel.join(&name);
+            if kind.is_dir() && !SKIPPED_DIRS.contains(&text.as_ref()) {
+                dirs.push_back(path);
+            } else if kind.is_file() {
+                files.push(path.to_string_lossy().into_owned());
+            }
+        }
+    }
+    files.sort();
+    files
 }
 
 /// What Tab did to a path being typed.

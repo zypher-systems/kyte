@@ -3,9 +3,11 @@
 use std::fs;
 use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use kyte::fileio::{
-    complete_path, disk_state, is_read_only, load, save_atomic, state_dir_from, OpenError,
+    complete_path, disk_state, is_read_only, list_files, load, save_atomic, state_dir_from,
+    OpenError,
 };
 use rustix::fs::{mknodat, setxattr, FileType, Mode, XattrFlags, CWD};
 
@@ -253,6 +255,40 @@ fn completion_keeps_multi_byte_names_whole() {
     let base = format!("{}/", d.path().display());
     let c = complete_path(&format!("{base}世")).unwrap();
     assert_eq!(c.text, format!("{base}世界"));
+}
+
+#[test]
+fn list_files_skips_hidden_and_build_directories() {
+    let d = tempfile::tempdir().unwrap();
+    for dir in ["src/ui", ".git", "target/debug", "node_modules/x"] {
+        fs::create_dir_all(d.path().join(dir)).unwrap();
+    }
+    for f in [
+        "a.txt",
+        ".env",
+        "src/main.rs",
+        "src/ui/view.rs",
+        ".git/config",
+        "target/debug/kyte",
+        "node_modules/x/y.js",
+    ] {
+        fs::write(d.path().join(f), "").unwrap();
+    }
+    symlink(d.path(), d.path().join("loop")).unwrap();
+    let files = list_files(d.path(), 100, Duration::from_secs(5));
+    assert_eq!(files, vec!["a.txt", "src/main.rs", "src/ui/view.rs"]);
+}
+
+#[test]
+fn list_files_stops_at_the_limit_with_the_nearest_files() {
+    let d = tempfile::tempdir().unwrap();
+    fs::create_dir(d.path().join("deep")).unwrap();
+    fs::write(d.path().join("deep/far.txt"), "").unwrap();
+    fs::write(d.path().join("near.txt"), "").unwrap();
+    let files = list_files(d.path(), 1, Duration::from_secs(5));
+    assert_eq!(files, vec!["near.txt"]);
+    assert!(list_files(d.path(), 100, Duration::ZERO).len() <= 1);
+    assert!(list_files(Path::new("/no/such/dir"), 10, Duration::from_secs(1)).is_empty());
 }
 
 #[test]

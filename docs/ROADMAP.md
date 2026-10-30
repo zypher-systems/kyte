@@ -42,7 +42,7 @@ Fixed every known way the build could lose or damage work. Each fix has a regres
 - [x] Find and replace; case-insensitive search; visible match highlighting
 - [x] Word motion and word delete
 - [x] Auto-indent, and tabs or spaces per file
-- [ ] Ctrl-K universal palette
+- [x] Ctrl-K universal palette
 - [x] Replace the Nano-derived aliases: Ctrl-X, Ctrl-C and Ctrl-V for cut, copy and paste, and Ctrl-O to open a file.
 
 Before moving on, use Kyte for real work on actual terminals with the kitty keyboard protocol, and over SSH and tmux. So far that path has only been emulated.
