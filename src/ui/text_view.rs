@@ -4,6 +4,7 @@
 
 use ratatui::buffer::Buffer as Cells;
 use ratatui::layout::Rect;
+use ratatui::style::Style;
 
 use super::theme::Theme;
 use crate::app::App;
@@ -142,6 +143,7 @@ pub fn render(app: &App, area: Rect, cells: &mut Cells, theme: &Theme) -> Option
         let text = &full.1;
         let bytes = row.segment.bytes.start.min(text.len())..row.segment.bytes.end.min(text.len());
         let piece = &text[bytes.clone()];
+        let on_cursor_line = line == buf.cursor_line() && app.reader.is_none();
         if gw > 0 {
             let first = row.segment.chars.start == 0;
             let label = if first {
@@ -150,7 +152,15 @@ pub fn render(app: &App, area: Rect, cells: &mut Cells, theme: &Theme) -> Option
                 String::new()
             };
             let num = format!("{label:>w$} │ ", w = gw - 3);
-            cells.set_stringn(area.x, y, num, gw, theme.gutter);
+            let style = if on_cursor_line {
+                theme.gutter_current
+            } else {
+                theme.gutter
+            };
+            cells.set_stringn(area.x, y, num, gw, style);
+            // Only the number lights up on the cursor's line.
+            let bar = Rect::new(area.x + gw as u16 - 2, y, 1, 1);
+            cells.set_style(bar, Style::new().fg(theme.gutter.fg.unwrap_or_default()));
         }
         let x = area.x + gw as u16;
         #[cfg(feature = "highlight")]
@@ -164,6 +174,9 @@ pub fn render(app: &App, area: Rect, cells: &mut Cells, theme: &Theme) -> Option
             render_line(cells, x, y, piece, left, text_w, theme);
         }
         let area_row = Rect::new(x, y, text_w as u16, 1);
+        if on_cursor_line {
+            cells.set_style(area_row, theme.current_line);
+        }
         paint_matches(app, text, row, piece, area_row, cells, theme);
         paint_selection(app, row, piece, area_row, cells, theme);
         if let Some((ours, theirs)) = &app.review_marks {
@@ -329,7 +342,7 @@ fn line_spans(
         if r.is_empty() {
             continue;
         }
-        let style = kind.style(theme.text);
+        let style = kind.style(theme);
         for l in rope.byte_to_line(r.start)..=rope.byte_to_line(r.end - 1) {
             if l < top || l >= end {
                 continue;

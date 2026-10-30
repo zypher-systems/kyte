@@ -102,6 +102,14 @@ These replace the matching parts of `ARCHITECTURE`. `docs/ROADMAP.md` holds the 
 - The terminal cursor hides while a box covers it, because it would blink through the box's text.
 - Rows that don't fit the height flow into more columns, so every key stays visible on a short terminal. This replaces the short legend wording.
 
+## Looks
+
+- Boxes have rounded corners, a centred title, a blank margin and a shadow, so they read as floating. The shadow is two cells wide to one tall, because a terminal cell is about twice as tall as it's wide. It falls only on the text area, never on the status bar.
+- A menu of more than ten rows splits into two columns. The Esc layer's 17 rows covered most of the file.
+- The cursor's line has its own background, and its number lights up. Only the number does: a bright gutter bar read as a glitch.
+- The status bar keeps the file on the left and the facts (position, selection, indent, line endings) on the right. When the bar is tight, only position stays, and warnings are cut before position is.
+- Theme candidates were judged as real screens, rendered by Kyte's own code and dumped cell by cell, not as drawings.
+
 ## File history
 
 - Every edit is kept, by decision: not only saves and crashes. So a file's log grows with every keystroke, until retention trims the oldest (below). Measured with a million single-character edits on a 30 KB file: the log is 34 MB (34 bytes per edit), the timeline opens in 105 ms, any version shows in about 8 µs, and a session's first edit takes 31 ms, because it reads the log. Later edits take under a microsecond.

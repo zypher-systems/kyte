@@ -1091,14 +1091,18 @@ fn open_palette(p: &mut Pty) {
     p.wait_for("Command palette", TIMEOUT);
 }
 
-/// Row text of the first palette result (the row after the `> ` input line).
+/// Row text of the first palette result (below the `> ` input line and its rule).
 fn first_result(p: &Pty) -> String {
     let rows = p.rows();
     let i = rows
         .iter()
         .position(|r| r.contains("│> "))
         .expect("palette input row");
-    rows[i + 1].clone()
+    rows[i + 1..]
+        .iter()
+        .find(|r| !r.contains('├'))
+        .expect("palette result row")
+        .clone()
 }
 
 #[test]

@@ -5,7 +5,8 @@ use ratatui::layout::Rect;
 
 use super::theme::Theme;
 use ratatui::layout::Rect as R;
-use ratatui::widgets::{Block, Borders, Clear, Widget};
+use ratatui::text::Line;
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Widget};
 
 use crate::app::{After, App, Mode, Prompt, SaveRisk};
 use crate::buffer::Indent;
@@ -31,55 +32,71 @@ pub fn status_bar(app: &App, area: Rect, cells: &mut Cells, theme: &Theme) {
         .unwrap_or_else(|| "Untitled".to_string());
     let dirty = if app.buffer.is_dirty() { " [+]" } else { "" };
     let (l, c) = app.view_buffer().line_col();
-    let eol = if app.buffer.eol() == "\r\n" {
-        " │ CRLF"
-    } else {
-        ""
-    };
-    let sel = app
-        .buffer
-        .selection()
-        .map(|r| format!(" │ {} selected", r.len()))
-        .unwrap_or_default();
-    let indent = match app.buffer.indent() {
-        Indent::Tabs => String::new(),
-        Indent::Spaces(n) => format!(" │ Spaces {n}"),
-    };
-    let rest = match &app.mode {
-        Mode::History { timeline, at } => format!(
-            "│ {name} │ {} of {} │ {} │ {}",
-            at + 1,
-            timeline.len(),
-            history::ago_from_now(timeline.version(*at).time_ms),
-            timeline.describe(*at),
+    let place = format!("Ln {l}, Col {c}");
+    // In order of importance, because a narrow bar cuts from the end.
+    let mut facts = vec![place.clone()];
+    if let Some(r) = app.buffer.selection() {
+        facts.push(format!("{} selected", r.len()));
+    }
+    if let Indent::Spaces(n) = app.buffer.indent() {
+        facts.push(format!("Spaces {n}"));
+    }
+    if app.buffer.eol() == "\r\n" {
+        facts.push("CRLF".to_string());
+    }
+    let (rest, facts) = match &app.mode {
+        Mode::History { timeline, at } => (
+            format!(
+                " {name} │ {} of {} │ {} │ {}",
+                at + 1,
+                timeline.len(),
+                history::ago_from_now(timeline.version(*at).time_ms),
+                timeline.describe(*at),
+            ),
+            String::new(),
         ),
         Mode::Review(run) => {
             let (at, all) = run.position();
-            format!("│ {name}{dirty} │ change {at} of {all}")
+            (format!(" {name}{dirty} │ change {at} of {all}"), place)
         }
         Mode::Reader => {
             let crumbs = app.reader.as_ref().map_or("", |r| r.crumbs.as_str());
-            let place = if crumbs.is_empty() {
+            let crumbs = if crumbs.is_empty() {
                 String::new()
             } else {
                 format!(" │ {crumbs}")
             };
-            format!("│ {name}{dirty}{place} │ Ln {l}, Col {c}")
+            (format!(" {name}{dirty}{crumbs}"), place)
         }
-        _ => format!("│ {name}{dirty} │ Ln {l}, Col {c}{sel}{indent}{eol}"),
+        _ => (format!(" {name}{dirty}"), facts.join(" │ ")),
+    };
+    let note = if app.recovery_off() {
+        " │ no crash recovery"
+    } else if app.history_lost() {
+        " │ no history"
+    } else if app.has_outside_change() {
+        " │ changed on disk, Esc c reviews"
+    } else {
+        ""
     };
     let x = mode.chars().count();
     if x < w {
-        let (end, _) = cells.set_stringn(area.x + x as u16, area.y, rest, w - x, theme.status);
-        let left = (area.x + area.width).saturating_sub(end) as usize;
-        if app.recovery_off() {
-            cells.set_stringn(end, area.y, " │ no crash recovery", left, theme.error);
-        } else if app.history_lost() {
-            cells.set_stringn(end, area.y, " │ no history", left, theme.error);
-        } else if app.has_outside_change() {
-            let note = " │ changed on disk, Esc c reviews";
-            cells.set_stringn(end, area.y, note, left, theme.error);
-        }
+        // Facts hold the right edge. When it's tight, only the first stays.
+        let len = |s: &str| s.chars().count();
+        let used = x + len(&rest) + len(note);
+        let facts = if used + len(&facts) + 2 > w {
+            facts.split(" │ ").next().unwrap_or_default()
+        } else {
+            facts.as_str()
+        };
+        let start = area.x + x as u16;
+        let right = area.x + area.width;
+        let at = right.saturating_sub(len(facts) as u16 + 1).max(start);
+        let room = (at - start) as usize;
+        let (end, _) = cells.set_stringn(start, area.y, rest, room, theme.status);
+        let room = (at - end).saturating_sub(1) as usize;
+        cells.set_stringn(end, area.y, note, room, theme.error);
+        cells.set_stringn(at, area.y, facts, (right - at) as usize, theme.status);
     }
 }
 
@@ -273,6 +290,9 @@ pub fn centered_off_row(area: Rect, w: u16, h: u16, cursor: Option<(u16, u16)>) 
     R::new(mid.x, y, mid.width, mid.height)
 }
 
+/// Rows a menu can hold before it splits into two columns.
+const TALL_MENU: usize = 10;
+
 /// Draws the current mode's menu and returns its box. Rows that don't fit the
 /// height flow into more columns, so every key stays visible on a short
 /// terminal.
@@ -288,25 +308,27 @@ pub fn menu(
     let label_w = menu.rows.iter().map(|(_, l)| l.len()).max().unwrap_or(0);
     let cell_w = key_w + 1 + label_w + 2;
     let room = (text_area.height as usize).saturating_sub(2).max(1);
-    let per_col = menu.rows.len().min(room);
+    // A long menu reads better as two columns, and hides less of the text.
+    let tallest = if menu.rows.len() > TALL_MENU {
+        menu.rows.len().div_ceil(2)
+    } else {
+        menu.rows.len()
+    };
+    let per_col = tallest.min(room);
     let cols = menu.rows.len().div_ceil(per_col);
-    let w = (cell_w * cols + 3).max(menu.title.len() + 6) as u16;
-    let h = per_col as u16 + 2;
+    let w = (cell_w * cols + 4).max(menu.title.len() + 6) as u16;
+    // A blank row above and below, when the terminal has them to spare.
+    let pad = (per_col + 4 <= text_area.height as usize) as u16;
+    let h = per_col as u16 + 2 + pad * 2;
     let area = if menu.about_cursor {
         centered_off_row(text_area, w, h, cursor)
     } else {
         centered(text_area, w, h)
     };
-    let inner = modal_box(
-        area,
-        cells,
-        &menu.title,
-        theme.palette,
-        theme.palette_border,
-    );
+    let inner = modal_box(area, text_area, cells, &menu.title, theme);
     for (i, (key, label)) in menu.rows.iter().enumerate() {
-        let x = inner.x + 1 + (i / per_col * cell_w) as u16;
-        let y = inner.y + (i % per_col) as u16;
+        let x = inner.x + 2 + (i / per_col * cell_w) as u16;
+        let y = inner.y + pad + (i % per_col) as u16;
         if x >= inner.x + inner.width || y >= inner.y + inner.height {
             continue;
         }
@@ -334,7 +356,7 @@ pub fn completions(app: &App, text_area: Rect, cells: &mut Cells, theme: &Theme)
     let w = (widest + 4).max(16).min(text_area.width);
     let h = (rows.len() as u16 + 2).min(text_area.height);
     let area = centered(text_area, w, h);
-    let inner = modal_box(area, cells, "Matches", theme.palette, theme.palette_border);
+    let inner = modal_box(area, text_area, cells, "Matches", theme);
     for (i, row) in rows.iter().enumerate() {
         let y = inner.y + i as u16;
         if y < inner.y + inner.height {
@@ -356,21 +378,28 @@ pub fn centered(area: Rect, w: u16, h: u16) -> Rect {
     )
 }
 
-/// Draws a bordered, titled box and returns its inner area.
+/// Draws a rounded, titled box with a shadow on `text_area`, and returns its
+/// inner area. The shadow is two cells wide to one tall, because a terminal
+/// cell is about twice as tall as it's wide.
 pub fn modal_box(
     area: Rect,
+    text_area: Rect,
     cells: &mut Cells,
     title: &str,
-    style: ratatui::style::Style,
-    border: ratatui::style::Style,
+    theme: &Theme,
 ) -> Rect {
+    let side = R::new(area.right(), area.y + 1, 2, area.height);
+    let below = R::new(area.x + 2, area.bottom(), area.width, 1);
+    cells.set_style(side.intersection(text_area), theme.shadow);
+    cells.set_style(below.intersection(text_area), theme.shadow);
     Clear.render(area, cells);
-    cells.set_style(area, style);
+    cells.set_style(area, theme.palette);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(border)
-        .style(style)
-        .title(format!(" {title} "));
+        .border_type(BorderType::Rounded)
+        .border_style(theme.palette_border)
+        .style(theme.palette)
+        .title(Line::styled(format!(" {title} "), theme.popup_title).centered());
     let inner = block.inner(area);
     block.render(area, cells);
     inner
@@ -383,19 +412,26 @@ pub fn palette(app: &App, text_area: Rect, cells: &mut Cells, theme: &Theme) -> 
     };
     let rows = state.results.len().clamp(1, VISIBLE_ROWS) as u16;
     let w = 54.min(text_area.width.saturating_sub(2)).max(10);
-    let area = centered(text_area, w, rows + 3);
+    let rule = (text_area.height >= rows + 4) as u16;
+    let area = centered(text_area, w, rows + 3 + rule);
     let title = if state.is_universal() {
         "Commands, files, :line, /text"
     } else {
         "Command palette"
     };
-    let inner = modal_box(area, cells, title, theme.palette, theme.palette_border);
+    let inner = modal_box(area, text_area, cells, title, theme);
     let input = format!("> {}", state.query);
     let iw = inner.width as usize;
     cells.set_stringn(inner.x, inner.y, &input, iw, theme.palette);
+    if rule == 1 {
+        let rule = format!("├{}┤", "─".repeat(iw));
+        let width = area.width as usize;
+        cells.set_stringn(area.x, inner.y + 1, rule, width, theme.palette_border);
+    }
+    let top = inner.y + 1 + rule;
     if state.results.is_empty() {
-        if inner.height > 1 {
-            cells.set_stringn(inner.x, inner.y + 1, "  No match", iw, theme.palette);
+        if top < inner.y + inner.height {
+            cells.set_stringn(inner.x, top, "  No match", iw, theme.popup_hint);
         }
     } else {
         let off = state.scroll_offset();
@@ -406,7 +442,7 @@ pub fn palette(app: &App, text_area: Rect, cells: &mut Cells, theme: &Theme) -> 
             .skip(off)
             .take(VISIBLE_ROWS)
         {
-            let y = inner.y + 1 + (i - off) as u16;
+            let y = top + (i - off) as u16;
             if y >= inner.y + inner.height {
                 break;
             }
@@ -420,6 +456,10 @@ pub fn palette(app: &App, text_area: Rect, cells: &mut Cells, theme: &Theme) -> 
             let line = format!("{label}{}{hint} ", " ".repeat(pad));
             cells.set_style(Rect::new(inner.x, y, inner.width, 1), style);
             cells.set_stringn(inner.x, y, line, iw, style);
+            if !sel && !hint.is_empty() {
+                let at = (inner.x + inner.width).saturating_sub(hint.len() as u16 + 1);
+                cells.set_stringn(at.max(inner.x), y, hint, iw, theme.popup_hint);
+            }
         }
     }
     let cx = inner.x + (input.chars().count() as u16).min(inner.width.saturating_sub(1));
@@ -451,7 +491,7 @@ pub fn help(app: &App, text_area: Rect, cells: &mut Cells, theme: &Theme) -> Opt
     } else {
         "Kyte keys (Esc closes)"
     };
-    let inner = modal_box(area, cells, title, theme.modal, theme.palette_border);
+    let inner = modal_box(area, text_area, cells, title, theme);
     for (i, (k, v)) in KEY_HELP.iter().skip(top.min(max_top)).enumerate() {
         let y = inner.y + 1 + i as u16;
         if y >= inner.y + inner.height {
@@ -459,6 +499,8 @@ pub fn help(app: &App, text_area: Rect, cells: &mut Cells, theme: &Theme) -> Opt
         }
         let line = format!(" {k:<26}{v}");
         cells.set_stringn(inner.x, y, line, inner.width as usize, theme.modal);
+        let keys = 1.min(inner.width) as usize + k.trim_end().chars().count();
+        cells.set_style(R::new(inner.x, y, keys as u16, 1), theme.menu_key);
     }
     Some(area)
 }
@@ -509,7 +551,7 @@ pub fn recover(app: &App, text_area: Rect, cells: &mut Cells, theme: &Theme) {
     let w = (longest + 4).max(40).min(text_area.width);
     let h = (lines.len() as u16 + 2).min(text_area.height);
     let area = centered(text_area, w, h);
-    let inner = modal_box(area, cells, title, theme.modal, theme.palette_border);
+    let inner = modal_box(area, text_area, cells, title, theme);
     for (i, l) in lines.iter().enumerate() {
         let y = inner.y + i as u16;
         if y >= inner.y + inner.height {

@@ -9,15 +9,19 @@ use ratatui::layout::{Position, Rect};
 use ratatui::Frame;
 
 use crate::app::App;
-use theme::DARK;
+use theme::{Theme, DARK};
 
 /// Smallest supported terminal; below it Kyte draws a notice instead.
 pub const MIN_WIDTH: u16 = 20;
 pub const MIN_HEIGHT: u16 = 5;
 
 pub fn render(app: &App, frame: &mut Frame) {
+    render_with(app, frame, &DARK);
+}
+
+/// Draws one frame in `theme`.
+pub fn render_with(app: &App, frame: &mut Frame, theme: &Theme) {
     let area = frame.area();
-    let theme = &DARK;
     if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
         let cells = frame.buffer_mut();
         cells.set_style(area, theme.text);
@@ -109,10 +113,27 @@ mod tests {
         assert_eq!(row(&t, 1), "  2 │     hi");
         assert_eq!(row(&t, 3), "~");
         assert!(
-            row(&t, 6).contains("INSERT │ demo.txt │ Ln 1, Col 1"),
+            row(&t, 6).starts_with(" INSERT  demo.txt"),
             "{}",
             row(&t, 6)
         );
+        assert!(row(&t, 6).ends_with("Ln 1, Col 1"), "{}", row(&t, 6));
+    }
+
+    #[test]
+    fn the_status_bar_keeps_position_and_warning_when_tight() {
+        let mut a = app("abc");
+        let wide = draw(&mut a, 100, 8);
+        assert!(row(&wide, 6).contains("no crash recovery"));
+        assert!(row(&wide, 6).ends_with("Ln 1, Col 1"), "{}", row(&wide, 6));
+        let narrow = draw(&mut a, 40, 8);
+        assert!(row(&narrow, 6).contains("no cr"), "{}", row(&narrow, 6));
+        assert!(
+            row(&narrow, 6).ends_with("Ln 1, Col 1"),
+            "{}",
+            row(&narrow, 6)
+        );
+        assert!(row(&narrow, 6).contains(" Ln"), "{}", row(&narrow, 6));
     }
 
     #[test]
@@ -178,6 +199,53 @@ mod tests {
         for (k, label) in a.layer_rows() {
             assert!(all.contains(&format!("{k} {label}")), "{k} missing\n{all}");
         }
+    }
+
+    #[test]
+    fn the_cursor_line_is_picked_out_and_its_bar_stays_quiet() {
+        let t = super::theme::DARK;
+        let mut a = app("one
+two");
+        let term = draw(&mut a, 40, 8);
+        let b = term.backend().buffer();
+        assert_eq!(b[(12, 0)].bg, t.current_line.bg.unwrap());
+        assert_eq!(b[(12, 1)].bg, t.text.bg.unwrap());
+        assert_eq!(b[(2, 0)].fg, t.gutter_current.fg.unwrap());
+        assert_eq!(b[(4, 0)].symbol(), "│");
+        assert_eq!(b[(4, 0)].fg, t.gutter.fg.unwrap());
+    }
+
+    #[test]
+    fn a_box_casts_a_shadow_only_on_the_text() {
+        let t = super::theme::DARK;
+        let mut a = app("abc");
+        a.handle_key(Key::Esc, Instant::now()).unwrap();
+        let term = draw(&mut a, 80, 24);
+        let r = box_of(&term);
+        let b = term.backend().buffer();
+        let shadow = t.shadow.bg.unwrap();
+        assert_eq!(b[(r.right(), r.y + 1)].bg, shadow, "right of the box");
+        assert_eq!(b[(r.right() + 1, r.y + 1)].bg, shadow, "two cells wide");
+        assert_eq!(b[(r.x + 2, r.bottom())].bg, shadow, "under the box");
+        assert_ne!(b[(r.right(), r.y)].bg, shadow, "the corner stays clear");
+        let (w, h) = (20, 7);
+        let mut a = app("abc");
+        a.run_command(crate::command::Command::ShowKeyHelp);
+        let term = draw(&mut a, w, h);
+        let b = term.backend().buffer();
+        for x in 0..w {
+            assert_ne!(b[(x, h - 2)].bg, shadow, "the status bar stays clear");
+        }
+    }
+
+    #[test]
+    fn a_long_menu_splits_into_two_columns() {
+        let mut a = app("fn main() {}");
+        a.handle_key(Key::Esc, Instant::now()).unwrap();
+        let rows = a.layer_rows().len() as u16;
+        assert!(rows > 10, "the test needs a long menu, got {rows}");
+        let r = box_of(&draw(&mut a, 80, 24));
+        assert!(r.height <= rows.div_ceil(2) + 4, "{r:?} for {rows} rows");
     }
 
     #[test]

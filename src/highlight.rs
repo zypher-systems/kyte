@@ -9,8 +9,10 @@ use std::ops::Range;
 use std::path::Path;
 use std::sync::OnceLock;
 
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::Style;
 use tree_sitter_highlight::{HighlightConfiguration, HighlightEvent, Highlighter};
+
+use crate::ui::theme::Theme;
 
 /// Documents larger than this are not highlighted (every redraw re-parses).
 pub const MAX_BYTES: usize = 512 * 1024;
@@ -193,17 +195,17 @@ const KINDS: [HighlightKind; 13] = [
 ];
 
 impl HighlightKind {
-    /// The foreground for this kind on top of `base` (the text style).
-    pub fn style(self, base: Style) -> Style {
-        let fg = |n| base.fg(Color::Indexed(n));
-        match self {
-            HighlightKind::Keyword => fg(176).add_modifier(Modifier::BOLD),
-            HighlightKind::String => fg(150),
-            HighlightKind::Comment => fg(245).add_modifier(Modifier::ITALIC),
-            HighlightKind::Function => fg(111),
-            HighlightKind::Type => fg(180),
-            HighlightKind::Constant | HighlightKind::Number => fg(209),
-        }
+    /// This kind's look in `theme`.
+    pub fn style(self, theme: &Theme) -> Style {
+        let s = &theme.syntax;
+        theme.text.patch(match self {
+            HighlightKind::Keyword => s.keyword,
+            HighlightKind::String => s.string,
+            HighlightKind::Comment => s.comment,
+            HighlightKind::Function => s.function,
+            HighlightKind::Type => s.kind,
+            HighlightKind::Constant | HighlightKind::Number => s.constant,
+        })
     }
 }
 

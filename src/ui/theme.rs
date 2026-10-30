@@ -1,5 +1,6 @@
 //! Colors. One dark theme, 256-color indexed values only (no truecolor), so it
-//! looks the same in tmux and in the pty demo. Later themes are more constants.
+//! looks the same in tmux and in the pty demo. Later themes are more constants,
+//! passed to `ui::render_with`.
 
 use ratatui::style::{Color, Modifier, Style};
 
@@ -24,6 +25,26 @@ pub struct Theme {
     pub search_current: Style,
     pub modal: Style,
     pub error: Style,
+    /// The cursor's line, as a background.
+    pub current_line: Style,
+    pub gutter_current: Style,
+    pub popup_title: Style,
+    /// Quiet text in a box: hints and rules.
+    pub popup_hint: Style,
+    /// The cells a box casts its shadow on.
+    pub shadow: Style,
+    pub syntax: Syntax,
+}
+
+/// Code colors, laid over `Theme::text`.
+#[derive(Debug, Clone, Copy)]
+pub struct Syntax {
+    pub keyword: Style,
+    pub string: Style,
+    pub comment: Style,
+    pub function: Style,
+    pub kind: Style,
+    pub constant: Style,
 }
 
 const fn ix(n: u8) -> Color {
@@ -68,4 +89,20 @@ pub const DARK: Theme = Theme {
         .fg(ix(203))
         .bg(ix(234))
         .add_modifier(Modifier::BOLD),
+    current_line: Style::new().bg(ix(236)),
+    gutter_current: Style::new().fg(ix(252)).bg(ix(236)),
+    popup_title: Style::new()
+        .fg(ix(110))
+        .bg(ix(237))
+        .add_modifier(Modifier::BOLD),
+    popup_hint: Style::new().fg(ix(245)).bg(ix(237)),
+    shadow: Style::new().fg(ix(240)).bg(ix(233)),
+    syntax: Syntax {
+        keyword: Style::new().fg(ix(176)).add_modifier(Modifier::BOLD),
+        string: Style::new().fg(ix(150)),
+        comment: Style::new().fg(ix(245)).add_modifier(Modifier::ITALIC),
+        function: Style::new().fg(ix(111)),
+        kind: Style::new().fg(ix(180)),
+        constant: Style::new().fg(ix(209)),
+    },
 };
