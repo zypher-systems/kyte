@@ -48,6 +48,9 @@ fn selection_shows_on_a_highlighted_line() {
     );
     assert_eq!(p.bg(0, col + 3), plain, "the rest doesn't");
     p.send_keys(&["Esc"]);
+    p.wait_for("x cut", TIMEOUT);
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    p.send_keys(&["Esc"]);
     p.wait_gone("2 selected", TIMEOUT);
     p.send_keys(&["C-q"]);
     p.wait_exit(TIMEOUT);
@@ -67,6 +70,28 @@ fn search_matches_show_on_a_highlighted_line() {
     assert_ne!(p.bg(0, col + 12), plain, "and so does the other one");
     p.send_keys(&["Esc"]);
     p.wait_gone("Search: main", TIMEOUT);
+    p.send_keys(&["C-q"]);
+    p.wait_exit(TIMEOUT);
+}
+
+#[test]
+fn esc_offers_code_actions_and_they_compose() {
+    let (dir, mut p) = open_rust("fn one() {\n    let a = 1;\n}\n\nfn two() {}\n");
+    p.wait_for("fn two", TIMEOUT);
+    p.send_keys(&["Down"]);
+    p.wait_for("Ln 2", TIMEOUT);
+    p.send_keys(&["Esc"]);
+    p.wait_for("select function", TIMEOUT);
+    p.send_str("f");
+    p.wait_for("27 selected", TIMEOUT);
+    p.send_keys(&["Esc"]);
+    p.wait_for("x cut", TIMEOUT);
+    p.send_str("x");
+    p.wait_gone("fn one", TIMEOUT);
+    p.send_keys(&["C-s"]);
+    p.wait_for("Saved", TIMEOUT);
+    let saved = std::fs::read_to_string(dir.path().join("main.rs")).unwrap();
+    assert_eq!(saved, "\n\nfn two() {}\n");
     p.send_keys(&["C-q"]);
     p.wait_exit(TIMEOUT);
 }

@@ -1,4 +1,4 @@
-//! Syntax highlighting (task T13, cargo feature `highlight`, off by default).
+//! Syntax highlighting (cargo feature `highlight`, on by default).
 //!
 //! tree-sitter with the Rust, Python and Bash grammars and their bundled
 //! `highlights.scm` queries. `highlight` returns byte ranges of the whole text
@@ -30,6 +30,15 @@ impl Lang {
             "py" | "pyi" => Some(Lang::Python),
             "sh" | "bash" => Some(Lang::Bash),
             _ => None,
+        }
+    }
+
+    /// The tree-sitter grammar.
+    pub fn language(self) -> tree_sitter::Language {
+        match self {
+            Lang::Rust => tree_sitter_rust::LANGUAGE.into(),
+            Lang::Python => tree_sitter_python::LANGUAGE.into(),
+            Lang::Bash => tree_sitter_bash::LANGUAGE.into(),
         }
     }
 }

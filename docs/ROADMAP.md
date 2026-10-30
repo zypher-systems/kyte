@@ -51,7 +51,7 @@ Kyte's pitch is an editor you can't lose work in and don't have to learn.
 
 - [x] File history: every edit kept across sessions, browsable and restorable
 - [ ] Retention for file history, so logs can't grow without limit
-- [ ] Smart Esc layer: a legend that changes with context, using tree-sitter
+- [x] Smart Esc layer: a menu that changes with context, using tree-sitter
 - [ ] Reader mode
 - [ ] Review changes made by other tools, built on file history
 

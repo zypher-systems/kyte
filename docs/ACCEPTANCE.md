@@ -8,12 +8,12 @@ Gate commands, all run from the repo root:
 cargo build --release                      # 0 warnings (also after `cargo clean --release -p kyte-editor`)
 cargo fmt --check                          # clean
 cargo clippy --all-targets -- -D warnings  # clean
-cargo test                                 # 376 passed, 0 failed, 1 ignored (the AC-25 demo test)
+cargo test                                 # 405 passed, 0 failed, 1 ignored (the AC-25 demo test)
 cargo test --test demo -- --ignored        # 1 passed (AC-25)
 make demo                                  # writes docs/demo/*
 ```
 
-Updated on 2026-10-30, on rustc 1.98.1 with SELinux enforcing. `cargo test` breakdown: lib unit tests 194, `tests/buffer_props.rs` 2 (proptest), `tests/e2e.rs` 111, `tests/e2e_highlight.rs` 4, `tests/fileio.rs` 19, `tests/history.rs` 17, `tests/smoke.rs` 4, `tests/swap.rs` 25, `tests/demo.rs` 0 run and 1 ignored. The full suite was also run three times in a row with no failures.
+Updated on 2026-10-30, on rustc 1.98.1 with SELinux enforcing. `cargo test` breakdown: lib unit tests 219, `tests/buffer_props.rs` 2 (proptest), `tests/e2e.rs` 114, `tests/e2e_highlight.rs` 5, `tests/fileio.rs` 19, `tests/history.rs` 17, `tests/smoke.rs` 4, `tests/swap.rs` 25, `tests/demo.rs` 0 run and 1 ignored. The full suite was also run three times in a row with no failures.
 
 | AC | Result | How it was verified |
 | --- | --- | --- |
@@ -28,7 +28,7 @@ Updated on 2026-10-30, on rustc 1.98.1 with SELinux enforcing. `cargo test` brea
 | AC-09 | pass | e2e `ac09_undo_redo_typing_and_operator` (`abc` + Ctrl-Z/Ctrl-Y, `Esc d` undone by one Ctrl-Z, `Esc u`/`Esc r`). |
 | AC-10 | pass | e2e `ac10_resize_keeps_bars_at_bottom_and_cursor_visible`: 100x30 to 40x10 and back. |
 | AC-11 | pass | e2e `ac11_large_file_ctrl_end_and_typing_within_1s` on 100,000 lines. Measured in one run: opened in 16.5 ms, keystroke visible in 5.4 ms (bound 1 s). |
-| AC-12 | pass | e2e `ac12_legend_appears_instantly_and_only_in_overlay`: the legend showed 5.5 ms after Esc in one run (bound 100 ms). The legend and `ESC` are absent in Insert mode, after an operator, after an unknown key, and after Esc, 500 ms, Esc. |
+| AC-12 | pass, changed after 0.2.0 | The legend is now a floating menu, so the footer stays clear. e2e `ac12_legend_appears_instantly_and_only_in_overlay`: the legend showed 5.5 ms after Esc in one run (bound 100 ms). The legend and `ESC` are absent in Insert mode, after an operator, after an unknown key, and after Esc, 500 ms, Esc. |
 | AC-13 | pass | e2e `ac13_w_deletes_to_next_word`, `ac13_d_middle_last_and_only_line`, `ac13_d_cursor_lands_at_same_column_clamped`, `ac13_k_mid_line_and_at_end_of_line`, `ac13_percent_nested_not_on_bracket_and_unmatched`, `ac13_percent_unmatched_shows_message_and_does_not_move`. Each one saves and reads the file. There are also unit tests for every row of the operator table (`ops.rs`, `app.rs`). |
 | AC-14 | pass | e2e `ac14_double_esc_within_150ms_opens_palette`, `ac14_esc_pause_esc_closes_overlay` (500 ms gap), `ac14_esc_ms_800_opens_palette_after_500ms`, `ac14_kyte_esc_ms_env_is_honoured`; each checks the buffer is unchanged. |
 | AC-15 | pass | e2e `ac15_unknown_overlay_key_inserts_nothing` (`z`), `ac15_alt_d_bytes_behave_as_esc_then_d` (raw bytes `ESC d`), `ac15_ctrl_space_opens_overlay`. |
@@ -43,6 +43,6 @@ Updated on 2026-10-30, on rustc 1.98.1 with SELinux enforcing. `cargo test` brea
 | AC-24 | pass | e2e `ac24_save_into_read_only_dir_fails_visibly_and_keeps_everything`, `ac24_save_through_symlink_updates_target_keeps_link`; `tests/fileio.rs`. |
 | AC-25 | pass | `make demo` ran headless (no display, no tmux) and wrote `docs/demo/demo.cast`, `demo.gif` (979x694, 33.75 s), `demo.mp4` (h264 978x694, 32.9 s; both checked with `ffprobe`), 13 PNGs, `steps.tsv` and 13 `frames/NN-*.txt`. `frames/03-legend.txt` contains the legend, `07-palette.txt` the palette, and `11-crash.txt` the Recover modal; PNGs 03, 07 and 11 were also inspected by eye. The skip path was checked with agg and ffmpeg removed from `PATH`: it wrote the cast, steps and frames and listed the gif, mp4 and PNGs as skipped. `cargo test --test demo -- --ignored` passed. |
 
-Syntax highlighting (feature `highlight`, on by default): `cargo build --release --no-default-features` 0 warnings, `cargo clippy --all-targets --no-default-features -- -D warnings` clean, `cargo test --no-default-features` 368 passed, 0 failed, 1 ignored. The default build adds 8 highlight tests.
+Syntax highlighting (feature `highlight`, on by default): `cargo build --release --no-default-features` 0 warnings, `cargo clippy --all-targets --no-default-features -- -D warnings` clean, `cargo test --no-default-features` 386 passed, 0 failed, 1 ignored. The default build adds 19 tests that need highlighting.
 
 Not verified: `make docker-test` and the Dockerfile, because Docker is not installed on the build box (see `docs/DECISIONS.md`).

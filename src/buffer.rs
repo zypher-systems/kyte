@@ -473,25 +473,119 @@ impl Buffer {
         if edits.is_empty() {
             return;
         }
+        self.apply_line_edits(edits);
+    }
+
+    /// Applies `edits`, first in the text first and in original positions, as
+    /// one undo step. The cursor and selection stay on the same text.
+    fn apply_line_edits(&mut self, mut edits: Vec<Edit>) {
+        if edits.is_empty() {
+            return;
+        }
         let moved = |pos: usize| {
             let mut out = pos;
-            for &(start, n) in &changes {
-                if start > pos {
+            for e in &edits {
+                if e.at > pos {
                     break;
                 }
-                if outdent {
-                    out -= n.min(pos - start);
-                } else {
-                    out += n;
-                }
+                out -= e.removed.chars().count().min(pos - e.at);
+                out += e.inserted.chars().count();
             }
             out
         };
         let (cursor, anchor) = (moved(self.cursor), self.anchor.map(moved));
-        // Last line first, so earlier positions stay right.
+        // Last first, so earlier positions stay right.
         edits.reverse();
         self.apply_group(edits, cursor);
         self.anchor = anchor.filter(|a| *a != self.cursor);
+    }
+
+    /// Selects `range`, with the cursor at its end.
+    pub fn select_range(&mut self, range: Range<usize>) {
+        self.move_to(range.end);
+        self.set_selection_anchor(range.start.min(self.len_chars()));
+    }
+
+    /// Replaces the selection with `text` and selects the result.
+    pub fn transform_selection(&mut self, f: impl FnOnce(&str) -> String) {
+        let Some(r) = self.selection() else {
+            return;
+        };
+        let old = self.slice_string(r.clone());
+        let new = f(&old);
+        if new == old {
+            return;
+        }
+        let end = r.start + new.chars().count();
+        let edit = Edit {
+            at: r.start,
+            removed: old,
+            inserted: new,
+        };
+        self.apply_with_cursor(edit, GroupKind::Operator, end);
+        self.set_selection_anchor(r.start);
+    }
+
+    /// Sorts the touched lines and selects them. Each line ending stays put.
+    pub fn sort_lines(&mut self) {
+        let lines = self.touched_lines();
+        let (first, last) = (*lines.start(), *lines.end());
+        let mut text: Vec<String> = lines.map(|l| self.line_text(l)).collect();
+        text.sort();
+        let start = self.line_start(first);
+        let end = self.line_end(last);
+        let new = text.join(self.eol);
+        let old = self.slice_string(start..end);
+        if new != old {
+            let cursor_after = start + new.chars().count();
+            let edit = Edit {
+                at: start,
+                removed: old,
+                inserted: new,
+            };
+            self.apply_with_cursor(edit, GroupKind::Operator, cursor_after);
+        }
+        let end = self.line_end(last);
+        self.select_range(start..end);
+    }
+
+    /// Comments the touched lines out at their shared indent, or takes the
+    /// comment off if they all have one. Blank lines are left alone.
+    pub fn toggle_comment(&mut self, prefix: &str) {
+        let indent_of = |t: &str| t.chars().take_while(|c| *c == ' ' || *c == '\t').count();
+        let lines: Vec<(usize, String)> = self
+            .touched_lines()
+            .map(|l| (l, self.line_text(l)))
+            .filter(|(_, t)| !t.trim().is_empty())
+            .collect();
+        let commented = !lines.is_empty()
+            && lines
+                .iter()
+                .all(|(_, t)| t.trim_start().starts_with(prefix));
+        let shared = lines.iter().map(|(_, t)| indent_of(t)).min().unwrap_or(0);
+        let edits = lines
+            .iter()
+            .map(|(l, t)| {
+                let start = self.line_start(*l);
+                if commented {
+                    let at = start + indent_of(t);
+                    let rest = t.trim_start().strip_prefix(prefix).unwrap_or("");
+                    let spaced = rest.starts_with(' ');
+                    let mut removed = prefix.to_string();
+                    if spaced {
+                        removed.push(' ');
+                    }
+                    Edit {
+                        at,
+                        removed,
+                        inserted: String::new(),
+                    }
+                } else {
+                    Edit::insert(start + shared, &format!("{prefix} "))
+                }
+            })
+            .collect();
+        self.apply_line_edits(edits);
     }
 
     #[allow(clippy::inherent_to_string)]
@@ -1327,6 +1421,72 @@ mod tests {
         z.move_to(8);
         z.backspace();
         assert_eq!(z.to_string(), "a\n    bc\n", "past the indent, one char");
+    }
+
+    #[test]
+    fn transform_keeps_the_new_text_selected() {
+        let mut x = b("hello world");
+        select(&mut x, 0, 5);
+        x.transform_selection(|s| s.to_uppercase());
+        assert_eq!(x.to_string(), "HELLO world");
+        assert_eq!(x.selection(), Some(0..5));
+        assert!(x.undo());
+        assert_eq!(x.to_string(), "hello world");
+        let mut y = b("straße");
+        select(&mut y, 0, 6);
+        y.transform_selection(|s| s.to_uppercase());
+        assert_eq!(y.to_string(), "STRASSE");
+        assert_eq!(y.selection(), Some(0..7), "the length can change");
+    }
+
+    #[test]
+    fn sort_lines_sorts_whole_touched_lines() {
+        let mut x = b("c\na\nb\nz\n");
+        select(&mut x, 1, 5);
+        x.sort_lines();
+        assert_eq!(x.to_string(), "a\nb\nc\nz\n");
+        assert_eq!(x.selection(), Some(0..5));
+        assert!(x.undo());
+        assert_eq!(x.to_string(), "c\na\nb\nz\n");
+        let mut y = b("b\r\na\r\n");
+        y.select_all();
+        y.sort_lines();
+        assert_eq!(y.to_string(), "a\r\nb\r\n");
+    }
+
+    #[test]
+    fn comment_goes_on_at_the_shared_indent_and_comes_off_again() {
+        let mut x = b("    a\n\n        b\n");
+        x.select_all();
+        x.toggle_comment("//");
+        assert_eq!(x.to_string(), "    // a\n\n    //     b\n");
+        x.toggle_comment("//");
+        assert_eq!(x.to_string(), "    a\n\n        b\n");
+    }
+
+    #[test]
+    fn comment_mix_comments_everything_and_undo_is_one_step() {
+        let mut x = b("// a\nb\n");
+        x.select_all();
+        x.toggle_comment("//");
+        assert_eq!(x.to_string(), "// // a\n// b\n");
+        assert!(x.undo());
+        assert_eq!(x.to_string(), "// a\nb\n");
+    }
+
+    #[test]
+    fn comment_keeps_the_cursor_on_its_text_and_handles_no_space() {
+        let mut x = b("abc\n");
+        x.move_to(2);
+        x.toggle_comment("#");
+        assert_eq!(x.to_string(), "# abc\n");
+        assert_eq!(x.cursor(), 4);
+        let mut y = b("#abc\n");
+        y.toggle_comment("#");
+        assert_eq!(y.to_string(), "abc\n");
+        let mut blank = b("\n");
+        blank.toggle_comment("#");
+        assert!(!blank.is_dirty());
     }
 
     #[test]

@@ -83,7 +83,7 @@ Environment variables: `KYTE_STATE_DIR` (where swap files go; overrides the defa
 | Arrows, Home, End, PageUp, PageDown, Ctrl-Home, Ctrl-End | Move |
 | Ctrl-Left, Ctrl-Right (also Alt) | Move by word |
 | Ctrl-Backspace, Ctrl-Delete (also Alt) | Delete the word before or after the cursor |
-| Shift + any movement key | Select text. Typing, Backspace or Delete then replace or remove it; Esc clears it |
+| Shift + any movement key | Select text. Typing, Backspace or Delete then replace or remove it; Esc shows what else you can do with it |
 | Ctrl-A | Select all |
 | Ctrl-X, Ctrl-C, Ctrl-V | Cut, copy, paste. With nothing selected, cut and copy take the whole line, and a whole line pastes above the current one |
 | Ctrl-S | Save. With no file name, Kyte asks for one |
@@ -120,6 +120,28 @@ The next key runs one operator and closes the layer:
 | Esc, within 300 ms of the first Esc | Open the command palette |
 | Esc, later | Close the layer |
 | Any other key | Close the layer; the key is discarded, nothing is inserted |
+
+The menu changes with where you are, and only lists what works there:
+
+| Where | Extra keys |
+| --- | --- |
+| On a bracket with a partner | `i` select inside |
+| In a file with a line comment syntax | `#` comment or uncomment the line |
+| In Rust, Python or Bash | `f` select function, `e` select the syntax under the cursor, `n` and `p` next and previous function |
+
+With text selected, Esc shows the selection's menu instead. Actions leave the result selected where that makes sense, so they chain:
+
+| Key | Action |
+| --- | --- |
+| `x`, `c` | Cut, copy |
+| `/`, `R` | Search for it, replace it |
+| `#` | Comment or uncomment the lines |
+| `U`, `L` | Uppercase, lowercase |
+| `S` | Sort the lines |
+| `e` | Expand to the next larger piece of syntax |
+| Esc | Clear the selection |
+
+So Esc `f` then Esc `x` cuts a function, and Esc `e` then Esc `e` grows the selection outward.
 
 Each operator is one undo step. Alt-d on a terminal that sends `ESC d` behaves exactly like Esc then `d`. If your terminal or multiplexer delays or eats Esc, use Ctrl-Space for the layer and Ctrl-P for the palette. If the 300 ms window is too short or too long, set `--esc-ms N` or `KYTE_ESC_MS`.
 

@@ -131,6 +131,7 @@ pub const KEY_HELP: &[(&str, &str)] = &[
     ("  %  /", "matching bracket, search"),
     ("  u  r  s", "undo, redo, save"),
     ("  h", "file history"),
+    ("  (more by context)", "the menu shows what fits"),
     ("  Esc (quickly)", "command palette"),
 ];
 

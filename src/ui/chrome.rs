@@ -7,7 +7,7 @@ use super::theme::Theme;
 use ratatui::layout::Rect as R;
 use ratatui::widgets::{Block, Borders, Clear, Widget};
 
-use crate::app::{After, App, Mode, Prompt, LEGEND};
+use crate::app::{After, App, Mode, Prompt};
 use crate::buffer::Indent;
 use crate::command::{help_max_top, KEY_HELP};
 use crate::history;
@@ -149,7 +149,14 @@ fn menu_for(app: &App) -> Option<Menu> {
         beside_text: true,
     };
     Some(match &app.mode {
-        Mode::Overlay { .. } => beside("Esc", LEGEND.to_vec()),
+        Mode::Overlay { .. } => {
+            let title = if app.buffer.selection().is_some() {
+                "Selection"
+            } else {
+                "Esc"
+            };
+            beside(title, app.layer_rows())
+        }
         Mode::Prompt(Prompt::ReplaceConfirm(_)) => beside(
             "Replace this one?",
             vec![

@@ -16,6 +16,7 @@ use crate::palette::{Entry, PaletteState};
 use crate::search;
 use crate::session::{self, Opened};
 use crate::swap::{self, RecoverInfo, SwapStatus, SwapWriter};
+use crate::syntax;
 
 /// How soon after Esc a `[` or `O` counts as the rest of a split key sequence.
 /// A person can't reach those keys this fast, and they do nothing in the layer.
@@ -186,6 +187,7 @@ pub struct App {
 }
 
 /// Shown on the message line only while the overlay is open (section 5.4).
+/// The Esc layer's core keys, shown on top of whatever the context adds.
 pub const LEGEND: &[(&str, &str)] = &[
     ("w", "del word"),
     ("d", "del line"),
@@ -196,8 +198,10 @@ pub const LEGEND: &[(&str, &str)] = &[
     ("r", "redo"),
     ("s", "save"),
     ("h", "history"),
-    ("Esc Esc", "palette"),
 ];
+
+/// The double-tap key, listed last.
+const PALETTE_KEY: (&str, &str) = ("Esc Esc", "palette");
 
 impl App {
     pub fn new(buffer: Buffer, swap: Option<SwapWriter>, opts: &Options) -> App {
@@ -337,7 +341,6 @@ impl App {
         }
         if let Key::Alt(_) = key {
             if self.mode == Mode::Insert {
-                self.buffer.clear_selection();
                 for k in normalize(key, true) {
                     self.handle_key(k, now)?;
                 }
@@ -540,12 +543,7 @@ impl App {
     fn insert_key(&mut self, key: Key, now: Instant) {
         let b = &mut self.buffer;
         match key {
-            // Esc backs out of a selection before it opens anything.
-            Key::Esc if b.selection().is_some() => b.clear_selection(),
-            Key::Esc | Key::Ctrl(' ') => {
-                b.clear_selection();
-                self.mode = Mode::Overlay { opened_at: now };
-            }
+            Key::Esc | Key::Ctrl(' ') => self.mode = Mode::Overlay { opened_at: now },
             Key::Ctrl('p') => self.open_palette(),
             Key::Ctrl('k') => self.open_universal(),
             Key::Ctrl('f') => self.open_search(),
@@ -696,25 +694,179 @@ impl App {
     fn overlay_key(&mut self, key: Key, opened_at: Instant, now: Instant) {
         self.mode = Mode::Insert;
         let split = now.saturating_duration_since(opened_at) <= ESC_TAIL_WINDOW;
+        let selecting = self.buffer.selection().is_some();
         match key {
             Key::Char('[') if split => self.esc_tail = Some((EscTail::Csi, now)),
             Key::Char('O') if split => self.esc_tail = Some((EscTail::Ss3, now)),
+            Key::Esc if selecting => self.buffer.clear_selection(),
             Key::Esc => {
                 if now.saturating_duration_since(opened_at) <= self.esc_window {
                     self.open_palette();
                 }
             }
-            Key::Char('w') => self.op_word(),
-            Key::Char('d') => self.op_line(),
-            Key::Char('k') => self.op_kill(),
-            Key::Char('%') => self.op_bracket(),
-            Key::Char('/') => self.open_search(),
-            Key::Char('u') => self.undo(),
-            Key::Char('r') => self.redo(),
-            Key::Char('s') => self.save(),
-            Key::Char('h') => self.open_history(),
-            // Any other key closes the overlay and is discarded.
+            // Any key that isn't an action closes the layer and is discarded.
+            Key::Char(c) if selecting => self.selection_action(c),
+            Key::Char(c) => self.layer_action(c),
             _ => {}
+        }
+    }
+
+    /// The file's path, when its language has code actions.
+    fn code_path(&self) -> Option<&std::path::Path> {
+        self.buffer.path().filter(|p| syntax::supported(p))
+    }
+
+    fn comment_prefix(&self) -> Option<&'static str> {
+        self.buffer.path().and_then(syntax::comment_prefix)
+    }
+
+    /// Whether the cursor is on a bracket that has a partner.
+    fn on_bracket(&self) -> bool {
+        let at = self.buffer.cursor();
+        self.buffer
+            .rope()
+            .get_char(at)
+            .is_some_and(|c| "()[]{}".contains(c))
+            && ops::match_bracket(self.buffer.rope(), at).is_some()
+    }
+
+    /// The Esc layer's keys, for where the cursor is now. Each one here needs
+    /// a matching arm in `layer_action` or `selection_action`.
+    pub fn layer_rows(&self) -> Vec<(&'static str, &'static str)> {
+        let code = self.code_path().is_some();
+        let comment = self.comment_prefix().is_some();
+        let mut rows = Vec::new();
+        if self.buffer.selection().is_some() {
+            rows.extend([("x", "cut"), ("c", "copy")]);
+            rows.extend([("/", "find this"), ("R", "replace this")]);
+            if comment {
+                rows.push(("#", "comment"));
+            }
+            rows.extend([("U", "uppercase"), ("L", "lowercase"), ("S", "sort lines")]);
+            if code {
+                rows.push(("e", "expand selection"));
+            }
+            rows.push(("Esc", "clear selection"));
+            return rows;
+        }
+        rows.extend_from_slice(LEGEND);
+        if self.on_bracket() {
+            rows.push(("i", "select inside"));
+        }
+        if comment {
+            rows.push(("#", "comment line"));
+        }
+        if code {
+            rows.extend([
+                ("f", "select function"),
+                ("e", "select syntax"),
+                ("n", "next function"),
+                ("p", "prev function"),
+            ]);
+        }
+        rows.push(PALETTE_KEY);
+        rows
+    }
+
+    fn layer_action(&mut self, c: char) {
+        match c {
+            'w' => self.op_word(),
+            'd' => self.op_line(),
+            'k' => self.op_kill(),
+            '%' => self.op_bracket(),
+            '/' => self.open_search(),
+            'u' => self.undo(),
+            'r' => self.redo(),
+            's' => self.save(),
+            'h' => self.open_history(),
+            'i' if self.on_bracket() => self.select_inside_brackets(),
+            '#' => self.toggle_comment(),
+            'f' if self.code_path().is_some() => self.select_function(),
+            'e' if self.code_path().is_some() => self.expand_selection(),
+            'n' if self.code_path().is_some() => self.go_to_function(true),
+            'p' if self.code_path().is_some() => self.go_to_function(false),
+            _ => {}
+        }
+    }
+
+    fn selection_action(&mut self, c: char) {
+        match c {
+            'x' => self.cut(),
+            'c' => self.copy(),
+            '/' => self.open_search(),
+            'R' => self.open_replace(),
+            '#' => self.toggle_comment(),
+            'U' => self.buffer.transform_selection(|s| s.to_uppercase()),
+            'L' => self.buffer.transform_selection(|s| s.to_lowercase()),
+            'S' => self.buffer.sort_lines(),
+            'e' if self.code_path().is_some() => self.expand_selection(),
+            _ => {}
+        }
+    }
+
+    fn toggle_comment(&mut self) {
+        if let Some(prefix) = self.comment_prefix() {
+            self.buffer.toggle_comment(prefix);
+        }
+    }
+
+    fn select_inside_brackets(&mut self) {
+        let at = self.buffer.cursor();
+        if let Some(other) = ops::match_bracket(self.buffer.rope(), at) {
+            self.buffer.select_range(at.min(other) + 1..at.max(other));
+        }
+    }
+
+    /// Runs `f` on the file's path, text and the cursor's byte offset.
+    fn with_code<T>(
+        &self,
+        f: impl FnOnce(&std::path::Path, &str, usize) -> Option<T>,
+    ) -> Option<T> {
+        let path = self.code_path()?;
+        let at = self.buffer.rope().char_to_byte(self.buffer.cursor());
+        f(path, &self.buffer.to_string(), at)
+    }
+
+    /// Selects a byte range of the text.
+    fn select_bytes(&mut self, r: std::ops::Range<usize>) {
+        let rope = self.buffer.rope();
+        let range = rope.byte_to_char(r.start)..rope.byte_to_char(r.end);
+        self.buffer.select_range(range);
+    }
+
+    fn select_function(&mut self) {
+        match self.with_code(syntax::function_at) {
+            Some(r) => self.select_bytes(r),
+            None => self.set_message("Not inside a function"),
+        }
+    }
+
+    /// Selects the piece of syntax around the selection or cursor.
+    fn expand_selection(&mut self) {
+        let rope = self.buffer.rope();
+        let chars = self
+            .buffer
+            .selection()
+            .unwrap_or(self.buffer.cursor()..self.buffer.cursor());
+        let bytes = rope.char_to_byte(chars.start)..rope.char_to_byte(chars.end);
+        match self.with_code(|p, t, _| syntax::expand(p, t, bytes)) {
+            Some(r) => self.select_bytes(r),
+            None => self.set_message("Nothing larger to select"),
+        }
+    }
+
+    fn go_to_function(&mut self, forward: bool) {
+        let found = self.with_code(if forward {
+            syntax::next_function
+        } else {
+            syntax::prev_function
+        });
+        match found {
+            Some(b) => {
+                let at = self.buffer.rope().byte_to_char(b);
+                self.buffer.move_to(at);
+            }
+            None => self.set_message("No more functions"),
         }
     }
 
@@ -2250,24 +2402,182 @@ mod tests {
     }
 
     #[test]
-    fn esc_clears_a_selection_before_it_opens_the_layer() {
+    fn esc_with_a_selection_opens_its_menu_and_a_second_esc_clears_it() {
         let t = Instant::now();
         let mut a = app("hello");
         select_right(&mut a, 2);
         a.handle_key(Key::Esc, t).unwrap();
-        assert_eq!(a.buffer.selection(), None);
-        assert_eq!(a.mode, Mode::Insert);
-        a.handle_key(Key::Esc, t).unwrap();
         assert!(matches!(a.mode, Mode::Overlay { .. }));
+        assert_eq!(a.buffer.selection(), Some(0..2), "still selected");
+        assert!(a.layer_rows().contains(&("x", "cut")));
+        a.handle_key(Key::Esc, t).unwrap();
+        assert_eq!(a.buffer.selection(), None);
+        assert_eq!(a.mode, Mode::Insert, "not the palette");
+    }
+
+    fn code_app(path: &str, text: &str) -> App {
+        App::new(
+            Buffer::from_str(text, Some(path.into())),
+            None,
+            &Options::default(),
+        )
+    }
+
+    fn esc_then(a: &mut App, c: char) {
+        let t = Instant::now();
+        a.handle_key(Key::Esc, t).unwrap();
+        a.handle_key(Key::Char(c), t).unwrap();
     }
 
     #[test]
-    fn alt_chord_with_a_selection_runs_the_operator() {
+    fn selection_actions_change_case_sort_and_cut() {
+        let mut a = app("hello world");
+        select_right(&mut a, 5);
+        esc_then(&mut a, 'U');
+        assert_eq!(a.buffer.to_string(), "HELLO world");
+        assert_eq!(
+            a.buffer.selection(),
+            Some(0..5),
+            "ready for the next action"
+        );
+        esc_then(&mut a, 'L');
+        assert_eq!(a.buffer.to_string(), "hello world");
+        esc_then(&mut a, 'x');
+        assert_eq!(a.buffer.to_string(), " world");
+        let mut b = app("b\na\n");
+        b.buffer.select_all();
+        esc_then(&mut b, 'S');
+        assert_eq!(b.buffer.to_string(), "a\nb\n");
+    }
+
+    #[test]
+    fn find_and_replace_from_a_selection_start_with_its_text() {
+        let mut a = app("cat dog cat");
+        select_right(&mut a, 3);
+        esc_then(&mut a, '/');
+        assert_eq!(a.search_query(), Some("cat"));
+        a.handle_key(Key::Esc, Instant::now()).unwrap();
+        a.buffer.move_to(0);
+        select_right(&mut a, 3);
+        esc_then(&mut a, 'R');
+        assert_eq!(a.search_query(), Some("cat"));
+    }
+
+    #[test]
+    fn unknown_key_keeps_the_selection_and_types_nothing() {
+        let mut a = app("hello");
+        select_right(&mut a, 2);
+        esc_then(&mut a, 'z');
+        assert_eq!(a.buffer.selection(), Some(0..2));
+        assert_eq!(a.buffer.to_string(), "hello");
+        assert_eq!(a.mode, Mode::Insert);
+    }
+
+    #[test]
+    fn layer_rows_follow_the_context() {
+        let rows = |a: &App| a.layer_rows().into_iter().map(|r| r.0).collect::<Vec<_>>();
+        let plain = code_app("/x/notes.txt", "(a)");
+        let r = rows(&plain);
+        assert!(r.contains(&"w") && r.contains(&"i"), "on a bracket: {r:?}");
+        assert!(!r.contains(&"#"), "no comment syntax for .txt");
+        assert_eq!(r.last(), Some(&"Esc Esc"));
+        let mut off = code_app("/x/notes.txt", "(a) b");
+        off.buffer.move_to(4);
+        assert!(!rows(&off).contains(&"i"), "not on a bracket");
+        let mut unmatched = code_app("/x/notes.txt", "(a");
+        unmatched.buffer.move_to(0);
+        assert!(!rows(&unmatched).contains(&"i"), "no partner");
+        let toml = code_app("/x/a.toml", "a = 1\n");
+        assert!(rows(&toml).contains(&"#"));
+    }
+
+    #[test]
+    fn inside_brackets_selects_between_them_from_either_end() {
+        let mut a = code_app("/x/a.txt", "f(abc)");
+        a.buffer.move_to(1);
+        esc_then(&mut a, 'i');
+        assert_eq!(a.buffer.selection(), Some(2..5));
+        a.buffer.move_to(5);
+        esc_then(&mut a, 'i');
+        assert_eq!(a.buffer.selection(), Some(2..5));
+    }
+
+    #[test]
+    fn comment_key_toggles_the_line() {
+        let mut a = code_app("/x/a.py", "x = 1\n");
+        esc_then(&mut a, '#');
+        assert_eq!(a.buffer.to_string(), "# x = 1\n");
+        esc_then(&mut a, '#');
+        assert_eq!(a.buffer.to_string(), "x = 1\n");
+        let mut plain = code_app("/x/a.txt", "x\n");
+        esc_then(&mut plain, '#');
+        assert!(!plain.buffer.is_dirty());
+    }
+
+    #[cfg(feature = "highlight")]
+    #[test]
+    fn code_keys_select_and_move_by_function() {
+        let text = "fn one() {\n    let a = 1;\n}\n\nfn two() {}\n";
+        let mut a = code_app("/x/a.rs", text);
+        assert!(a.layer_rows().contains(&("f", "select function")));
+        a.buffer.move_to(16);
+        esc_then(&mut a, 'f');
+        assert_eq!(a.buffer.selection(), Some(0..27));
+        // then act on it, the way a user would: Esc f, Esc x
+        esc_then(&mut a, 'x');
+        assert_eq!(a.buffer.to_string(), "\n\nfn two() {}\n");
+        a.handle_key(Key::Ctrl('z'), Instant::now()).unwrap();
+        a.buffer.move_to(0);
+        esc_then(&mut a, 'n');
+        assert_eq!(a.buffer.cursor(), 29);
+        esc_then(&mut a, 'p');
+        assert_eq!(a.buffer.cursor(), 0);
+        esc_then(&mut a, 'p');
+        assert_eq!(a.message.as_deref(), Some("No more functions"));
+        a.buffer.move_to(28);
+        esc_then(&mut a, 'f');
+        assert_eq!(a.message.as_deref(), Some("Not inside a function"));
+    }
+
+    #[cfg(feature = "highlight")]
+    #[test]
+    fn expand_grows_the_selection_one_level_at_a_time() {
+        let mut a = code_app("/x/a.rs", "fn f() { g(1 + 2); }\n");
+        a.buffer.move_to(11);
+        esc_then(&mut a, 'e');
+        assert_eq!(a.buffer.selection(), Some(11..12));
+        esc_then(&mut a, 'e');
+        assert_eq!(a.buffer.selection(), Some(11..16));
+        esc_then(&mut a, 'e');
+        assert_eq!(a.buffer.selection(), Some(10..17));
+    }
+
+    #[cfg(feature = "highlight")]
+    #[test]
+    fn code_keys_keep_char_positions_with_non_ascii_text() {
+        let mut a = code_app("/x/a.rs", "// 世界\nfn f() {}\n");
+        a.buffer.move_to(7);
+        esc_then(&mut a, 'f');
+        assert_eq!(a.buffer.selection(), Some(6..15));
+    }
+
+    #[test]
+    fn code_keys_do_nothing_outside_code() {
+        let mut a = code_app("/x/a.txt", "abc");
+        esc_then(&mut a, 'f');
+        esc_then(&mut a, 'n');
+        assert_eq!(a.buffer.selection(), None);
+        assert_eq!(a.buffer.cursor(), 0);
+        assert_eq!(a.message, None);
+    }
+
+    #[test]
+    fn alt_chord_with_a_selection_runs_the_selection_action() {
         let t = Instant::now();
         let mut a = app("one\ntwo\n");
         select_right(&mut a, 2);
-        a.handle_key(Key::Alt('d'), t).unwrap();
-        assert_eq!(a.buffer.to_string(), "two\n");
+        a.handle_key(Key::Alt('x'), t).unwrap();
+        assert_eq!(a.buffer.to_string(), "e\ntwo\n");
         assert_eq!(a.mode, Mode::Insert);
     }
 

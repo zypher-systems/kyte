@@ -17,6 +17,7 @@ pub mod palette;
 pub mod search;
 pub mod session;
 pub mod swap;
+pub mod syntax;
 pub mod term;
 pub mod ui;
 

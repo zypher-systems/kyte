@@ -166,7 +166,7 @@ mod tests {
         let t = draw(&mut a, 80, 24);
         assert!(!row(&t, 23).contains("del word"), "the footer stays clear");
         let all = screen(&t, 22);
-        for (k, label) in crate::app::LEGEND {
+        for (k, label) in a.layer_rows() {
             assert!(all.contains(&format!("{k} {label}")), "{k} missing\n{all}");
         }
     }
@@ -177,7 +177,7 @@ mod tests {
         a.handle_key(Key::Esc, Instant::now()).unwrap();
         let t = draw(&mut a, 80, 8);
         let all = screen(&t, 6);
-        for (k, _) in crate::app::LEGEND {
+        for (k, _) in a.layer_rows() {
             assert!(all.contains(k), "{k} missing\n{all}");
         }
     }

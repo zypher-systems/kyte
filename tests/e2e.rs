@@ -2402,17 +2402,39 @@ fn shift_selects_shows_on_screen_and_typing_replaces_it() {
 }
 
 #[test]
-fn esc_clears_the_selection_and_shows_no_legend() {
+fn esc_on_a_selection_offers_its_actions_and_esc_again_clears_it() {
     let env = Env::new();
     let f = env.write("s.txt", "hello\n");
     let mut p = env.open(&f);
     p.send(SHIFT_RIGHT);
     wait_status(&p, "1 selected");
     p.send_keys(&["Esc"]);
+    p.wait_for("Selection", TIMEOUT);
+    assert!(p.screen().contains("x cut"), "{}", p.dump());
+    assert!(!has_legend(&p), "the selection menu replaces the usual one");
+    std::thread::sleep(Duration::from_millis(30));
+    p.send_keys(&["Esc"]);
     p.wait_until("selection to clear", TIMEOUT, |s| !s.contains("selected"));
-    assert!(!has_legend(&p));
     assert!(status(&p).contains("INSERT"));
     quit_clean(&mut p);
+}
+
+#[test]
+fn selection_action_through_the_menu() {
+    let env = Env::new();
+    let f = env.write("s.txt", "hello world\n");
+    let mut p = env.open(&f);
+    for _ in 0..5 {
+        p.send(SHIFT_RIGHT);
+    }
+    wait_status(&p, "5 selected");
+    p.send_keys(&["Esc"]);
+    p.wait_for("x cut", TIMEOUT);
+    p.send_str("U");
+    p.wait_for("1 │ HELLO world", TIMEOUT);
+    save_and_wait(&mut p);
+    quit_clean(&mut p);
+    assert_eq!(fs::read_to_string(&f).unwrap(), "HELLO world\n");
 }
 
 #[test]
