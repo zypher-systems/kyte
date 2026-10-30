@@ -21,3 +21,9 @@ Every deviation from `ARCHITECTURE` (Mnemo page_e336285940d54098ada133cc08df814b
 | proptest (dev) | any | 1.12.0 |
 | portable-pty (dev) | any | 0.9.0 |
 | vt100 (dev) | any | 0.18.1 (newest; its API takes `NonZeroU16` sizes) |
+
+## T1 key lab findings
+
+- `ESC ESC` written in one `write()` reaches Kyte as a single Esc (crossterm's parser consumes the pair). Real double-taps are separate reads, so the design stands; test and demo drivers send the two Escs as separate writes. No byte-level parsing was added.
+- Pasted text: CR and CRLF line breaks (what terminals send for pasted newlines) are stored as LF. File content is otherwise stored exactly as read.
+- The pty harness answers the cursor-position (DSR 6) and primary device-attribute queries like a real terminal would, so a program that asks never stalls. Kyte itself only queries when the kitty check runs (not with `--no-kitty`).
