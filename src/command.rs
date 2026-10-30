@@ -4,6 +4,7 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
     Save,
+    SaveAs,
     Quit,
     QuitWithoutSaving,
     Undo,
@@ -17,6 +18,7 @@ pub enum Command {
 /// Registry order is the palette order for an empty query and the tie-breaker.
 pub const REGISTRY: &[Command] = &[
     Command::Save,
+    Command::SaveAs,
     Command::Quit,
     Command::QuitWithoutSaving,
     Command::Undo,
@@ -31,6 +33,7 @@ impl Command {
     pub fn label(self) -> &'static str {
         match self {
             Command::Save => "Save",
+            Command::SaveAs => "Save as",
             Command::Quit => "Quit",
             Command::QuitWithoutSaving => "Quit without saving",
             Command::Undo => "Undo",
@@ -46,6 +49,7 @@ impl Command {
     pub fn hint(self) -> &'static str {
         match self {
             Command::Save => "Ctrl-S",
+            Command::SaveAs => "",
             Command::Quit => "Ctrl-Q",
             Command::QuitWithoutSaving => "",
             Command::Undo => "Ctrl-Z",
@@ -92,13 +96,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn nine_commands_with_labels() {
-        assert_eq!(REGISTRY.len(), 9);
+    fn ten_commands_with_labels() {
+        assert_eq!(REGISTRY.len(), 10);
         let labels: Vec<&str> = REGISTRY.iter().map(|c| c.label()).collect();
         assert_eq!(
             labels,
             vec![
                 "Save",
+                "Save as",
                 "Quit",
                 "Quit without saving",
                 "Undo",

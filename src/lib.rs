@@ -49,7 +49,7 @@ pub fn run(opts: Options) -> anyhow::Result<ExitCode> {
             Ok(app) => app,
             Err(code) => return Ok(code),
         },
-        None => App::new(Buffer::from_str("", None), None, &opts),
+        None => open_untitled(&opts),
     };
     let result = event_loop(&mut app, opts.no_kitty);
     if result.is_ok() {
@@ -57,6 +57,20 @@ pub fn run(opts: Options) -> anyhow::Result<ExitCode> {
     }
     result?;
     Ok(ExitCode::SUCCESS)
+}
+
+/// An empty buffer with no file name, or a crashed one to recover.
+fn open_untitled(opts: &Options) -> App {
+    let buffer = Buffer::from_str("", None);
+    if let Ok(Some(info)) = swap::find_untitled() {
+        let mut app = App::new(buffer, None, opts);
+        app.mode = Mode::Recover(info);
+        return app;
+    }
+    match SwapWriter::create_untitled() {
+        Ok(w) => App::new(buffer, Some(w), opts),
+        Err(e) => without_swap(buffer, opts, e),
+    }
 }
 
 /// Loads `p`, checks its swap and builds the app; `Err(code)` means exit now.

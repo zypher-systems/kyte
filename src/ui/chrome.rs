@@ -48,23 +48,10 @@ pub fn message_line(app: &App, area: Rect, cells: &mut Cells, theme: &Theme) -> 
         Mode::Prompt(Prompt::ConfirmQuit) => CONFIRM_QUIT_TEXT.to_string(),
         Mode::Prompt(Prompt::ConfirmSave { risk, .. }) => risk.question().to_string(),
         Mode::Prompt(Prompt::GotoLine { text }) => {
-            let shown = format!(" Go to line: {text}");
-            let n = shown.chars().count();
-            match &app.message {
-                Some(m) => {
-                    cells.set_stringn(area.x, area.y, &shown, w, theme.message);
-                    if n + 3 < w {
-                        cells.set_stringn(area.x + n as u16 + 3, area.y, m, w - n - 3, theme.error);
-                    }
-                }
-                None => {
-                    cells.set_stringn(area.x, area.y, &shown, w, theme.message);
-                }
-            }
-            return Some((
-                area.x + (n as u16).min(area.width.saturating_sub(1)),
-                area.y,
-            ));
+            return input_prompt(app, "Go to line", text, area, cells, theme)
+        }
+        Mode::Prompt(Prompt::SaveAs { text, .. }) => {
+            return input_prompt(app, "Save as", text, area, cells, theme)
         }
         Mode::Prompt(Prompt::Search { query, .. }) => match &app.message {
             Some(m) => format!("Search: {query}   ({m})"),
@@ -79,6 +66,31 @@ pub fn message_line(app: &App, area: Rect, cells: &mut Cells, theme: &Theme) -> 
     };
     cells.set_stringn(area.x, area.y, format!(" {text}"), w, style);
     None
+}
+
+/// A typed prompt with any error after it. Returns the cursor position. Text
+/// too long for the row shows its end, where the typing happens.
+fn input_prompt(
+    app: &App,
+    label: &str,
+    text: &str,
+    area: Rect,
+    cells: &mut Cells,
+    theme: &Theme,
+) -> Option<(u16, u16)> {
+    let w = area.width as usize;
+    let shown = format!(" {label}: {text}");
+    let n = shown.chars().count();
+    let skip = (n + 1).saturating_sub(w);
+    let shown: String = shown.chars().skip(skip).collect();
+    let n = n - skip;
+    cells.set_stringn(area.x, area.y, &shown, w, theme.message);
+    if let Some(m) = &app.message {
+        if n + 3 < w {
+            cells.set_stringn(area.x + n as u16 + 3, area.y, m, w - n - 3, theme.error);
+        }
+    }
+    Some((area.x + n as u16, area.y))
 }
 
 /// The overlay legend: each key letter and its label.
@@ -220,7 +232,11 @@ pub fn recover(app: &App, text_area: Rect, cells: &mut Cells, theme: &Theme) {
     let Mode::Recover(info) = &app.mode else {
         return;
     };
-    let path = info.target.display().to_string();
+    let path = if info.target.as_os_str().is_empty() {
+        "(untitled)".to_string()
+    } else {
+        info.target.display().to_string()
+    };
     let lines: Vec<String> = if info.recovered.is_some() {
         let mut l = vec![
             "Kyte found unsaved changes for:".to_string(),

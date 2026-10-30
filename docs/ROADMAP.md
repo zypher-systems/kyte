@@ -10,9 +10,9 @@ Fix every way the current build can lose or damage work. Each fix gets a regress
 
 ### Work or data lost
 
-- [ ] Unsaved-quit prompt: `y` saves and quits, `n` discards, Esc cancels. Today `y` discards. Remove the double Ctrl-Q discard and update AC-18.
-- [ ] A buffer with no file name can be saved, and its edits reach a swap. Today Ctrl-S refuses and nothing protects the text.
-- [ ] A failed save leaves a way out: Save As, and quitting keeps the swap unless the user discards it. Today confirming quit deletes the swap.
+- [x] Unsaved-quit prompt: `y` saves and quits, `n` discards, Esc cancels. Today `y` discards. Remove the double Ctrl-Q discard and update AC-18.
+- [x] A buffer with no file name can be saved, and its edits reach a swap. Today Ctrl-S refuses and nothing protects the text.
+- [x] A failed save leaves a way out: Save As, and quitting keeps the swap unless the user discards it. Today confirming quit deletes the swap.
 - [x] A stale swap can still be recovered. Store the base content in the swap (format v2), so a crash followed by a change on disk doesn't strand the edits.
 - [x] Ctrl-S warns when the file changed on disk since it was opened or last saved.
 - [x] A read-only file isn't replaced without an explicit choice.
@@ -37,7 +37,7 @@ Fix every way the current build can lose or damage work. Each fix gets a regress
 
 ## Next: 0.2.0, daily driver
 
-- [ ] Save As, and open a file from inside the editor
+- [ ] Open a file from inside the editor
 - [ ] Selection, cut, copy and paste, including the system clipboard over OSC 52
 - [ ] Find and replace; case-insensitive search; visible match highlighting
 - [ ] Word motion and word delete

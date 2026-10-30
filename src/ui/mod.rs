@@ -166,6 +166,6 @@ mod tests {
         a.handle_key(Key::Ctrl('s'), Instant::now()).unwrap();
         let t = draw(&mut a, 60, 6);
         assert!(row(&t, 4).contains("Untitled"));
-        assert!(row(&t, 5).contains("No file name; start Kyte with a file path"));
+        assert!(row(&t, 5).contains("Save as:"));
     }
 }

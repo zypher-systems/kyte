@@ -119,6 +119,11 @@ impl Buffer {
         self.path.as_deref()
     }
 
+    /// Gives the buffer a new file name (after Save As).
+    pub fn set_path(&mut self, path: PathBuf) {
+        self.path = Some(path);
+    }
+
     pub fn len_chars(&self) -> usize {
         self.rope.len_chars()
     }

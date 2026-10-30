@@ -75,8 +75,8 @@ Environment variables: `KYTE_STATE_DIR` (where swap files go; overrides the defa
 | Printable characters, Enter, Tab | Insert at the cursor (Tab inserts a real tab) |
 | Backspace, Delete | Delete the previous or next character (joins lines at line edges) |
 | Arrows, Home, End, PageUp, PageDown, Ctrl-Home, Ctrl-End | Move |
-| Ctrl-S (also Ctrl-O) | Save |
-| Ctrl-Q (also Ctrl-X) | Quit. With unsaved changes, Kyte asks first: Ctrl-Q or `y` quits, any other key cancels |
+| Ctrl-S (also Ctrl-O) | Save. With no file name, Kyte asks for one |
+| Ctrl-Q (also Ctrl-X) | Quit. With unsaved changes, Kyte asks first: `y` saves and quits, `n` discards, Esc cancels |
 | Ctrl-Z, Ctrl-Y | Undo, redo |
 | Ctrl-F | Search |
 | Esc, Ctrl-Space | Open the operator layer |
@@ -116,7 +116,9 @@ Under tmux, set `tmux set -g escape-time 10`. tmux's default of 500 ms delays ev
 
 Esc Esc (or Ctrl-P) opens a fuzzy-filtered list. Type to filter, Up and Down to select, Enter to run, Esc to close without running anything.
 
-Commands: Save, Quit, Quit without saving, Undo, Redo, Find, Go to line, Toggle line numbers, Show key help.
+Commands: Save, Save as, Quit, Quit without saving, Undo, Redo, Find, Go to line, Toggle line numbers, Show key help.
+
+**Save as** asks for a file name, starting from the current one; `~/` means your home directory. It asks before overwriting a file, and refuses a file another Kyte has open. The buffer then belongs to the new file, and the old file stays as it was.
 
 **Go to line** asks for a 1-based line number. Numbers past the end go to the last line, and anything that is not a number shows an error. **Show key help** shows the key table; Esc closes it.
 
@@ -133,6 +135,8 @@ Ctrl-F (or Esc `/`) opens `Search:` on the message line. Kyte jumps to the first
 - A file with hard links, or one whose owner or attributes the temporary file can't take on, is rewritten in place so it stays the same file. Kyte keeps a backup beside it during the write and restores the old content if the write fails.
 - If the file changed on disk since you opened or last saved it, Ctrl-S asks before overwriting. The check compares content, so a rewrite of the same bytes doesn't count. A read-only file also needs a `y` before Kyte replaces it. `n` or Esc cancels either question.
 - After a save, the swap starts over empty. After a clean quit, the swap is deleted.
+- A buffer with no file name has a swap too, named `untitled-<pid>-<start>.kyteswp`. After a crash, running `kyte` with no file offers to recover the newest one.
+- If a save fails, your changes stay in the editor and the swap. The error says so, and Save as in the palette writes them elsewhere. Quitting after a failed save still asks first; only `n` discards.
 - If Kyte finds a swap with unsaved changes when you open the file, it shows **Recover unsaved changes**:
   - `r` recovers the changes into the editor, marked unsaved. Ctrl-S writes them.
   - `d` discards them and opens the file as it is on disk.

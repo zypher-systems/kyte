@@ -90,6 +90,15 @@ pub fn resolve_target(path: &Path) -> io::Result<PathBuf> {
     }
 }
 
+/// A path typed into a prompt, with a leading `~/` meaning the home directory.
+pub fn expand_tilde(text: &str) -> PathBuf {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    match (text.strip_prefix("~/"), home) {
+        (Some(rest), Some(h)) => h.join(rest),
+        _ => PathBuf::from(text),
+    }
+}
+
 /// Absolute form of `path` with its parent directory canonicalized when possible.
 pub fn absolute(path: &Path) -> io::Result<PathBuf> {
     let abs = if path.is_absolute() {

@@ -32,6 +32,14 @@ These replace the swap format and flows in `ARCHITECTURE` sections 6 and 8.
 - In the save questions any key other than `y`, `n` or Esc is ignored. They guard a destructive action, so a stray key shouldn't answer one.
 - FIFOs and devices are refused at open (exit 2): reading one could hang forever, and a rename would replace the device node.
 
+## 0.1.1 quitting, Save As and untitled buffers
+
+- The unsaved-quit prompt ignores every key other than `y`, `n` and Esc, including a second Ctrl-Q. It guards the only action that discards work and its swap, so a stray key shouldn't answer it. AC-18 changed to match. "Quit without saving" in the palette still discards at once, since it's named for that.
+- `y` when the save fails, or is cancelled, stays in the editor. Nothing is lost, and the error points at Save as.
+- Save As starts from the current path, so a small rename needs little typing. It adds a tenth palette command. It refuses a target that another Kyte holds, because the swap can't be replaced underneath that session. It writes straight away when the target doesn't exist, and asks first when it does.
+- A buffer with no file name gets its own swap, named by PID and start time, so several can run at once. Its base is empty, so it never needs a snapshot. A bare `kyte` offers the newest crashed one; any others stay until that one is resolved. Crashed untitled swaps that hold no text are deleted.
+- After recovery the cursor starts at the top of the buffer, as with any freshly opened file.
+
 ## Hosting and environment
 
 - Toolchain: rustc/cargo 1.99.1 (stable, 2026-10-13), edition 2021.

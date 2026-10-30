@@ -107,7 +107,7 @@ mod tests {
     #[test]
     fn empty_query_keeps_registry_order() {
         assert_eq!(filter(""), REGISTRY.to_vec());
-        assert_eq!(PaletteState::default().results.len(), 9);
+        assert_eq!(PaletteState::default().results.len(), 10);
     }
 
     #[test]
@@ -116,7 +116,7 @@ mod tests {
         assert!(score("sav", "Save").unwrap() > score("sav", "Quit without saving").unwrap());
         assert_eq!(
             filter("sav"),
-            vec![Command::Save, Command::QuitWithoutSaving]
+            vec![Command::Save, Command::SaveAs, Command::QuitWithoutSaving]
         );
     }
 
@@ -154,13 +154,13 @@ mod tests {
         for _ in 0..20 {
             s.down();
         }
-        assert_eq!(s.selected, 8);
+        assert_eq!(s.selected, 9);
         assert_eq!(s.selected_command(), Some(Command::ShowKeyHelp));
-        assert_eq!(s.scroll_offset(), 1);
+        assert_eq!(s.scroll_offset(), 2);
         s.push('s');
         assert_eq!(s.selected, 0);
         assert_eq!(s.selected_command(), Some(Command::Save));
         s.pop();
-        assert_eq!(s.results.len(), 9);
+        assert_eq!(s.results.len(), 10);
     }
 }

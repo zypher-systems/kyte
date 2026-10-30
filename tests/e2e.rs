@@ -325,7 +325,7 @@ fn ac11_large_file_ctrl_end_and_typing_within_1s() {
     eprintln!("AC-11: opened in {opened:?}, keystroke visible in {typed:?}");
     p.send_keys(&["C-q"]);
     p.wait_for("Unsaved changes", TIMEOUT);
-    p.send_keys(&["C-q"]);
+    p.send_str("n");
     assert_eq!(p.wait_exit(TIMEOUT), 0);
 }
 
@@ -342,28 +342,249 @@ fn ac18_quit_dirty_asks_then_discards() {
     p.wait_for("Unsaved changes", TIMEOUT);
     std::thread::sleep(Duration::from_millis(100));
     assert_eq!(p.try_exit(), None, "must not exit on the first Ctrl-Q");
-    // any other key cancels
-    p.send_keys(&["Right"]);
+    // other keys are ignored, including a second Ctrl-Q
+    p.send_keys(&["Right", "C-q"]);
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(p.try_exit(), None, "a second Ctrl-Q must not discard");
+    assert!(p.screen().contains("Unsaved changes"));
+    // Esc cancels
+    p.send_keys(&["Esc"]);
     p.wait_gone("Unsaved changes", TIMEOUT);
+    wait_status(&p, "[+]");
     p.send_keys(&["C-q"]);
     p.wait_for("Unsaved changes", TIMEOUT);
-    p.send_keys(&["C-q"]);
+    p.send_str("n");
     assert_eq!(p.wait_exit(TIMEOUT), 0);
     assert_eq!(fs::read_to_string(&f).unwrap(), "keep me\n");
 }
 
 #[test]
-fn ac18_quit_dirty_y_discards() {
+fn ac18_quit_dirty_y_saves_and_quits() {
     let env = Env::new();
     let f = env.write("q.txt", "keep me\n");
     let mut p = env.open(&f);
-    p.send_str("junk");
+    p.send_str("more ");
     wait_status(&p, "[+]");
     p.send_keys(&["C-q"]);
     p.wait_for("Unsaved changes", TIMEOUT);
     p.send_str("y");
     assert_eq!(p.wait_exit(TIMEOUT), 0);
-    assert_eq!(fs::read_to_string(&f).unwrap(), "keep me\n");
+    assert_eq!(fs::read_to_string(&f).unwrap(), "more keep me\n");
+    assert!(fs::read_dir(&env.state).unwrap().next().is_none());
+}
+
+#[test]
+fn ctrl_x_y_saves() {
+    let env = Env::new();
+    let f = env.write("q.txt", "text\n");
+    let mut p = env.open(&f);
+    p.send_str("work ");
+    wait_status(&p, "[+]");
+    p.send_keys(&["C-x"]);
+    p.wait_for("Unsaved changes", TIMEOUT);
+    p.send_str("y");
+    assert_eq!(p.wait_exit(TIMEOUT), 0);
+    assert_eq!(fs::read_to_string(&f).unwrap(), "work text\n");
+}
+
+#[test]
+fn y_with_a_failed_save_stays_open_and_keeps_the_swap() {
+    let env = Env::new();
+    if fs::metadata(env.dir.path()).unwrap().uid() == 0 {
+        eprintln!("skipped: root can write to anything");
+        return;
+    }
+    let dir = env.path("ro");
+    fs::create_dir(&dir).unwrap();
+    let f = dir.join("f.txt");
+    fs::write(&f, "x\n").unwrap();
+    let mut p = env.open(&f);
+    p.send_str("work");
+    wait_status(&p, "[+]");
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
+    p.send_keys(&["C-q"]);
+    p.wait_for("Unsaved changes", TIMEOUT);
+    p.send_str("y");
+    p.wait_for("Save failed", TIMEOUT);
+    assert_eq!(p.try_exit(), None);
+    assert_eq!(swap_files(&env).len(), 1);
+    // Save As gets the work out
+    let elsewhere = env.path("elsewhere.txt");
+    save_as(&mut p, elsewhere.to_str().unwrap());
+    p.wait_for("Saved 1 line", TIMEOUT);
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(fs::read_to_string(&elsewhere).unwrap(), "workx\n");
+    assert_eq!(fs::read_to_string(&f).unwrap(), "x\n");
+    wait_status(&p, "elsewhere.txt");
+    quit_clean(&mut p);
+}
+
+/// Opens Save As from the palette and replaces the name with `path`.
+fn save_as(p: &mut Pty, path: &str) {
+    open_palette(p);
+    p.send_str("save as");
+    p.wait_for("▸ Save as", TIMEOUT);
+    p.send_keys(&["Enter"]);
+    p.wait_for("Save as:", TIMEOUT);
+    for _ in 0..500 {
+        p.send_keys(&["Backspace"]);
+    }
+    p.wait_until("the prompt to empty", TIMEOUT, |s| {
+        s.lines().any(|l| l.trim_end() == " Save as:")
+    });
+    p.send_str(path);
+    p.send_keys(&["Enter"]);
+}
+
+#[test]
+fn save_as_moves_the_buffer_and_its_swap_to_the_new_file() {
+    let env = Env::new();
+    let f = work_file(&env, "old.txt", "text\n");
+    let new = f.with_file_name("new.txt");
+    let mut p = env.open(&f);
+    p.send_str("edit ");
+    wait_status(&p, "[+]");
+    save_as(&mut p, new.to_str().unwrap());
+    p.wait_for("Saved 1 line", TIMEOUT);
+    wait_status(&p, "new.txt");
+    assert_eq!(fs::read_to_string(&f).unwrap(), "text\n", "old file stays");
+    assert_eq!(fs::read_to_string(&new).unwrap(), "edit text\n");
+    let swaps = swap_files(&env);
+    assert_eq!(swaps.len(), 1);
+    assert!(swaps[0].to_string_lossy().contains("new.txt"));
+    p.send_str("more ");
+    wait_status(&p, "[+]");
+    save_and_wait(&mut p);
+    quit_clean(&mut p);
+    assert_eq!(fs::read_to_string(&new).unwrap(), "edit more text\n");
+}
+
+#[test]
+fn save_as_asks_before_overwriting_and_refuses_a_directory() {
+    let env = Env::new();
+    let f = work_file(&env, "a.txt", "mine\n");
+    let other = env.write("other.txt", "precious\n");
+    let mut p = env.open(&f);
+    save_as(&mut p, other.to_str().unwrap());
+    p.wait_for("File exists!", TIMEOUT);
+    p.send_str("n");
+    p.wait_for("Save cancelled", TIMEOUT);
+    assert_eq!(fs::read_to_string(&other).unwrap(), "precious\n");
+    save_as(&mut p, env.dir.path().to_str().unwrap());
+    p.wait_for("Not a regular file", TIMEOUT);
+    p.send_keys(&["Esc"]);
+    p.wait_for("Save cancelled", TIMEOUT);
+    save_as(&mut p, other.to_str().unwrap());
+    p.wait_for("File exists!", TIMEOUT);
+    p.send_str("y");
+    p.wait_for("Saved 1 line", TIMEOUT);
+    assert_eq!(fs::read_to_string(&other).unwrap(), "mine\n");
+    quit_clean(&mut p);
+}
+
+#[test]
+fn save_as_refuses_a_file_open_in_another_kyte() {
+    let env = Env::new();
+    let f = work_file(&env, "a.txt", "mine\n");
+    let other = work_file(&env, "b.txt", "theirs\n");
+    let mut a = env.open(&other);
+    let mut p = env.open(&f);
+    save_as(&mut p, other.to_str().unwrap());
+    p.wait_for("Open in another kyte", TIMEOUT);
+    p.send_keys(&["Esc"]);
+    p.wait_for("Save cancelled", TIMEOUT);
+    quit_clean(&mut p);
+    quit_clean(&mut a);
+    assert_eq!(fs::read_to_string(&other).unwrap(), "theirs\n");
+}
+
+fn open_untitled(env: &Env) -> Pty {
+    let p = Pty::kyte(&bin(), &env.state, &[]);
+    p.wait_for("Ln 1, Col 1", TIMEOUT);
+    p
+}
+
+#[test]
+fn untitled_buffer_is_saved_by_asking_for_a_name() {
+    let env = Env::new();
+    let f = env.path("named.txt");
+    let mut p = open_untitled(&env);
+    p.send_str("first draft");
+    wait_status(&p, "Untitled [+]");
+    assert_eq!(swap_files(&env).len(), 1, "typing reaches a swap");
+    p.send_keys(&["C-s"]);
+    p.wait_for("Save as:", TIMEOUT);
+    p.send_str(f.to_str().unwrap());
+    p.send_keys(&["Enter"]);
+    p.wait_for("Saved 1 line", TIMEOUT);
+    wait_status(&p, "named.txt");
+    assert_eq!(fs::read_to_string(&f).unwrap(), "first draft");
+    let swaps = swap_files(&env);
+    assert_eq!(swaps.len(), 1);
+    assert!(swaps[0].to_string_lossy().contains("named.txt"));
+    quit_clean(&mut p);
+}
+
+#[test]
+fn quitting_an_untitled_buffer_with_y_saves_then_quits() {
+    let env = Env::new();
+    let f = env.path("named.txt");
+    let mut p = open_untitled(&env);
+    p.send_str("draft");
+    wait_status(&p, "[+]");
+    p.send_keys(&["C-q"]);
+    p.wait_for("Unsaved changes", TIMEOUT);
+    p.send_str("y");
+    p.wait_for("Save as:", TIMEOUT);
+    p.send_str(f.to_str().unwrap());
+    p.send_keys(&["Enter"]);
+    assert_eq!(p.wait_exit(TIMEOUT), 0);
+    assert_eq!(fs::read_to_string(&f).unwrap(), "draft");
+    assert!(swap_files(&env).is_empty());
+}
+
+#[test]
+fn untitled_buffer_survives_a_crash() {
+    let env = Env::new();
+    let mut p = open_untitled(&env);
+    p.send_str("unnamed work");
+    wait_status(&p, "[+]");
+    std::thread::sleep(Duration::from_millis(100));
+    p.kill9();
+    let mut p = Pty::kyte(&bin(), &env.state, &[]);
+    p.wait_for("Recover unsaved changes", TIMEOUT);
+    assert!(p.screen().contains("(untitled)"));
+    p.send_str("q");
+    assert_eq!(p.wait_exit(TIMEOUT), 0);
+    let mut p = Pty::kyte(&bin(), &env.state, &[]);
+    p.wait_for("Recover unsaved changes", TIMEOUT);
+    p.send_str("r");
+    p.wait_for("1 │ unnamed work", TIMEOUT);
+    wait_status(&p, "Untitled [+]");
+    // a second crash still recovers it
+    p.send_str("more ");
+    p.wait_for("more unnamed work", TIMEOUT);
+    std::thread::sleep(Duration::from_millis(100));
+    p.kill9();
+    let mut p = Pty::kyte(&bin(), &env.state, &[]);
+    p.wait_for("Recover unsaved changes", TIMEOUT);
+    p.send_str("d");
+    p.wait_for("Discarded the swap file", TIMEOUT);
+    assert!(!p.screen().contains("unnamed work"));
+    assert_eq!(swap_files(&env).len(), 1, "only the new session's swap");
+    quit_clean(&mut p);
+    assert!(swap_files(&env).is_empty());
+}
+
+#[test]
+fn crashed_empty_untitled_session_offers_nothing() {
+    let env = Env::new();
+    let mut p = open_untitled(&env);
+    p.kill9();
+    let mut p = open_untitled(&env);
+    assert!(!p.screen().contains("Recover"));
+    assert_eq!(swap_files(&env).len(), 1);
+    quit_clean(&mut p);
 }
 
 #[test]
@@ -515,7 +736,7 @@ fn ac12_legend_appears_instantly_and_only_in_overlay() {
     assert!(!p.screen().contains("Command palette"));
     p.send_keys(&["C-q"]);
     p.wait_for("Unsaved changes", TIMEOUT);
-    p.send_keys(&["y"]);
+    p.send_str("n");
     p.wait_exit(TIMEOUT);
 }
 
@@ -800,8 +1021,9 @@ fn ac16_empty_query_does_nothing() {
 
 // ---------------------------------------------------------------- AC-17
 
-const COMMANDS: [&str; 9] = [
+const COMMANDS: [&str; 10] = [
     "Save",
+    "Save as",
     "Quit",
     "Quit without saving",
     "Undo",
@@ -829,7 +1051,7 @@ fn first_result(p: &Pty) -> String {
 }
 
 #[test]
-fn ac17_palette_lists_all_nine_commands() {
+fn ac17_palette_lists_all_ten_commands() {
     let env = Env::new();
     let f = env.write("p.txt", "abc\n");
     let mut p = env.open(&f);
@@ -840,8 +1062,8 @@ fn ac17_palette_lists_all_nine_commands() {
         .filter(|c| p.screen().contains(c))
         .collect();
     assert!(first_result(&p).contains("▸ Save"), "{}", p.dump());
-    // 8 rows are visible at once; scrolling down reveals the ninth
-    for _ in 0..8 {
+    // 8 rows are visible at once; scrolling down reveals the rest
+    for _ in 0..9 {
         p.send_keys(&["Down"]);
     }
     p.wait_for("▸ Show key help", TIMEOUT);
@@ -850,7 +1072,7 @@ fn ac17_palette_lists_all_nine_commands() {
             seen.push(c);
         }
     }
-    assert_eq!(seen.len(), 9, "saw {seen:?}");
+    assert_eq!(seen.len(), 10, "saw {seen:?}");
     p.send_keys(&["Esc"]);
     p.wait_gone("Command palette", TIMEOUT);
     quit_clean(&mut p);
@@ -937,7 +1159,7 @@ fn ac17_esc_closes_without_running() {
     assert_eq!(fs::read_to_string(&f).unwrap(), "abc\n");
     p.send_keys(&["C-q"]);
     p.wait_for("Unsaved changes", TIMEOUT);
-    p.send_keys(&["C-q"]);
+    p.send_str("n");
     p.wait_exit(TIMEOUT);
 }
 
@@ -1070,7 +1292,7 @@ fn ac19_discard_quit_removes_swap_and_print_swap_exits_3() {
     wait_status(&p, "[+]");
     p.send_keys(&["C-q"]);
     p.wait_for("Unsaved changes", TIMEOUT);
-    p.send_keys(&["C-q"]);
+    p.send_str("n");
     assert_eq!(p.wait_exit(TIMEOUT), 0);
     assert!(swap_files(&env).is_empty());
     assert_eq!(print_swap(&env, &f).0, 3);
@@ -1102,7 +1324,7 @@ fn ac23_second_instance_exits_2_naming_pid_and_leaves_swap() {
     a.wait_for("edit more", TIMEOUT);
     a.send_keys(&["C-q"]);
     a.wait_for("Unsaved changes", TIMEOUT);
-    a.send_keys(&["y"]);
+    a.send_str("n");
     assert_eq!(a.wait_exit(TIMEOUT), 0);
 }
 
@@ -1269,7 +1491,7 @@ fn ac22_edits_survive_a_file_that_changed_after_the_crash() {
     wait_status(&p, "[+]");
     p.send_keys(&["C-q"]);
     p.wait_for("Unsaved changes", TIMEOUT);
-    p.send_keys(&["C-q"]);
+    p.send_str("n");
     assert_eq!(p.wait_exit(TIMEOUT), 0);
 }
 
@@ -1480,7 +1702,7 @@ fn recovered_edits_ask_before_replacing_a_changed_file() {
     assert_eq!(fs::read_to_string(&f).unwrap(), "theirs\n");
     p.send_keys(&["C-q"]);
     p.wait_for("Unsaved changes", TIMEOUT);
-    p.send_str("y");
+    p.send_str("n");
     assert_eq!(p.wait_exit(TIMEOUT), 0);
 }
 
@@ -1525,7 +1747,7 @@ fn ac24_save_into_read_only_dir_fails_visibly_and_keeps_everything() {
     assert_eq!(print_swap(&env, &f), (0, "edit untouched\n".to_string()));
     p.send_keys(&["C-q"]);
     p.wait_for("Unsaved changes", TIMEOUT);
-    p.send_keys(&["C-q"]);
+    p.send_str("n");
     p.wait_exit(TIMEOUT);
 }
 

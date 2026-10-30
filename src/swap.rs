@@ -32,6 +32,9 @@ const HEADER_FIXED: usize = 40;
 /// The base snapshot is split into records of about this many bytes.
 const BASE_CHUNK: usize = 1 << 20;
 const SUFFIX: &str = ".kyteswp";
+/// Swaps of buffers with no file name start with this. No escaped path can,
+/// because every path starts with `%2F`.
+const UNTITLED_PREFIX: &str = "untitled-";
 /// File-name limit on Linux file systems, in bytes.
 const NAME_MAX: usize = 255;
 
@@ -479,6 +482,58 @@ pub fn inspect_in(dir: &Path, target: &Path, current: &[u8]) -> io::Result<SwapS
     }))
 }
 
+/// The newest crashed untitled session in `dir` that holds text. Crashed
+/// sessions that hold nothing are deleted.
+pub fn find_untitled_in(dir: &Path) -> io::Result<Option<RecoverInfo>> {
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let mut best: Option<(SystemTime, PathBuf, String)> = None;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with(UNTITLED_PREFIX) || !name.ends_with(SUFFIX) {
+            continue;
+        }
+        let path = entry.path();
+        let Ok(bytes) = fs::read(&path) else {
+            continue;
+        };
+        let Ok(h) = parse_header(&bytes) else {
+            continue;
+        };
+        if owner_alive(h.pid, h.start) {
+            continue;
+        }
+        let text = replay_records(&bytes, h.len, "").rope.to_string();
+        if text.is_empty() {
+            let _ = fs::remove_file(&path);
+            continue;
+        }
+        let modified = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        if best.as_ref().is_none_or(|(t, ..)| modified > *t) {
+            best = Some((modified, path, text));
+        }
+    }
+    Ok(best.map(|(_, swap_path, text)| RecoverInfo {
+        target: PathBuf::new(),
+        modified: modified_of(&swap_path),
+        swap_path,
+        recovered: Some(text),
+        file_changed: false,
+    }))
+}
+
+/// [`find_untitled_in`] in the configured state directory.
+pub fn find_untitled() -> io::Result<Option<RecoverInfo>> {
+    find_untitled_in(&fileio::state_dir())
+}
+
 /// Clears the owner of `target`'s swap in `dir` so it no longer counts as a
 /// live lock. The file is otherwise untouched; a missing swap is fine.
 pub fn break_lock_in(dir: &Path, target: &Path) -> io::Result<()> {
@@ -527,8 +582,27 @@ impl SwapWriter {
 
     /// [`create`](Self::create) with an explicit swap directory.
     pub fn create_in(dir: &Path, target: &Path, base: &Rope) -> io::Result<SwapWriter> {
-        DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
         let path = swap_path_in(dir, target);
+        Self::create_at(dir, path, target, base)
+    }
+
+    /// A swap for a buffer with no file name, unique to this process.
+    pub fn create_untitled() -> io::Result<SwapWriter> {
+        Self::create_untitled_in(&fileio::state_dir())
+    }
+
+    /// [`create_untitled`](Self::create_untitled) with an explicit swap directory.
+    pub fn create_untitled_in(dir: &Path) -> io::Result<SwapWriter> {
+        let name = format!(
+            "{UNTITLED_PREFIX}{}-{}{SUFFIX}",
+            std::process::id(),
+            own_start_time()
+        );
+        Self::create_at(dir, dir.join(name), Path::new(""), &Rope::new())
+    }
+
+    fn create_at(dir: &Path, path: PathBuf, target: &Path, base: &Rope) -> io::Result<SwapWriter> {
+        DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
         if let Ok(mut f) = File::open(&path) {
             let mut head = vec![0u8; HEADER_FIXED];
             if f.read_exact(&mut head).is_ok() {
