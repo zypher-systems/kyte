@@ -75,3 +75,18 @@ Every deviation from `ARCHITECTURE` (Mnemo page_e336285940d54098ada133cc08df814b
 - After `d` the old swap is deleted and a fresh one is created for the file as it is on disk.
 - `q`/Esc leave the swap exactly as it was (bytes unchanged) and exit 0.
 - `--print-swap` on a stale swap exits 3 ("no valid swap").
+
+## T11 demo
+
+- The storyboard step 05-line first moves down three lines (to line 4) before `Esc d`, so the deleted line is visibly a different one from the edited first line. 11-crash types ` (unsaved: kill -9 me)` at the end of line 10, waits, sends SIGKILL, and relaunches Kyte under `sh -c` so the final frame (13-quit) can show `$ kyte exited with status 0` after the clean exit.
+- The demo reuses the pty harness from `tests/common/mod.rs` (`#[path]` module), so the demo and the e2e tests drive Kyte the same way. The two Escs of Esc Esc are separate writes (see T1).
+- PNG screenshots are cut from the gif with `ffmpeg -vf fps=20 -ss <t> -frames:v 1`. agg writes a frame only when the screen changes, so the gif is resampled to a constant rate first; without that, a seek past the gif's last frame (step 13) produced no image. Each PNG is taken 0.5 s into the hold after its step's snapshot (`steps.tsv`).
+- The mp4 is converted from the gif (`-pix_fmt yuv420p`, even dimensions, `+faststart`), so it is 978 px wide where the gif is 979.
+- The text frames and the Recover modal show the demo's temporary directory path (`/tmp/.tmpXXXX/demo.txt`); it contains nothing private.
+- `tests/demo.rs` holds the only ignored test (`ac25_...`, about 40 s). It runs `scripts/demo.sh` into a temporary `DEMO_OUT` so the committed artifacts are not touched.
+- The optional `scripts/demo-tmux.sh` fallback was not written; the pty pipeline needs neither tmux nor asciinema.
+
+## T12 verification
+
+- Docker is not installed on the build box, so `docker build`, `docker compose` and `make docker-test` were **not run**. The files follow section 12; agg's install step ends in `|| true` as the spec sketch does.
+- The README claims nothing about Docker beyond the commands; it says the Docker path is unverified.
