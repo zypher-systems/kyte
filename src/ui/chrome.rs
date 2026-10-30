@@ -37,7 +37,11 @@ pub fn status_bar(app: &App, area: Rect, cells: &mut Cells, theme: &Theme) {
     let rest = format!("│ {name}{dirty} │ Ln {l}, Col {c}{eol}");
     let x = mode.chars().count();
     if x < w {
-        cells.set_stringn(area.x + x as u16, area.y, rest, w - x, theme.status);
+        let (end, _) = cells.set_stringn(area.x + x as u16, area.y, rest, w - x, theme.status);
+        if app.recovery_off() {
+            let left = (area.x + area.width).saturating_sub(end) as usize;
+            cells.set_stringn(end, area.y, " │ no crash recovery", left, theme.error);
+        }
     }
 }
 

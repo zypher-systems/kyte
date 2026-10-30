@@ -181,6 +181,7 @@ fn print_swap(p: &Path) -> ExitCode {
 
 fn event_loop(app: &mut App, no_kitty: bool) -> anyhow::Result<()> {
     term::install_panic_hook();
+    term::install_signal_handler()?;
     let _guard = term::TerminalGuard::enter(no_kitty)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(std::io::stdout()))?;
     let mut redraw = true;

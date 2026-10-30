@@ -87,7 +87,7 @@ The driver spawns `keylab` in the headless pty harness (`tests/common/mod.rs`), 
 - **Arrows, Home/End (both CSI H/F and CSI 1~/4~), PageUp/PageDown, Ctrl-Home/Ctrl-End, Delete, Backspace** all map to the expected keys.
 - **Ctrl-Space** arrives as NUL and is reported as `Char(' ')` with CONTROL, mapped to `Ctrl(' ')` (the alternate overlay key).
 - **Bracketed paste** arrives as one `Paste` event; the terminal-style CR line break is kept by crossterm, and Kyte maps CR and CRLF in pasted text to LF.
-- **Known limitation (section 5.2 item 7) observed:** an Up arrow whose bytes are split (`ESC`, 30 ms pause, `[A`) arrives as `Esc`, `Char('[')`, `Char('A')`. In Kyte the Esc opens the overlay and `[` is an unknown overlay key, which closes it and is discarded; the trailing `A` is then typed as text. Kyte does not try to heal this in the MVP.
+- **Known limitation (section 5.2 item 7) observed:** an Up arrow whose bytes are split (`ESC`, 30 ms pause, `[A`) arrives as `Esc`, `Char('[')`, `Char('A')`. In Kyte the Esc opens the overlay and `[` is an unknown overlay key, which closes it and is discarded; the trailing `A` is then typed as text. Kyte did not heal this in the MVP. Since 0.1.1 it discards the rest of the sequence when it arrives within 150 ms of the Esc, so the `A` is no longer typed.
 - tmux with `escape-time 10` behaved identically to the direct pty for every row.
 
 ## Chosen default

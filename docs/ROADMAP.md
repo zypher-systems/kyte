@@ -26,14 +26,14 @@ Fix every way the current build can lose or damage work. Each fix gets a regress
 
 ### Smaller fixes
 
-- [ ] Split escape sequences no longer type stray text into the file, or the README stops claiming they can't.
-- [ ] SIGTERM and SIGHUP restore the terminal and keep the swap.
-- [ ] Paste works in the search and go-to-line prompts.
-- [ ] Super-chorded keys don't type text.
+- [x] Split escape sequences no longer type stray text into the file, or the README stops claiming they can't.
+- [x] SIGTERM and SIGHUP restore the terminal and keep the swap.
+- [x] Paste works in the search and go-to-line prompts.
+- [x] Super-chorded keys don't type text.
 - [x] FIFOs and device files are refused at open.
-- [ ] A swap write failure stays visible until it's resolved, not only until the next key.
+- [x] A swap write failure stays visible until it's resolved, not only until the next key.
 - [ ] Editing a very long single line stays responsive (about 350 ms per key at 5 MB today).
-- [ ] Skip or adapt the read-only-directory tests when running as root, so they can pass in CI containers.
+- [x] Skip or adapt the read-only-directory tests when running as root, so they can pass in CI containers.
 
 ## Next: 0.2.0, daily driver
 

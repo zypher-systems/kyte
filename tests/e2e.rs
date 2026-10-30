@@ -1598,6 +1598,60 @@ fn break_lock_opens_a_file_held_by_another_kyte() {
     b.kill9();
 }
 
+// ---------------------------------------------------------------- signals and keys
+
+#[test]
+fn sigterm_restores_the_terminal_and_keeps_the_swap() {
+    let env = Env::new();
+    let f = work_file(&env, "term.txt", "base\n");
+    let mut p = env.open(&f);
+    p.send_str("unsaved ");
+    wait_status(&p, "[+]");
+    assert!(p.alternate_screen());
+    let st = Command::new("kill")
+        .args(["-TERM", &p.pid().to_string()])
+        .status()
+        .unwrap();
+    assert!(st.success());
+    assert_eq!(p.wait_exit(TIMEOUT), 143);
+    assert!(!p.alternate_screen(), "left the alternate screen");
+    assert!(!p.cursor_hidden());
+    assert_eq!(print_swap(&env, &f).1, "unsaved base\n");
+}
+
+#[test]
+fn split_key_sequences_never_reach_the_file() {
+    let env = Env::new();
+    let f = env.write("split.txt", "abc\ndef\n");
+    let mut p = env.open(&f);
+    for rest in ["[A", "[3~", "OA"] {
+        p.send(b"\x1b");
+        p.wait_for("ESC", TIMEOUT);
+        std::thread::sleep(Duration::from_millis(30));
+        p.send(rest.as_bytes());
+        wait_insert(&p);
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    assert!(!status(&p).contains("[+]"), "{}", p.dump());
+    quit_clean(&mut p);
+    assert_eq!(fs::read_to_string(&f).unwrap(), "abc\ndef\n");
+}
+
+#[test]
+fn paste_into_the_search_prompt_searches() {
+    let env = Env::new();
+    let f = env.write("s.txt", "needle in haystack\n");
+    let mut p = env.open(&f);
+    p.send_keys(&["C-f"]);
+    p.wait_for("Search:", TIMEOUT);
+    p.paste("hay");
+    p.wait_for("Search: hay", TIMEOUT);
+    wait_status(&p, "Col 11");
+    p.send_keys(&["Esc"]);
+    wait_status(&p, "INSERT");
+    quit_clean(&mut p);
+}
+
 // ---------------------------------------------------------------- line endings
 
 #[test]
@@ -1819,6 +1873,10 @@ fn fifo_is_refused_at_open() {
 #[test]
 fn ac24_save_into_read_only_dir_fails_visibly_and_keeps_everything() {
     let env = Env::new();
+    if fs::metadata(env.dir.path()).unwrap().uid() == 0 {
+        eprintln!("skipped: root can write to anything");
+        return;
+    }
     let f = work_file(&env, "ro.txt", "untouched\n");
     let dir = f.parent().unwrap().to_path_buf();
     let mut p = env.open(&f);

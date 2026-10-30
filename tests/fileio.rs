@@ -80,6 +80,10 @@ fn save_creates_new_file() {
 #[test]
 fn ac24_read_only_directory_leaves_original_untouched() {
     let d = tempfile::tempdir().unwrap();
+    if fs::metadata(d.path()).unwrap().uid() == 0 {
+        eprintln!("skipped: root can write to anything");
+        return;
+    }
     let sub = d.path().join("ro");
     fs::create_dir(&sub).unwrap();
     let p = sub.join("f.txt");

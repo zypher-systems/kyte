@@ -15,6 +15,10 @@ use crate::palette::PaletteState;
 use crate::search;
 use crate::swap::{self, RecoverInfo, SwapStatus, SwapWriter};
 
+/// How soon after Esc a `[` or `O` counts as the rest of a split key sequence.
+/// A person can't reach those keys this fast, and they do nothing in the layer.
+const ESC_TAIL_WINDOW: Duration = Duration::from_millis(150);
+
 /// Text-area rows when the terminal size is not known yet.
 const DEFAULT_TEXT_HEIGHT: usize = 28;
 
@@ -79,6 +83,15 @@ impl SaveRisk {
     }
 }
 
+/// The rest of a key sequence whose Esc arrived alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EscTail {
+    /// `[`, then parameters, then one final character.
+    Csi,
+    /// `O`, then one character.
+    Ss3,
+}
+
 pub struct App {
     pub buffer: Buffer,
     pub mode: Mode,
@@ -96,6 +109,10 @@ pub struct App {
     swap_target: Option<std::path::PathBuf>,
     /// The file as last read or written; `None` means it's not known.
     disk: Option<DiskState>,
+    /// A swap write failed, so the swap no longer holds every edit.
+    swap_failed: bool,
+    /// Characters still to discard from a split key sequence.
+    esc_tail: Option<(EscTail, Instant)>,
     last_fsync: Option<Instant>,
     scroll_top: usize,
     scroll_left: usize,
@@ -126,6 +143,8 @@ impl App {
             swap,
             swap_target,
             disk,
+            swap_failed: false,
+            esc_tail: None,
             last_fsync: None,
             buffer,
             mode: Mode::Insert,
@@ -199,6 +218,9 @@ impl App {
 
     /// Handles one key, then appends the resulting edits to the swap.
     pub fn handle_key(&mut self, key: Key, now: Instant) -> Result<()> {
+        if self.swallow_esc_tail(&key, now) {
+            return Ok(());
+        }
         if let Key::Alt(_) = key {
             if self.mode == Mode::Insert {
                 for k in normalize(key, true) {
@@ -212,17 +234,43 @@ impl App {
         Ok(())
     }
 
+    /// Discards the rest of a split key sequence, so its characters aren't typed.
+    fn swallow_esc_tail(&mut self, key: &Key, now: Instant) -> bool {
+        let Some((tail, at)) = self.esc_tail.take() else {
+            return false;
+        };
+        let Key::Char(c) = *key else {
+            return false;
+        };
+        if now.saturating_duration_since(at) > ESC_TAIL_WINDOW {
+            return false;
+        }
+        let more = tail == EscTail::Csi && matches!(c, ' '..='?');
+        if more {
+            self.esc_tail = Some((tail, now));
+        }
+        true
+    }
+
     /// Write-ahead: every edit reaches `write()` before anything else happens.
     fn flush_edits(&mut self) {
         let edits = self.buffer.take_pending_edits();
-        if edits.is_empty() {
+        if edits.is_empty() || self.swap_failed {
             return;
         }
         if let Some(w) = self.swap.as_mut() {
             if let Err(e) = w.append(&edits) {
+                self.swap_failed = true;
                 self.set_error(format!("Swap write failed: {e}"));
             }
         }
+    }
+
+    /// Whether a crash now could lose edits. Stays true until a save starts a
+    /// working swap, so it can't scroll away like a message.
+    pub fn recovery_off(&self) -> bool {
+        let recovering = matches!(self.mode, Mode::Recover(_));
+        !recovering && (self.swap.is_none() || self.swap_failed)
     }
 
     /// Whether a swap file is being written.
@@ -375,7 +423,10 @@ impl App {
 
     fn overlay_key(&mut self, key: Key, opened_at: Instant, now: Instant) {
         self.mode = Mode::Insert;
+        let split = now.saturating_duration_since(opened_at) <= ESC_TAIL_WINDOW;
         match key {
+            Key::Char('[') if split => self.esc_tail = Some((EscTail::Csi, now)),
+            Key::Char('O') if split => self.esc_tail = Some((EscTail::Ss3, now)),
             Key::Esc => {
                 if now.saturating_duration_since(opened_at) <= self.esc_window {
                     self.open_palette();
@@ -606,6 +657,15 @@ impl App {
                 let q = format!("{}{}", state.query, text.replace('\n', " "));
                 state.set_query(q);
             }
+            Mode::Prompt(Prompt::Search { query, origin }) => {
+                query.push_str(&text.replace('\n', self.buffer.eol()));
+                let (query, origin) = (query.clone(), *origin);
+                self.incremental(&query, origin);
+            }
+            Mode::Prompt(Prompt::GotoLine { text: typed })
+            | Mode::Prompt(Prompt::SaveAs { text: typed, .. }) => {
+                typed.push_str(text.lines().next().unwrap_or(""));
+            }
             Mode::Prompt(_) | Mode::Help | Mode::Recover(_) => {}
         }
         self.flush_edits();
@@ -621,6 +681,7 @@ impl App {
         if due {
             if let Some(w) = self.swap.as_mut() {
                 if let Err(e) = w.fsync_if_pending() {
+                    self.swap_failed = true;
                     self.set_error(format!("Swap fsync failed: {e}"));
                 }
             }
@@ -750,7 +811,10 @@ impl App {
                 }
                 if let Some(target) = self.swap_target.clone() {
                     match SwapWriter::create(&target, self.buffer.rope()) {
-                        Ok(w) => self.swap = Some(w),
+                        Ok(w) => {
+                            self.swap = Some(w);
+                            self.swap_failed = false;
+                        }
                         Err(e) => self.set_error(format!("Saved {n} lines, but no swap: {e}")),
                     }
                 }
@@ -811,6 +875,88 @@ mod tests {
         a.handle_key(Key::Esc, t).unwrap();
         assert_eq!(a.mode, Mode::Overlay { opened_at: t });
         assert_eq!(a.mode_label(), "ESC");
+    }
+
+    /// A swap-backed app whose swap has started failing.
+    fn failing_swap_app() -> App {
+        App::new(
+            Buffer::from_str("", None),
+            Some(SwapWriter::failing()),
+            &Options::default(),
+        )
+    }
+
+    #[test]
+    fn swap_failure_stays_flagged_after_the_message_clears() {
+        let t = Instant::now();
+        let mut a = failing_swap_app();
+        assert!(!a.recovery_off());
+        a.handle_key(Key::Char('x'), t).unwrap();
+        assert!(a.message.as_deref().unwrap().contains("Swap write failed"));
+        assert!(a.recovery_off());
+        a.handle_key(Key::Char('y'), t).unwrap();
+        assert_eq!(a.message, None, "the error isn't repeated on every key");
+        assert!(a.recovery_off(), "the flag outlives the message");
+        assert_eq!(a.buffer.to_string(), "xy", "typing keeps working");
+    }
+
+    #[test]
+    fn no_swap_at_all_counts_as_recovery_off() {
+        assert!(app("x").recovery_off());
+    }
+
+    #[test]
+    fn split_csi_sequence_types_nothing() {
+        for seq in ["[A", "[3~", "[1;5C", "OA"] {
+            let t = Instant::now();
+            let mut a = app("abc");
+            a.handle_key(Key::Esc, t).unwrap();
+            for c in seq.chars() {
+                a.handle_key(Key::Char(c), ms(t, 30)).unwrap();
+            }
+            assert_eq!(a.buffer.to_string(), "abc", "{seq}");
+            assert_eq!(a.mode, Mode::Insert);
+            a.handle_key(Key::Char('z'), ms(t, 40)).unwrap();
+            assert_eq!(a.buffer.to_string(), "zabc", "{seq}: typing resumes");
+        }
+    }
+
+    #[test]
+    fn a_slow_bracket_after_esc_is_just_an_unknown_key() {
+        let t = Instant::now();
+        let mut a = app("abc");
+        a.handle_key(Key::Esc, t).unwrap();
+        a.handle_key(Key::Char('['), ms(t, 400)).unwrap();
+        a.handle_key(Key::Char('A'), ms(t, 410)).unwrap();
+        assert_eq!(a.buffer.to_string(), "Aabc");
+    }
+
+    #[test]
+    fn typing_soon_after_the_window_is_not_swallowed() {
+        let t = Instant::now();
+        let mut a = app("abc");
+        a.handle_key(Key::Esc, t).unwrap();
+        a.handle_key(Key::Char('['), ms(t, 10)).unwrap();
+        a.handle_key(Key::Char('A'), ms(t, 500)).unwrap();
+        assert_eq!(a.buffer.to_string(), "Aabc");
+    }
+
+    #[test]
+    fn paste_reaches_the_prompts() {
+        let t = Instant::now();
+        let mut a = search_app();
+        a.handle_key(Key::Ctrl('f'), t).unwrap();
+        a.handle_paste("baz".to_string()).unwrap();
+        assert_eq!(a.buffer.cursor(), 8, "pasting searches like typing");
+        a.handle_key(Key::Esc, t).unwrap();
+        a.run_command(Command::GotoLine);
+        a.handle_paste("1\nignored".to_string()).unwrap();
+        assert_eq!(
+            a.mode,
+            Mode::Prompt(Prompt::GotoLine {
+                text: "1".to_string()
+            })
+        );
     }
 
     #[test]

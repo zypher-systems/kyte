@@ -47,6 +47,15 @@ These replace the swap format and flows in `ARCHITECTURE` sections 6 and 8.
 - No edit may leave the cursor between `\r` and `\n`; `apply`, undo and redo move it back before the `\r`.
 - The status bar shows `CRLF`, since the `\r` is no longer visible.
 
+## 0.1.1 smaller fixes
+
+- Split key sequences: this replaces the "do not heal" rule in `ARCHITECTURE` section 5.2. A `[` or `O` within 150 ms of the Esc starts discarding: `[` until its final character, `O` for one character. Only those two keys start it, and neither is an operator, so a typed operator is never affected. A sequence split by more than 150 ms is still typed as text. Kyte has to guess here, and a longer window would start eating real typing.
+- Added `signal-hook` as a direct dependency for SIGTERM, SIGHUP and SIGINT. crossterm already uses it, so the build has no new crate. A thread waits for the signal, restores the terminal and exits with 128 + signal. Edits have already reached the swap, so no fsync is needed for the process to die safely; only a power cut can lose the last second.
+- After a swap write fails Kyte stops appending, because records after a torn one could never be replayed. The status bar shows `no crash recovery` until a save creates a working swap. The same marker shows when a file opened with no swap.
+- Super, Hyper and Meta chords are ignored whole, including on non-text keys.
+- Pasting into the search prompt searches. Go to line and Save as take the first pasted line.
+- Tests that need a read-only directory skip when run as root, because root can write to it anyway.
+
 ## Hosting and environment
 
 - Toolchain: rustc/cargo 1.99.1 (stable, 2026-10-13), edition 2021.
@@ -87,7 +96,7 @@ These replace the swap format and flows in `ARCHITECTURE` sections 6 and 8.
 - `d` on the empty last line after a trailing newline removes that trailing newline (the rule for "last line without a trailing newline" applied literally).
 - `w` works on graphemes (a base letter plus combining marks counts as one word character) and treats newlines as whitespace, so `w` at the end of a line deletes the line break and the next line's indentation.
 - Added `ops::kill_range` (the `k` range built on `ops::eol`) next to the four section 6 functions.
-- A paste while the overlay is open closes the overlay and inserts the paste (it is not an "unknown key"; dropping pasted text silently would lose data). In the palette, pasted text goes into the query with line breaks as spaces; in prompts it is ignored.
+- A paste while the overlay is open closes the overlay and inserts the paste (it is not an "unknown key"; dropping pasted text silently would lose data). In the palette, pasted text goes into the query with line breaks as spaces; in prompts it is ignored (changed in 0.1.1).
 
 ## T7 search
 

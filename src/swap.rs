@@ -662,6 +662,17 @@ impl SwapWriter {
         &self.path
     }
 
+    /// A writer whose every write fails (tests).
+    #[cfg(test)]
+    pub(crate) fn failing() -> SwapWriter {
+        SwapWriter {
+            file: OpenOptions::new().write(true).open("/dev/full").unwrap(),
+            path: PathBuf::from("/dev/full"),
+            pending_fsync: false,
+            pending_base: None,
+        }
+    }
+
     /// Writes the edits immediately (one `write`), without fsync.
     pub fn append(&mut self, edits: &[Edit]) -> io::Result<()> {
         if edits.is_empty() {

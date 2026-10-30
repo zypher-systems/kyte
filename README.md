@@ -61,6 +61,7 @@ kyte [OPTIONS] [FILE]
 | --- | --- |
 | 0 | Normal exit |
 | 1 | Runtime error (the message is printed after the terminal is restored) |
+| 129, 130, 143 | Stopped by SIGHUP, SIGINT or SIGTERM. The terminal is restored and the swap stays for recovery. |
 | 2 | Bad usage, a directory, a FIFO or device, a non-UTF-8 file, stdin or stdout not a terminal, or another live Kyte has the file open |
 | 3 | `--print-swap` found no valid swap |
 
@@ -141,6 +142,7 @@ Ctrl-F (or Esc `/`) opens `Search:` on the message line. Kyte jumps to the first
   - `r` recovers the changes into the editor, marked unsaved. Ctrl-S writes them.
   - `d` discards them and opens the file as it is on disk.
   - `q` or Esc quits and changes nothing.
+- If the swap can't be written, or there isn't one, the status bar shows `no crash recovery` until a save starts a working one.
 - A damaged tail (for example a record cut off by a crash) is dropped, and everything before it is recovered.
 - If the file changed on disk after the swap was written, Kyte says so and still offers to recover your version. Recovering shows your version in the editor; the file on disk changes only when you save.
 - A swap Kyte can't read is **stale**: Kyte offers only discard or quit.
@@ -181,7 +183,7 @@ These Docker files have not been run yet, because the build machine had no Docke
 
 ## Known limitations
 
-- **Split escape sequences.** On a legacy terminal over a laggy link, the bytes of an arrow key can arrive split, so the Esc arrives alone. You then see the layer open, and the rest of the sequence closes it again; those characters are discarded, never inserted. Kyte does not try to repair this. `docs/KEY_LAB.md` has the observed behavior. Terminals with the kitty keyboard protocol do not have this problem, and Kyte enables the protocol when it is available.
+- **Split escape sequences.** On a legacy terminal over a laggy link, the bytes of an arrow key can arrive split, so the Esc arrives alone. If the rest arrives within 150 ms, Kyte discards it: that key press does nothing, and nothing is typed. If it arrives later than that, its characters are typed as text. Terminals with the kitty keyboard protocol do not have this problem, and Kyte enables the protocol when it is available.
 - UTF-8 files only (others are refused and left untouched).
 - Kyte keeps each line's ending as it is. New lines use the ending most of the file uses, and the status bar shows `CRLF` for those files. It doesn't convert a file from one to the other. A `\r` that isn't part of a line ending shows as a control picture.
 - Linux only (the swap lock checks `/proc`).

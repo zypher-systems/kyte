@@ -1,5 +1,6 @@
 //! Terminal setup and teardown: raw mode, alternate screen, bracketed paste,
-//! optional kitty keyboard flags, and a panic hook that restores everything.
+//! optional kitty keyboard flags, and a panic hook and signal handler that
+//! restore everything.
 
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -12,6 +13,8 @@ use ratatui::crossterm::terminal::{
     self, disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use ratatui::crossterm::{cursor, execute};
+use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
+use signal_hook::iterator::Signals;
 
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 static KITTY: AtomicBool = AtomicBool::new(false);
@@ -69,6 +72,20 @@ pub fn restore() {
     );
     let _ = out.flush();
     let _ = disable_raw_mode();
+}
+
+/// Restores the terminal if the process is told to stop, then exits with the
+/// usual 128 + signal code. Edits have already reached the swap, so it stays
+/// behind for recovery.
+pub fn install_signal_handler() -> io::Result<()> {
+    let mut signals = Signals::new([SIGTERM, SIGHUP, SIGINT])?;
+    std::thread::spawn(move || {
+        if let Some(sig) = signals.forever().next() {
+            restore();
+            std::process::exit(128 + sig);
+        }
+    });
+    Ok(())
 }
 
 /// Restores the terminal before printing the panic.

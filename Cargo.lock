@@ -667,6 +667,7 @@ dependencies = [
  "ratatui",
  "ropey",
  "rustix",
+ "signal-hook",
  "tempfile",
  "tree-sitter",
  "tree-sitter-bash",

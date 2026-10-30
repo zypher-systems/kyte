@@ -51,6 +51,11 @@ fn map_key(k: KeyEvent) -> Option<Key> {
     if !matches!(k.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
         return None;
     }
+    // Kitty-protocol terminals can report these; Kyte binds none of them.
+    let unbound = KeyModifiers::SUPER | KeyModifiers::HYPER | KeyModifiers::META;
+    if k.modifiers.intersects(unbound) {
+        return None;
+    }
     let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
     let alt = k.modifiers.contains(KeyModifiers::ALT);
     let key = match k.code {
@@ -95,6 +100,16 @@ pub fn normalize(key: Key, mode_is_insert: bool) -> Vec<Key> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn super_chords_do_nothing() {
+        for m in [KeyModifiers::SUPER, KeyModifiers::HYPER, KeyModifiers::META] {
+            for code in [KeyCode::Char('s'), KeyCode::Enter, KeyCode::Left] {
+                let ev = Event::Key(KeyEvent::new(code, m));
+                assert_eq!(map_event(ev), None);
+            }
+        }
+    }
     use ratatui::crossterm::event::{KeyEventState, MouseEvent, MouseEventKind};
 
     fn ev(code: KeyCode, m: KeyModifiers) -> Event {
