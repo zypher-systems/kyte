@@ -1614,6 +1614,67 @@ fn break_lock_opens_a_file_held_by_another_kyte() {
     b.kill9();
 }
 
+// ---------------------------------------------------------------- 80x24
+
+fn open_standard(env: &Env, f: &Path) -> Pty {
+    let pty = Pty::spawn(
+        Spawn::new(bin())
+            .env("KYTE_STATE_DIR", env.state.to_string_lossy())
+            .arg("--no-kitty")
+            .arg(f.to_str().unwrap())
+            .size(24, 80),
+    );
+    pty.wait_for("Ln 1, Col 1", TIMEOUT);
+    pty
+}
+
+#[test]
+fn standard_terminal_shows_the_legend_and_help_in_full() {
+    let env = Env::new();
+    let f = env.write("s.txt", "abc\n");
+    let mut p = open_standard(&env, &f);
+    p.send_keys(&["Esc"]);
+    p.wait_for("Esc Esc palette", TIMEOUT);
+    p.send_str("z");
+    p.wait_gone("Esc Esc palette", TIMEOUT);
+    p.send_keys(&["C-p"]);
+    p.wait_for("Command palette", TIMEOUT);
+    p.send_str("key help");
+    p.wait_for("▸ Show key help", TIMEOUT);
+    p.send_keys(&["Enter"]);
+    p.wait_for("Up, Down scroll", TIMEOUT);
+    for _ in 0..30 {
+        p.send_keys(&["Down"]);
+    }
+    p.wait_for("Esc (quickly)", TIMEOUT);
+    p.send_keys(&["Esc"]);
+    p.wait_gone("Kyte keys", TIMEOUT);
+    quit_clean(&mut p);
+}
+
+#[test]
+fn failed_save_message_fits_a_standard_terminal() {
+    let env = Env::new();
+    if fs::metadata(env.dir.path()).unwrap().uid() == 0 {
+        eprintln!("skipped: root can write to anything");
+        return;
+    }
+    let dir = env.path("ro");
+    fs::create_dir(&dir).unwrap();
+    let f = dir.join("f.txt");
+    fs::write(&f, "x\n").unwrap();
+    let mut p = open_standard(&env, &f);
+    p.send_str("y");
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
+    p.send_keys(&["C-s"]);
+    p.wait_for("Use Save as in the palette", TIMEOUT);
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+    p.send_keys(&["C-q"]);
+    p.wait_for("Unsaved changes", TIMEOUT);
+    p.send_str("n");
+    assert_eq!(p.wait_exit(TIMEOUT), 0);
+}
+
 // ---------------------------------------------------------------- universal palette
 
 /// Kyte on `file`, with the working directory set to `cwd`.

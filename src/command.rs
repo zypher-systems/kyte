@@ -125,6 +125,16 @@ pub const KEY_HELP: &[(&str, &str)] = &[
     ("  Esc (quickly)", "command palette"),
 ];
 
+/// How far the help can scroll in a text area of `text_height` rows.
+pub fn help_max_top(text_height: usize) -> usize {
+    KEY_HELP.len().saturating_sub(help_rows(text_height))
+}
+
+/// Rows of the key table that fit, inside the box and its blank top row.
+pub fn help_rows(text_height: usize) -> usize {
+    text_height.saturating_sub(3).max(1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -12,6 +12,12 @@ These replace the matching parts of `ARCHITECTURE`. `docs/ROADMAP.md` holds the 
 - License: MIT. This settles section 16 and the section 4 note.
 - Kyte isn't tied to any one OS. It's meant to be open source for everyone.
 
+## 0.2.0 small terminals
+
+- Everything had been tested at 100x30. At 80x24 the key help lost its last rows, the legend lost `Esc Esc palette`, and the save error lost its advice. The e2e tests now run those at 80x24 too.
+- The legend has short labels for terminals under 100 columns. This narrows section 5.4's rule that each label must stay, because a legend that hides the palette key is worse than a shorter word. At 100 columns and up it reads as specified.
+- The key help scrolls with Up and Down when it doesn't fit.
+
 ## 0.2.0 universal palette
 
 - Ctrl-K searches commands and files together, with `:N` for a line and `/text` for search. The concept page wasn't available when this was built, so this is the working definition; change it here if the concept says otherwise.

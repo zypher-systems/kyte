@@ -11,7 +11,7 @@ use crate::app::{
     After, App, Mode, Prompt, CONFIRM_OPEN_TEXT, CONFIRM_QUIT_TEXT, LEGEND, REPLACE_CONFIRM_TEXT,
 };
 use crate::buffer::Indent;
-use crate::command::KEY_HELP;
+use crate::command::{help_max_top, KEY_HELP};
 use crate::palette::VISIBLE_ROWS;
 
 /// Status bar: mode, file name, dirty marker, position (one full row).
@@ -130,12 +130,17 @@ fn legend(area: Rect, cells: &mut Cells, theme: &Theme) {
     cells.set_style(area, theme.legend);
     let mut x = area.x + 1;
     let right = area.x + area.width;
-    for (key, label) in LEGEND {
+    // The full wording takes about 100 cells; the short one fits in 80, and
+    // the coloured key letters keep the entries apart.
+    let full = area.width >= 100;
+    let gap = if full { "  " } else { " " };
+    for (key, long, short) in LEGEND {
+        let label = if full { long } else { short };
         for (text, style) in [
             (*key, theme.legend_key),
             (" ", theme.legend),
             (*label, theme.legend),
-            ("  ", theme.legend),
+            (gap, theme.legend),
         ] {
             if x >= right {
                 return;
@@ -241,20 +246,20 @@ fn fit_label(text: &str, width: usize) -> String {
 
 /// The "Show key help" modal.
 pub fn help(app: &App, text_area: Rect, cells: &mut Cells, theme: &Theme) {
-    if app.mode != Mode::Help {
+    let Mode::Help { top } = app.mode else {
         return;
-    }
+    };
     let w = 64.min(text_area.width.saturating_sub(2)).max(10);
     let h = (KEY_HELP.len() as u16 + 4).min(text_area.height);
     let area = centered(text_area, w, h);
-    let inner = modal_box(
-        area,
-        cells,
-        "Kyte keys (Esc closes)",
-        theme.modal,
-        theme.palette_border,
-    );
-    for (i, (k, v)) in KEY_HELP.iter().enumerate() {
+    let max_top = help_max_top(text_area.height as usize);
+    let title = if max_top > 0 {
+        "Kyte keys (Up, Down scroll; Esc closes)"
+    } else {
+        "Kyte keys (Esc closes)"
+    };
+    let inner = modal_box(area, cells, title, theme.modal, theme.palette_border);
+    for (i, (k, v)) in KEY_HELP.iter().skip(top.min(max_top)).enumerate() {
         let y = inner.y + 1 + i as u16;
         if y >= inner.y + inner.height {
             break;

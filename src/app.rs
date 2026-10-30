@@ -37,8 +37,10 @@ pub enum Mode {
     },
     Palette(PaletteState),
     Prompt(Prompt),
-    /// The "Show key help" modal; Esc closes it.
-    Help,
+    /// The "Show key help" modal, scrolled to row `top`; Esc closes it.
+    Help {
+        top: usize,
+    },
     /// Startup modal for a recoverable (or stale) swap.
     Recover(RecoverInfo),
 }
@@ -168,16 +170,16 @@ pub struct App {
 }
 
 /// Shown on the message line only while the overlay is open (section 5.4).
-pub const LEGEND: &[(&str, &str)] = &[
-    ("w", "del word"),
-    ("d", "del line"),
-    ("k", "del to end"),
-    ("%", "bracket"),
-    ("/", "search"),
-    ("u", "undo"),
-    ("r", "redo"),
-    ("s", "save"),
-    ("Esc Esc", "palette"),
+pub const LEGEND: &[(&str, &str, &str)] = &[
+    ("w", "del word", "word"),
+    ("d", "del line", "line"),
+    ("k", "del to end", "to end"),
+    ("%", "bracket", "bracket"),
+    ("/", "search", "search"),
+    ("u", "undo", "undo"),
+    ("r", "redo", "redo"),
+    ("s", "save", "save"),
+    ("Esc Esc", "palette", "palette"),
 ];
 
 pub const REPLACE_CONFIRM_TEXT: &str = "Replace this one? y yes, n skip, a all, Esc stop";
@@ -365,9 +367,21 @@ impl App {
             }
             Mode::Prompt(Prompt::ReplaceConfirm(run)) => self.replace_confirm_key(key, run),
             Mode::Recover(info) => self.recover_key(key, info),
-            Mode::Help => {
-                if matches!(key, Key::Esc | Key::Enter | Key::Char('q')) {
-                    self.mode = Mode::Insert;
+            Mode::Help { top } => {
+                let last = command::help_max_top(self.text_height());
+                match key {
+                    Key::Esc | Key::Enter | Key::Char('q') => self.mode = Mode::Insert,
+                    Key::Up => {
+                        self.mode = Mode::Help {
+                            top: top.saturating_sub(1),
+                        }
+                    }
+                    Key::Down => {
+                        self.mode = Mode::Help {
+                            top: (top + 1).min(last),
+                        }
+                    }
+                    _ => {}
                 }
             }
             Mode::Prompt(Prompt::SaveAs { text, then }) => self.save_as_key(key, text, then),
@@ -929,7 +943,7 @@ impl App {
             }
             Command::ToggleLineNumbers => self.show_line_numbers = !self.show_line_numbers,
             Command::ToggleIndent => self.toggle_indent(),
-            Command::ShowKeyHelp => self.mode = Mode::Help,
+            Command::ShowKeyHelp => self.mode = Mode::Help { top: 0 },
         }
     }
 
@@ -1054,7 +1068,7 @@ impl App {
             | Mode::Prompt(Prompt::SaveAs { text: typed, .. }) => {
                 typed.push_str(text.lines().next().unwrap_or(""));
             }
-            Mode::Prompt(_) | Mode::Help | Mode::Recover(_) => {}
+            Mode::Prompt(_) | Mode::Help { .. } | Mode::Recover(_) => {}
         }
         self.flush_edits();
         Ok(())
@@ -1337,9 +1351,7 @@ impl App {
                 }
                 self.after_save(then);
             }
-            Err(e) => self.set_error(format!(
-                "Save failed: {e}. Your changes are safe; Save as in the palette writes them elsewhere"
-            )),
+            Err(e) => self.set_error(format!("Save failed: {e}. Use Save as in the palette")),
         }
     }
 
@@ -1372,7 +1384,7 @@ impl App {
             Mode::Prompt(Prompt::Open { .. }) => "OPEN",
             Mode::Prompt(Prompt::SaveAs { .. }) => "SAVE AS",
             Mode::Prompt(Prompt::ConfirmSave { .. }) => "SAVE?",
-            Mode::Help => "HELP",
+            Mode::Help { .. } => "HELP",
             Mode::Recover(_) => "RECOVER",
         }
     }
@@ -1986,9 +1998,9 @@ mod tests {
         a.run_command(Command::ToggleLineNumbers);
         assert!(a.show_line_numbers);
         a.run_command(Command::ShowKeyHelp);
-        assert_eq!(a.mode, Mode::Help);
+        assert_eq!(a.mode, Mode::Help { top: 0 });
         a.handle_key(Key::Char('z'), t).unwrap();
-        assert_eq!(a.mode, Mode::Help);
+        assert_eq!(a.mode, Mode::Help { top: 0 });
         a.handle_key(Key::Esc, t).unwrap();
         assert_eq!(a.mode, Mode::Insert);
         a.handle_key(Key::Ctrl('p'), t).unwrap();

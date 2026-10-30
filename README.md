@@ -107,6 +107,8 @@ Esc never waits. The layer opens at once, the status bar shows `ESC`, and the me
 w del word  d del line  k del to end  % bracket  / search  u undo  r redo  s save  Esc Esc palette
 ```
 
+On a terminal narrower than 100 columns the legend uses shorter words, so it still fits in 80: `w word d line k to end ...`.
+
 The next key runs one operator and closes the layer:
 
 | Key | Action |
@@ -138,7 +140,7 @@ Kyte works out whether a file indents with tabs or spaces, and how many, from it
 
 **Open file** (Ctrl-O) asks for a path, starting in the current file's directory. Tab completes it. A path that doesn't exist yet opens as a new file. Kyte holds one file at a time, so opening another replaces the current one, and if you have unsaved changes it asks first: `y` saves them, `n` discards them, Esc cancels. If the new file left a crashed session behind, Kyte offers to recover it; quitting that offer closes Kyte.
 
-**Go to line** asks for a 1-based line number. Numbers past the end go to the last line, and anything that is not a number shows an error. **Show key help** shows the key table; Esc closes it.
+**Go to line** asks for a 1-based line number. Numbers past the end go to the last line, and anything that is not a number shows an error. **Show key help** shows the key table; Up and Down scroll it, and Esc closes it.
 
 ### Universal palette
 
@@ -172,7 +174,7 @@ Ctrl-R asks what to replace and what to replace it with. Kyte then starts at the
 - If the file changed on disk since you opened or last saved it, Ctrl-S asks before overwriting. The check compares content, so a rewrite of the same bytes doesn't count. A read-only file also needs a `y` before Kyte replaces it. `n` or Esc cancels either question.
 - After a save, the swap starts over empty. After a clean quit, the swap is deleted.
 - A buffer with no file name has a swap too, named `untitled-<pid>-<start>.kyteswp`. After a crash, running `kyte` with no file offers to recover the newest one.
-- If a save fails, your changes stay in the editor and the swap. The error says so, and Save as in the palette writes them elsewhere. Quitting after a failed save still asks first; only `n` discards.
+- If a save fails, your changes stay in the editor and the swap. The error points you to Save as in the palette, which writes them elsewhere. Quitting after a failed save still asks first; only `n` discards.
 - If Kyte finds a swap with unsaved changes when you open the file, it shows **Recover unsaved changes**:
   - `r` recovers the changes into the editor, marked unsaved. Ctrl-S writes them.
   - `d` discards them and opens the file as it is on disk.

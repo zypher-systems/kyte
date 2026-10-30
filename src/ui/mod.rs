@@ -153,6 +153,46 @@ mod tests {
         assert!(x < 30);
     }
 
+    fn screen(t: &Terminal<TestBackend>, h: u16) -> String {
+        (0..h).map(|y| row(t, y)).collect::<Vec<_>>().join("\n")
+    }
+
+    #[test]
+    fn standard_terminal_shows_the_whole_legend() {
+        let mut a = app("abc");
+        a.handle_key(Key::Esc, Instant::now()).unwrap();
+        let t = draw(&mut a, 80, 24);
+        assert!(row(&t, 23).contains("Esc Esc palette"), "{}", row(&t, 23));
+        assert!(row(&t, 23).contains("w word"));
+        let t = draw(&mut a, 100, 30);
+        assert!(row(&t, 29).contains("w del word"), "{}", row(&t, 29));
+        assert!(row(&t, 29).contains("Esc Esc palette"));
+    }
+
+    #[test]
+    fn help_scrolls_to_every_row_at_any_height() {
+        for (w, h) in [(80, 24), (40, 10), (100, 30), (20, 5)] {
+            let mut a = app("abc");
+            a.run_command(crate::command::Command::ShowKeyHelp);
+            let now = Instant::now();
+            draw(&mut a, w, h);
+            let mut seen = screen(&draw(&mut a, w, h), h);
+            for _ in 0..crate::command::KEY_HELP.len() {
+                a.handle_key(Key::Down, now).unwrap();
+                seen.push_str(&screen(&draw(&mut a, w, h), h));
+            }
+            if w >= 80 {
+                for (k, _) in crate::command::KEY_HELP {
+                    assert!(seen.contains(k.trim_end()), "{k} missing at {w}x{h}");
+                }
+            }
+            for _ in 0..crate::command::KEY_HELP.len() {
+                a.handle_key(Key::Up, now).unwrap();
+            }
+            assert_eq!(a.mode, crate::app::Mode::Help { top: 0 });
+        }
+    }
+
     #[test]
     fn too_small_terminal() {
         let mut a = app("abc");
