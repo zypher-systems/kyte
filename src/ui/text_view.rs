@@ -71,6 +71,8 @@ pub fn render(app: &App, area: Rect, cells: &mut Cells, theme: &Theme) -> Option
     let gw = gutter_width(buf.line_count(), app.show_line_numbers);
     let text_w = (area.width as usize).saturating_sub(gw);
     cells.set_style(area, theme.text);
+    #[cfg(feature = "highlight")]
+    let spans = line_spans(app, top, area.height as usize, theme);
     for row in 0..area.height as usize {
         let y = area.y + row as u16;
         let line = top + row;
@@ -78,6 +80,20 @@ pub fn render(app: &App, area: Rect, cells: &mut Cells, theme: &Theme) -> Option
             if gw > 0 {
                 let num = format!("{:>w$} │ ", line + 1, w = gw - 3);
                 cells.set_stringn(area.x, y, num, gw, theme.gutter);
+            }
+            #[cfg(feature = "highlight")]
+            if let Some(sp) = spans.get(row).filter(|s| !s.is_empty()) {
+                render_line_styled(
+                    cells,
+                    area.x + gw as u16,
+                    y,
+                    &buf.line_text(line),
+                    left,
+                    text_w,
+                    theme,
+                    sp,
+                );
+                continue;
             }
             render_line(
                 cells,
@@ -117,6 +133,87 @@ pub fn render_line(
 ) {
     let vis = visible_text(line, left, width);
     cells.set_stringn(x, y, vis, width, theme.text);
+}
+
+/// Highlight styles for each visible row, as byte ranges within the line.
+#[cfg(feature = "highlight")]
+fn line_spans(
+    app: &App,
+    top: usize,
+    rows: usize,
+    theme: &Theme,
+) -> Vec<Vec<(std::ops::Range<usize>, ratatui::style::Style)>> {
+    use crate::highlight::{highlight, Lang};
+    let mut per = vec![Vec::new(); rows];
+    let buf = &app.buffer;
+    let Some(lang) = buf.path().and_then(Lang::from_path) else {
+        return per;
+    };
+    let end = (top + rows).min(buf.line_count());
+    if top >= end {
+        return per;
+    }
+    let text = buf.to_string();
+    let rope = buf.rope();
+    for (r, kind) in highlight(lang, &text, top..end) {
+        if r.is_empty() {
+            continue;
+        }
+        let style = kind.style(theme.text);
+        for l in rope.byte_to_line(r.start)..=rope.byte_to_line(r.end - 1) {
+            if l < top || l >= end {
+                continue;
+            }
+            let ls = rope.line_to_byte(l);
+            let le = rope.line_to_byte(l + 1);
+            let (a, b) = (r.start.max(ls) - ls, r.end.min(le) - ls);
+            if a < b {
+                per[l - top].push((a..b, style));
+            }
+        }
+    }
+    per
+}
+
+/// `render_line` with per-byte-range styles (feature `highlight`).
+#[cfg(feature = "highlight")]
+#[allow(clippy::too_many_arguments)]
+fn render_line_styled(
+    cells: &mut Cells,
+    x: u16,
+    y: u16,
+    line: &str,
+    left: usize,
+    width: usize,
+    theme: &Theme,
+    spans: &[(std::ops::Range<usize>, ratatui::style::Style)],
+) {
+    use unicode_segmentation::UnicodeSegmentation;
+    let right = left + width;
+    let mut col = 0;
+    for (i, g) in line.grapheme_indices(true) {
+        let w = grapheme_width(g, col);
+        let end = col + w;
+        if end <= left {
+            col = end;
+            continue;
+        }
+        if col >= right {
+            break;
+        }
+        let at = (x as usize + col.max(left) - left) as u16;
+        if col < left || end > right {
+            let n = end.min(right) - col.max(left);
+            cells.set_stringn(at, y, " ".repeat(n), n, theme.text);
+        } else {
+            let style = spans
+                .iter()
+                .find(|(r, _)| r.contains(&i))
+                .map_or(theme.text, |(_, s)| *s);
+            cells.set_stringn(at, y, display_symbol(g, w), w, style);
+        }
+        col = end;
+    }
 }
 
 #[cfg(test)]

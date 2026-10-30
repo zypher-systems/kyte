@@ -7,6 +7,8 @@ pub mod buffer;
 pub mod cli;
 pub mod command;
 pub mod fileio;
+#[cfg(feature = "highlight")]
+pub mod highlight;
 pub mod input;
 pub mod ops;
 pub mod palette;

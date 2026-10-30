@@ -90,3 +90,12 @@ Every deviation from `ARCHITECTURE` (Mnemo page_e336285940d54098ada133cc08df814b
 
 - Docker is not installed on the build box, so `docker build`, `docker compose` and `make docker-test` were **not run**. The files follow section 12; agg's install step ends in `|| true` as the spec sketch does.
 - The README claims nothing about Docker beyond the commands; it says the Docker path is unverified.
+
+## T13 syntax highlighting (stretch, done)
+
+- Every AC passed first, and the grammars resolved against tree-sitter 0.27, so T13 was built. Resolved versions: tree-sitter 0.27.x, tree-sitter-highlight 0.27.1, tree-sitter-rust 0.24.2, tree-sitter-python 0.25.0, tree-sitter-bash 0.25.1 (all grammar ABI 15). All are optional dependencies behind the `highlight` feature, which is off by default. `cargo tree -e normal` for the default build lists no tree-sitter crate.
+- `src/highlight.rs`: `Lang::from_path` picks the grammar by extension (`.rs`; `.py`/`.pyi`; `.sh`/`.bash`). `highlight(lang, text, lines) -> Vec<(Range<usize>, HighlightKind)>` returns byte ranges of the whole text that overlap the visible line range. It uses each grammar's bundled `highlights.scm` through `tree-sitter-highlight`; the capture names keyword, string, comment, function, type, constant and number map to `HighlightKind`, and the innermost capture wins. Query configurations are compiled once per language (`OnceLock`).
+- The function takes the whole text (not just the visible lines) so multi-line strings and comments are parsed correctly. Each redraw re-parses, so documents over 512 KiB are not highlighted. Incremental parsing is a later improvement.
+- Colors are 256-color indexed values on the text background: keyword 176 (bold), string 150, comment 245 (italic), function 111, type 180, constant/number 209.
+- The text view uses a styled per-grapheme path only for lines that have spans; other lines take the unchanged `render_line` path. Without the feature, none of this code is compiled.
+- Tests: four unit tests in `highlight.rs` (a Rust snippet is tokenized into comment, keyword, function and string; only the requested lines are returned; the Python and Bash grammars load; extension mapping) and `tests/e2e_highlight.rs` (`fn` in a `.rs` file is drawn with foreground index 176 in the vt100 screen; a `.txt` file stays at the default 252).

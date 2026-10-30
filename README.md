@@ -33,6 +33,13 @@ The Makefile targets are thin wrappers:
 | `make demo` | `scripts/demo.sh` (see [Demo](#demo)) |
 | `make docker-test` | `cargo test` inside the Docker dev image (see [Docker](#docker)) |
 
+Optional syntax highlighting for Rust, Python and Bash files (by extension), using tree-sitter:
+
+```
+cargo build --release --features highlight
+cargo test --features highlight
+```
+
 Kyte makes no network connections and sends no telemetry. It reads no config file.
 
 ## Usage

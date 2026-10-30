@@ -20,6 +20,22 @@ unicode-segmentation = "1"
 unicode-width = "0.2"
 crc32fast = "1"
 anyhow = "1"
+# T13 stretch: syntax highlighting, off by default (`--features highlight`).
+tree-sitter = { version = "0.27", optional = true }
+tree-sitter-highlight = { version = "0.27", optional = true }
+tree-sitter-rust = { version = "0.24", optional = true }
+tree-sitter-python = { version = "0.25", optional = true }
+tree-sitter-bash = { version = "0.25", optional = true }
+
+[features]
+default = []
+highlight = [
+    "dep:tree-sitter",
+    "dep:tree-sitter-highlight",
+    "dep:tree-sitter-rust",
+    "dep:tree-sitter-python",
+    "dep:tree-sitter-bash",
+]
 
 [dev-dependencies]
 tempfile = "3"

@@ -43,4 +43,6 @@ make demo                                  # writes docs/demo/*
 | AC-24 | pass | e2e `ac24_save_into_read_only_dir_fails_visibly_and_keeps_everything`, `ac24_save_through_symlink_updates_target_keeps_link`; `tests/fileio.rs`. |
 | AC-25 | pass | `make demo` ran headless (no display, no tmux) and wrote `docs/demo/demo.cast`, `demo.gif` (979x694, 33.75 s), `demo.mp4` (h264 978x694, 32.9 s; both checked with `ffprobe`), 13 PNGs, `steps.tsv` and 13 `frames/NN-*.txt`. `frames/03-legend.txt` contains the legend, `07-palette.txt` the palette, and `11-crash.txt` the Recover modal; PNGs 03, 07 and 11 were also inspected by eye. The skip path was checked with agg and ffmpeg removed from `PATH`: it wrote the cast, steps and frames and listed the gif, mp4 and PNGs as skipped. `cargo test --test demo -- --ignored` passed. |
 
+Stretch T13 (feature `highlight`, off by default): `cargo build --release --features highlight` 0 warnings, `cargo clippy --all-targets --features highlight -- -D warnings` clean, `cargo test --features highlight` 186 passed, 0 failed, 1 ignored (the default 180, plus 4 highlight unit tests and 2 tests in `tests/e2e_highlight.rs`). The default build is unchanged and still passes 180.
+
 Not verified: `make docker-test` and the Dockerfile, because Docker is not installed on the build box (see `docs/DECISIONS.md`).
