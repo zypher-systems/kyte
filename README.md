@@ -103,7 +103,7 @@ Copy and cut also reach the system clipboard, through the terminal's OSC 52 sequ
 
 ### The Esc layer
 
-Esc never waits. The layer opens at once, the status bar shows `ESC`, and a floating menu lists the keys. It sits in a corner, clear of the cursor.
+Esc never waits. The layer opens at once, the status bar shows `ESC`, and a floating menu in the middle of the screen lists the keys.
 
 The next key runs one operator and closes the layer:
 

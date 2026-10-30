@@ -5,7 +5,7 @@ pub mod chrome;
 pub mod text_view;
 pub mod theme;
 
-use ratatui::layout::Rect;
+use ratatui::layout::{Position, Rect};
 use ratatui::Frame;
 
 use crate::app::App;
@@ -47,10 +47,17 @@ pub fn render(app: &App, frame: &mut Frame) {
     chrome::status_bar(app, status_area, cells, theme);
     let prompt_cursor = chrome::message_line(app, msg_area, cells, theme);
     let popup_cursor = chrome::palette(app, text_area, cells, theme);
-    chrome::help(app, text_area, cells, theme);
-    chrome::menu(app, text_area, text_cursor, cells, theme);
+    let help_box = chrome::help(app, text_area, cells, theme);
+    let menu_box = chrome::menu(app, text_area, text_cursor, cells, theme);
     chrome::completions(app, text_area, cells, theme);
     chrome::recover(app, text_area, cells, theme);
+    // A cursor under a box would blink through its text.
+    let text_cursor = text_cursor.filter(|&c| {
+        ![help_box, menu_box]
+            .iter()
+            .flatten()
+            .any(|b| b.contains(Position::from(c)))
+    });
     if let Some((x, y)) = popup_cursor.or(prompt_cursor).or(text_cursor) {
         frame.set_cursor_position((x, y));
     }
@@ -61,8 +68,10 @@ mod tests {
     use std::time::Instant;
 
     use ratatui::backend::TestBackend;
+    use ratatui::layout::{Position, Rect};
     use ratatui::Terminal;
 
+    use super::chrome;
     use crate::app::App;
     use crate::buffer::Buffer;
     use crate::cli::Options;
@@ -182,26 +191,112 @@ mod tests {
         }
     }
 
+    /// The box's edges, found by the popup background.
+    fn box_of(t: &Terminal<TestBackend>) -> Rect {
+        let b = t.backend().buffer();
+        let bg = super::theme::DARK.palette.bg.unwrap();
+        let area = b.area;
+        let hit: Vec<(u16, u16)> = (0..area.height)
+            .flat_map(|y| (0..area.width).map(move |x| (x, y)))
+            .filter(|&(x, y)| b[(x, y)].bg == bg)
+            .collect();
+        let (x, y) = (
+            hit.iter().map(|p| p.0).min().unwrap(),
+            hit.iter().map(|p| p.1).min().unwrap(),
+        );
+        let (right, bottom) = (
+            hit.iter().map(|p| p.0).max().unwrap(),
+            hit.iter().map(|p| p.1).max().unwrap(),
+        );
+        Rect::new(x, y, right - x + 1, bottom - y + 1)
+    }
+
+    fn assert_centered(r: Rect, w: u16, text_h: u16) {
+        let (left, right) = (r.x, w - r.x - r.width);
+        let (top, bottom) = (r.y, text_h - r.y - r.height);
+        assert!(left.abs_diff(right) <= 1, "{r:?} is off centre across");
+        assert!(top.abs_diff(bottom) <= 1, "{r:?} is off centre down");
+    }
+
     #[test]
-    fn beside_text_menus_stay_off_the_cursor() {
+    fn the_esc_layer_sits_in_the_middle_wherever_the_cursor_is() {
         let text: String = (1..=40).map(|i| format!("line {i}\n")).collect();
         let now = Instant::now();
-        for lines in [0, 18, 40] {
+        for lines in [0, 10, 18, 40] {
             let mut a = app(&text);
             for _ in 0..lines {
                 a.handle_key(Key::Down, now).unwrap();
             }
-            a.handle_key(Key::End, now).unwrap();
             a.handle_key(Key::Esc, now).unwrap();
-            let mut t = draw(&mut a, 30, 16);
-            let pos = t.get_cursor_position().unwrap();
-            let b = t.backend().buffer();
-            assert_ne!(
-                b[(pos.x, pos.y)].bg,
-                super::theme::DARK.palette.bg.unwrap(),
-                "the menu covers the cursor at line {lines}"
-            );
+            assert_centered(box_of(&draw(&mut a, 80, 24)), 80, 22);
         }
+    }
+
+    #[test]
+    fn a_question_sits_in_the_middle() {
+        let now = Instant::now();
+        let mut a = app("abc");
+        a.handle_key(Key::Char('x'), now).unwrap();
+        a.run_command(crate::command::Command::Quit);
+        assert_centered(box_of(&draw(&mut a, 80, 24)), 80, 22);
+    }
+
+    #[test]
+    fn the_cursor_never_blinks_through_a_box() {
+        let text = format!("{}\n", "x".repeat(70)).repeat(40);
+        let now = Instant::now();
+        let mut a = app(&text);
+        for _ in 0..11 {
+            a.handle_key(Key::Down, now).unwrap();
+        }
+        for _ in 0..34 {
+            a.handle_key(Key::Right, now).unwrap();
+        }
+        let t = draw(&mut a, 80, 24);
+        assert!(t.backend().cursor_visible());
+        let at = t.backend().cursor_position();
+        a.handle_key(Key::Esc, now).unwrap();
+        let t = draw(&mut a, 80, 24);
+        assert!(box_of(&t).contains(Position::new(at.x, at.y)));
+        assert!(!t.backend().cursor_visible());
+    }
+
+    #[test]
+    fn replace_keeps_the_line_in_question_showing() {
+        let text: String = (1..=40).map(|i| format!("line {i}\n")).collect();
+        let now = Instant::now();
+        for lines in [0, 9, 10, 11, 12, 13, 39] {
+            let mut a = app(&text);
+            for _ in 0..lines {
+                a.handle_key(Key::Down, now).unwrap();
+            }
+            a.run_command(crate::command::Command::Replace);
+            for c in "line".chars() {
+                a.handle_key(Key::Char(c), now).unwrap();
+            }
+            a.handle_key(Key::Enter, now).unwrap();
+            for c in "row".chars() {
+                a.handle_key(Key::Char(c), now).unwrap();
+            }
+            a.handle_key(Key::Enter, now).unwrap();
+            let mut t = draw(&mut a, 80, 24);
+            let pos = t.get_cursor_position().unwrap();
+            let r = box_of(&t);
+            assert!(
+                pos.y < r.y || pos.y >= r.y + r.height,
+                "the box covers line {lines}: {r:?} over row {}",
+                pos.y
+            );
+            assert!(r.x.abs_diff(80 - r.x - r.width) <= 1, "{r:?} is off centre");
+        }
+    }
+
+    #[test]
+    fn a_box_with_no_room_on_either_side_stays_put() {
+        let area = Rect::new(0, 0, 40, 6);
+        let mid = chrome::centered(area, 10, 5);
+        let got = chrome::centered_off_row(area, 10, 5, Some((3, 2)));
+        assert_eq!(got, mid);
     }
 
     #[test]

@@ -98,7 +98,8 @@ These replace the matching parts of `ARCHITECTURE`. `docs/ROADMAP.md` holds the 
 
 - Anything the user picks from goes in a floating box, by the user's direction: the Esc layer, the unsaved, overwrite and delete questions, replace's choices, the history keys and Tab completions. The footer keeps status and passing messages.
 - Typed input for search, replace, go to line, Open and Save As stays on the message line, because there's nothing to pick from, and search needs the text in view.
-- A question takes the middle of the screen. The Esc layer, replace and history sit in a corner clear of the cursor, because what's under the cursor matters there.
+- Every box takes the middle of the screen, by the user's direction: a corner was easy to miss, including the Esc layer. Replace, change review and history are about the cursor's line, so they stay centred across and move up or down just enough to leave that line showing. If they fit on neither side, they stay in the middle.
+- The terminal cursor hides while a box covers it, because it would blink through the box's text.
 - Rows that don't fit the height flow into more columns, so every key stays visible on a short terminal. This replaces the short legend wording.
 
 ## File history

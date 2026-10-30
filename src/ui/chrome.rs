@@ -147,22 +147,22 @@ fn input_prompt(
 struct Menu {
     title: String,
     rows: Vec<(&'static str, &'static str)>,
-    /// Keep clear of the cursor, because what's under it matters. Otherwise
-    /// the menu is a question and takes the middle of the screen.
-    beside_text: bool,
+    /// Keep the cursor's line showing, because the menu is about that line.
+    /// Every menu takes the middle of the screen; this one moves off it.
+    about_cursor: bool,
 }
 
 /// The menu the current mode wants, if any.
 fn menu_for(app: &App) -> Option<Menu> {
-    let question = |title: &str, rows| Menu {
+    let middle = |title: &str, rows| Menu {
         title: title.to_string(),
         rows,
-        beside_text: false,
+        about_cursor: false,
     };
-    let beside = |title: &str, rows| Menu {
+    let about_cursor = |title: &str, rows| Menu {
         title: title.to_string(),
         rows,
-        beside_text: true,
+        about_cursor: true,
     };
     Some(match &app.mode {
         Mode::Overlay { .. } => {
@@ -171,9 +171,9 @@ fn menu_for(app: &App) -> Option<Menu> {
             } else {
                 "Esc"
             };
-            beside(title, app.layer_rows())
+            middle(title, app.layer_rows())
         }
-        Mode::Prompt(Prompt::ReplaceConfirm(_)) => beside(
+        Mode::Prompt(Prompt::ReplaceConfirm(_)) => about_cursor(
             "Replace this one?",
             vec![
                 ("y", "Replace"),
@@ -182,7 +182,7 @@ fn menu_for(app: &App) -> Option<Menu> {
                 ("Esc", "Stop"),
             ],
         ),
-        Mode::Reader if app.reader.as_ref().is_some_and(|r| r.show_keys) => beside(
+        Mode::Reader if app.reader.as_ref().is_some_and(|r| r.show_keys) => middle(
             "Reader",
             vec![
                 ("Up Down", "read on"),
@@ -192,7 +192,7 @@ fn menu_for(app: &App) -> Option<Menu> {
                 ("Esc", "back to editing"),
             ],
         ),
-        Mode::History { .. } => beside(
+        Mode::History { .. } => about_cursor(
             "History",
             vec![
                 ("Left Right", "one edit"),
@@ -203,7 +203,7 @@ fn menu_for(app: &App) -> Option<Menu> {
                 ("Esc", "close"),
             ],
         ),
-        Mode::Prompt(Prompt::ConfirmLeave { then: After::Quit }) => question(
+        Mode::Prompt(Prompt::ConfirmLeave { then: After::Quit }) => middle(
             "Unsaved changes",
             vec![
                 ("y", "Save and quit"),
@@ -211,7 +211,7 @@ fn menu_for(app: &App) -> Option<Menu> {
                 ("Esc", "Keep editing"),
             ],
         ),
-        Mode::Prompt(Prompt::ConfirmLeave { .. }) => question(
+        Mode::Prompt(Prompt::ConfirmLeave { .. }) => middle(
             "Unsaved changes",
             vec![
                 ("y", "Save, then open the file"),
@@ -226,7 +226,7 @@ fn menu_for(app: &App) -> Option<Menu> {
             } else {
                 format!("Change {at} of {all}")
             };
-            beside(
+            about_cursor(
                 &title,
                 vec![
                     ("y", "Take this change"),
@@ -242,9 +242,9 @@ fn menu_for(app: &App) -> Option<Menu> {
             if *risk == SaveRisk::ChangedOnDisk {
                 rows.insert(0, ("r", "Review the changes"));
             }
-            question(title, rows)
+            middle(title, rows)
         }
-        Mode::Prompt(Prompt::ConfirmDeleteHistory) => question(
+        Mode::Prompt(Prompt::ConfirmDeleteHistory) => middle(
             "Delete all history for this file?",
             vec![("y", "Delete it"), ("n", "Keep it"), ("Esc", "Keep it")],
         ),
@@ -252,36 +252,38 @@ fn menu_for(app: &App) -> Option<Menu> {
     })
 }
 
-/// Bottom right of `area`, moved out of the way if `cursor` is there.
-fn clear_of_cursor(area: Rect, w: u16, h: u16, cursor: Option<(u16, u16)>) -> Rect {
-    let (w, h) = (w.min(area.width), h.min(area.height));
-    let right = area.x + area.width - w;
-    let bottom = area.y + area.height - h;
-    let hits =
-        |r: Rect| cursor.is_some_and(|(x, y)| x >= r.x && x < r.x + w && y >= r.y && y < r.y + h);
-    [
-        R::new(right, bottom, w, h),
-        R::new(right, area.y, w, h),
-        R::new(area.x, bottom, w, h),
-        R::new(area.x, area.y, w, h),
-    ]
-    .into_iter()
-    .find(|r| !hits(*r))
-    .unwrap_or(R::new(right, bottom, w, h))
+/// The middle of `area`, moved up or down as little as it takes to leave the
+/// cursor's row showing. If it fits on neither side it stays in the middle.
+pub fn centered_off_row(area: Rect, w: u16, h: u16, cursor: Option<(u16, u16)>) -> Rect {
+    let mid = centered(area, w, h);
+    let Some((_, row)) = cursor else {
+        return mid;
+    };
+    if row < mid.y || row >= mid.y + mid.height {
+        return mid;
+    }
+    let above = (row >= area.y + mid.height).then(|| row - mid.height);
+    let below = (row + 1 + mid.height <= area.y + area.height).then_some(row + 1);
+    let y = match (above, below) {
+        (Some(a), Some(b)) if mid.y - a <= b - mid.y => a,
+        (Some(a), None) => a,
+        (_, Some(b)) => b,
+        (None, None) => mid.y,
+    };
+    R::new(mid.x, y, mid.width, mid.height)
 }
 
-/// Draws the current mode's menu. Rows that don't fit the height flow into
-/// more columns, so every key stays visible on a short terminal.
+/// Draws the current mode's menu and returns its box. Rows that don't fit the
+/// height flow into more columns, so every key stays visible on a short
+/// terminal.
 pub fn menu(
     app: &App,
     text_area: Rect,
     cursor: Option<(u16, u16)>,
     cells: &mut Cells,
     theme: &Theme,
-) {
-    let Some(menu) = menu_for(app) else {
-        return;
-    };
+) -> Option<Rect> {
+    let menu = menu_for(app)?;
     let key_w = menu.rows.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
     let label_w = menu.rows.iter().map(|(_, l)| l.len()).max().unwrap_or(0);
     let cell_w = key_w + 1 + label_w + 2;
@@ -290,8 +292,8 @@ pub fn menu(
     let cols = menu.rows.len().div_ceil(per_col);
     let w = (cell_w * cols + 3).max(menu.title.len() + 6) as u16;
     let h = per_col as u16 + 2;
-    let area = if menu.beside_text {
-        clear_of_cursor(text_area, w, h, cursor)
+    let area = if menu.about_cursor {
+        centered_off_row(text_area, w, h, cursor)
     } else {
         centered(text_area, w, h)
     };
@@ -314,9 +316,10 @@ pub fn menu(
         let room = (inner.x + inner.width).saturating_sub(next + 1) as usize;
         cells.set_stringn(next + 1, y, label, room, theme.palette);
     }
+    Some(area)
 }
 
-/// Names Tab found in a file prompt, floating above the message line.
+/// Names Tab found in a file prompt, floating in the middle of the screen.
 pub fn completions(app: &App, text_area: Rect, cells: &mut Cells, theme: &Theme) {
     const MAX_ROWS: usize = 10;
     if app.completions.is_empty() {
@@ -330,8 +333,7 @@ pub fn completions(app: &App, text_area: Rect, cells: &mut Cells, theme: &Theme)
     let widest = rows.iter().map(|r| r.chars().count()).max().unwrap_or(0) as u16;
     let w = (widest + 4).max(16).min(text_area.width);
     let h = (rows.len() as u16 + 2).min(text_area.height);
-    let bottom = text_area.y + text_area.height - h;
-    let area = R::new(text_area.x, bottom, w, h);
+    let area = centered(text_area, w, h);
     let inner = modal_box(area, cells, "Matches", theme.palette, theme.palette_border);
     for (i, row) in rows.iter().enumerate() {
         let y = inner.y + i as u16;
@@ -435,10 +437,10 @@ fn fit_label(text: &str, width: usize) -> String {
     format!("…{tail}")
 }
 
-/// The "Show key help" modal.
-pub fn help(app: &App, text_area: Rect, cells: &mut Cells, theme: &Theme) {
+/// The "Show key help" modal. Returns its box.
+pub fn help(app: &App, text_area: Rect, cells: &mut Cells, theme: &Theme) -> Option<Rect> {
     let Mode::Help { top } = app.mode else {
-        return;
+        return None;
     };
     let w = 64.min(text_area.width.saturating_sub(2)).max(10);
     let h = (KEY_HELP.len() as u16 + 4).min(text_area.height);
@@ -458,6 +460,7 @@ pub fn help(app: &App, text_area: Rect, cells: &mut Cells, theme: &Theme) {
         let line = format!(" {k:<26}{v}");
         cells.set_stringn(inner.x, y, line, inner.width as usize, theme.modal);
     }
+    Some(area)
 }
 
 /// The Recover (or Stale) modal shown at startup.
