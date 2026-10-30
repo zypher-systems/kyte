@@ -82,29 +82,16 @@ pub fn render(app: &App, area: Rect, cells: &mut Cells, theme: &Theme) -> Option
                 let num = format!("{:>w$} │ ", line + 1, w = gw - 3);
                 cells.set_stringn(area.x, y, num, gw, theme.gutter);
             }
+            let text = buf.line_text(line);
             #[cfg(feature = "highlight")]
-            if let Some(sp) = spans.get(row).filter(|s| !s.is_empty()) {
-                render_line_styled(
-                    cells,
-                    area.x + gw as u16,
-                    y,
-                    &buf.line_text(line),
-                    left,
-                    text_w,
-                    theme,
-                    sp,
-                );
-                continue;
+            let styled = spans.get(row).filter(|s| !s.is_empty()).map(|sp| {
+                render_line_styled(cells, area.x + gw as u16, y, &text, left, text_w, theme, sp)
+            });
+            #[cfg(not(feature = "highlight"))]
+            let styled: Option<()> = None;
+            if styled.is_none() {
+                render_line(cells, area.x + gw as u16, y, &text, left, text_w, theme);
             }
-            render_line(
-                cells,
-                area.x + gw as u16,
-                y,
-                &buf.line_text(line),
-                left,
-                text_w,
-                theme,
-            );
             let row = Rect::new(area.x + gw as u16, y, text_w as u16, 1);
             paint_matches(app, line, row, cells, theme);
             paint_selection(

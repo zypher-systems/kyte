@@ -23,7 +23,7 @@ crc32fast = "1"
 anyhow = "1"
 rustix = { version = "1", features = ["fs"] }
 signal-hook = "0.3"
-# T13 stretch: syntax highlighting, off by default (`--features highlight`).
+# Syntax highlighting, on by default (`--no-default-features` leaves it out).
 tree-sitter = { version = "0.27", optional = true }
 tree-sitter-highlight = { version = "0.27", optional = true }
 tree-sitter-rust = { version = "0.24", optional = true }
@@ -31,7 +31,7 @@ tree-sitter-python = { version = "0.25", optional = true }
 tree-sitter-bash = { version = "0.25", optional = true }
 
 [features]
-default = []
+default = ["highlight"]
 highlight = [
     "dep:tree-sitter",
     "dep:tree-sitter-highlight",

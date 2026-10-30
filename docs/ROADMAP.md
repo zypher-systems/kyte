@@ -59,7 +59,7 @@ Keep using Kyte for real work along the way, on actual terminals with the kitty 
 - Config file
 - File tree
 - Multiple buffers and splits
-- Syntax highlighting on by default, with incremental parsing
+- Syntax highlighting for more languages, with incremental parsing
 - Packaging, and use as `$EDITOR`
 
 ## What 1.0 means
@@ -72,7 +72,7 @@ Proposed, not yet confirmed.
 - [ ] Saving keeps a file's permissions, owner, labels, xattrs and line endings
 - [ ] Selection, clipboard, find and replace, Save As, and opening files
 - [ ] Ctrl-K universal palette, and the Esc layer finalized
-- [ ] Syntax highlighting on by default
+- [x] Syntax highlighting on by default
 - [ ] A documented configuration file
 - [ ] Tested on real terminals, including over SSH and tmux
 - [ ] Installable as a signed package

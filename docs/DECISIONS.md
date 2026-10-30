@@ -12,6 +12,13 @@ These replace the matching parts of `ARCHITECTURE`. `docs/ROADMAP.md` holds the 
 - License: MIT. This settles section 16 and the section 4 note.
 - Kyte isn't tied to any one OS. It's meant to be open source for everyone.
 
+## Highlighting on by default
+
+- `highlight` is now a default feature; `--no-default-features` leaves it out. The binary grows from about 1.5 MB to about 7 MB, and building needs a C compiler. This replaces T13's "off by default".
+- `render` used to skip selection and search painting on any line with syntax colors. Nothing caught it because those tests used `.txt` files, and the highlight build had no test that mixed them. `tests/e2e_highlight.rs` now covers both on `.rs` files.
+- Measured on a release build, per keystroke at the end of a file: 13 ms at 100 KB, 27 ms at 250 KB, 54 ms at 500 KB. That's good enough to leave incremental parsing for later and keep the 512 KiB cap.
+- Only Rust, Python and Bash are covered, so other files still show plain.
+
 ## 0.2.0 small terminals
 
 - Everything had been tested at 100x30. At 80x24 the key help lost its last rows, the legend lost `Esc Esc palette`, and the save error lost its advice. The e2e tests now run those at 80x24 too.

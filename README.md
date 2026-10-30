@@ -33,11 +33,11 @@ The Makefile targets are thin wrappers:
 | `make demo` | `scripts/demo.sh` (see [Demo](#demo)) |
 | `make docker-test` | `cargo test` inside the Docker dev image (see [Docker](#docker)) |
 
-Optional syntax highlighting for Rust, Python and Bash files (by extension), using tree-sitter:
+Kyte highlights Rust, Python and Bash files, picked by file extension, using tree-sitter. Building needs a C compiler for the grammars. To leave highlighting out, which also shrinks the binary from about 7 MB to about 1.5 MB:
 
 ```
-cargo build --release --features highlight
-cargo test --features highlight
+cargo build --release --no-default-features
+cargo test --no-default-features
 ```
 
 Kyte makes no network connections and sends no telemetry. It reads no config file.
@@ -224,6 +224,7 @@ These Docker files have not been run yet, because the build machine had no Docke
 - UTF-8 files only (others are refused and left untouched).
 - Kyte keeps each line's ending as it is. New lines use the ending most of the file uses, and the status bar shows `CRLF` for those files. It doesn't convert a file from one to the other. A `\r` that isn't part of a line ending shows as a control picture.
 - Linux only (the swap lock checks `/proc`).
+- Files over 512 KiB aren't syntax highlighted, because each keystroke re-parses the file. Typing near that size takes up to about 55 ms per key.
 - Search takes under about 30 ms per key on a 38 MB ASCII file. On a file that size with non-ASCII text, ignoring case takes about 240 ms per key.
 - A very long single line costs more per keystroke, depending on what's in it. At the end of a 5 MB line on the build machine, plain ASCII takes about 8 ms, a line full of tabs about 45 ms, and CJK text about 170 ms.
 - Not in this version: reader mode, file tree, light and high-contrast themes, undo history that survives a restart, mouse, multiple buffers or splits, LSP, plugins, a config file, soft wrap, CRLF conversion, non-UTF-8 files, RPM/COPR packaging, and use as the default `$EDITOR`.
