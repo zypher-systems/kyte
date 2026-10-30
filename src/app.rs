@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 
-use crate::buffer::{Buffer, GroupKind};
+use crate::buffer::{Buffer, Edit, GroupKind};
 use crate::cli::Options;
 use crate::command::{self, Command};
 use crate::fileio::{self, DiskState};
@@ -50,6 +50,17 @@ pub enum Prompt {
         text: String,
     },
     ConfirmQuit,
+    /// Asks what to replace.
+    ReplaceFind {
+        query: String,
+    },
+    /// Asks what to replace it with.
+    ReplaceWith {
+        query: String,
+        with: String,
+    },
+    /// Stops at each match and asks.
+    ReplaceConfirm(ReplaceRun),
     /// Asks for a file name. `quit_after` quits once the save succeeds.
     SaveAs {
         text: String,
@@ -61,6 +72,18 @@ pub enum Prompt {
         path: std::path::PathBuf,
         quit_after: bool,
     },
+}
+
+/// A replace in progress. It runs from where it started to the end of the
+/// file, then from the top back to where it started.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplaceRun {
+    query: String,
+    with: String,
+    /// Where it started, moved along by replacements made before that point.
+    origin: usize,
+    wrapped: bool,
+    count: usize,
 }
 
 /// Why a save stopped to ask, in the order the questions are asked.
@@ -136,6 +159,8 @@ pub const LEGEND: &[(&str, &str)] = &[
     ("s", "save"),
     ("Esc Esc", "palette"),
 ];
+
+pub const REPLACE_CONFIRM_TEXT: &str = "Replace this one? y yes, n skip, a all, Esc stop";
 
 pub const CONFIRM_QUIT_TEXT: &str = "Unsaved changes! y saves and quits, n discards, Esc cancels";
 
@@ -313,6 +338,11 @@ impl App {
             Mode::Palette(state) => self.palette_key(key, state),
             Mode::Prompt(Prompt::Search { query, origin }) => self.search_key(key, query, origin),
             Mode::Prompt(Prompt::GotoLine { text }) => self.goto_key(key, text),
+            Mode::Prompt(Prompt::ReplaceFind { query }) => self.replace_find_key(key, query),
+            Mode::Prompt(Prompt::ReplaceWith { query, with }) => {
+                self.replace_with_key(key, query, with)
+            }
+            Mode::Prompt(Prompt::ReplaceConfirm(run)) => self.replace_confirm_key(key, run),
             Mode::Recover(info) => self.recover_key(key, info),
             Mode::Help => {
                 if matches!(key, Key::Esc | Key::Enter | Key::Char('q')) {
@@ -408,6 +438,7 @@ impl App {
             }
             Key::Ctrl('p') => self.open_palette(),
             Key::Ctrl('f') => self.open_search(),
+            Key::Ctrl('r') => self.open_replace(),
             Key::Char(c) => b.insert_str(&c.to_string(), GroupKind::Typing),
             Key::Enter => b.insert_newline(),
             Key::Tab => b.insert_str("\t", GroupKind::Typing),
@@ -575,11 +606,33 @@ impl App {
 
     /// Opens the search prompt (Ctrl-F, Esc /, or the palette's Find).
     pub fn open_search(&mut self) {
-        self.buffer.clear_selection();
-        self.mode = Mode::Prompt(Prompt::Search {
-            query: String::new(),
-            origin: self.buffer.cursor(),
-        });
+        let query = self.selected_query();
+        let origin = self
+            .buffer
+            .selection()
+            .map_or(self.buffer.cursor(), |r| r.start);
+        self.buffer.move_to(origin);
+        self.mode = Mode::Prompt(Prompt::Search { query, origin });
+    }
+
+    /// The selection as a starting query, if it fits on one line.
+    fn selected_query(&self) -> String {
+        self.buffer
+            .selection()
+            .map(|r| self.buffer.slice_string(r))
+            .filter(|s| !s.contains('\n'))
+            .unwrap_or_default()
+    }
+
+    /// The text to highlight, while a prompt is searching for something.
+    pub fn search_query(&self) -> Option<&str> {
+        match &self.mode {
+            Mode::Prompt(Prompt::Search { query, .. })
+            | Mode::Prompt(Prompt::ReplaceFind { query })
+            | Mode::Prompt(Prompt::ReplaceWith { query, .. }) => Some(query),
+            Mode::Prompt(Prompt::ReplaceConfirm(run)) => Some(&run.query),
+            _ => None,
+        }
     }
 
     fn search_key(&mut self, key: Key, mut query: String, origin: usize) {
@@ -592,10 +645,19 @@ impl App {
                 self.mode = Mode::Insert;
                 return;
             }
-            Key::Enter => {
+            Key::Enter | Key::Down | Key::Ctrl('f') => {
                 if !query.is_empty() {
                     let at = self.buffer.cursor();
                     match search::find_next(self.buffer.rope(), &query, at) {
+                        Some(i) => self.buffer.move_to(i),
+                        None => self.set_error("No match"),
+                    }
+                }
+            }
+            Key::Up => {
+                if !query.is_empty() {
+                    let at = self.buffer.cursor();
+                    match search::find_prev(self.buffer.rope(), &query, at) {
                         Some(i) => self.buffer.move_to(i),
                         None => self.set_error("No match"),
                     }
@@ -626,6 +688,140 @@ impl App {
                 self.buffer.move_to(origin);
                 self.set_error("No match");
             }
+        }
+    }
+
+    /// Opens the replace prompt, starting from the selection if there is one.
+    fn open_replace(&mut self) {
+        let query = self.selected_query();
+        if let Some(r) = self.buffer.selection() {
+            self.buffer.move_to(r.start);
+        }
+        self.mode = Mode::Prompt(Prompt::ReplaceFind { query });
+    }
+
+    fn replace_find_key(&mut self, key: Key, mut query: String) {
+        match key {
+            Key::Esc => {
+                self.mode = Mode::Insert;
+                return;
+            }
+            Key::Enter if !query.is_empty() => {
+                self.mode = Mode::Prompt(Prompt::ReplaceWith {
+                    query,
+                    with: String::new(),
+                });
+                return;
+            }
+            Key::Char(c) => query.push(c),
+            Key::Backspace => {
+                query.pop();
+            }
+            _ => {}
+        }
+        self.mode = Mode::Prompt(Prompt::ReplaceFind { query });
+    }
+
+    fn replace_with_key(&mut self, key: Key, query: String, mut with: String) {
+        match key {
+            Key::Esc => {
+                self.mode = Mode::Insert;
+                return;
+            }
+            Key::Enter => {
+                let from = self.buffer.cursor();
+                let run = ReplaceRun {
+                    query,
+                    with,
+                    origin: from,
+                    wrapped: false,
+                    count: 0,
+                };
+                self.replace_advance(run, from);
+                return;
+            }
+            Key::Char(c) => with.push(c),
+            Key::Backspace => {
+                with.pop();
+            }
+            _ => {}
+        }
+        self.mode = Mode::Prompt(Prompt::ReplaceWith { query, with });
+    }
+
+    /// Stops at the next match from `from`, or finishes.
+    fn replace_advance(&mut self, mut run: ReplaceRun, from: usize) {
+        let rope = self.buffer.rope();
+        let mut hit = search::find_forward(rope, &run.query, from);
+        if hit.is_none() && !run.wrapped {
+            run.wrapped = true;
+            hit = search::find_forward(rope, &run.query, 0);
+        }
+        match hit.filter(|i| !run.wrapped || *i < run.origin) {
+            Some(i) => {
+                self.buffer.move_to(i);
+                self.mode = Mode::Prompt(Prompt::ReplaceConfirm(run));
+            }
+            None => self.finish_replace(run.count),
+        }
+    }
+
+    fn finish_replace(&mut self, count: usize) {
+        self.mode = Mode::Insert;
+        match count {
+            0 => self.set_message("No matches replaced"),
+            1 => self.set_message("Replaced 1 match"),
+            n => self.set_message(format!("Replaced {n} matches")),
+        }
+    }
+
+    fn replace_confirm_key(&mut self, key: Key, mut run: ReplaceRun) {
+        let at = self.buffer.cursor();
+        match key {
+            Key::Char('y') => {
+                let edit = self.replacement_at(at, &run);
+                let inserted = edit.inserted.chars().count();
+                let removed = edit.removed.chars().count();
+                self.buffer
+                    .apply_with_cursor(edit, GroupKind::Operator, at + inserted);
+                run.count += 1;
+                if run.wrapped {
+                    run.origin = run.origin + inserted - removed;
+                }
+                self.replace_advance(run, at + inserted);
+            }
+            Key::Char('n') => self.replace_advance(run, at + 1),
+            Key::Char('a') => {
+                let (origin, wrapped) = (run.origin, run.wrapped);
+                let hits = search::find_all(self.buffer.rope(), &run.query);
+                let mut edits: Vec<Edit> = hits
+                    .into_iter()
+                    .filter(|i| {
+                        if wrapped {
+                            (at..origin).contains(i)
+                        } else {
+                            *i >= at || *i < origin
+                        }
+                    })
+                    .map(|i| self.replacement_at(i, &run))
+                    .collect();
+                // Last first, so earlier positions stay right.
+                edits.reverse();
+                let count = run.count + edits.len();
+                self.buffer.apply_group(edits, at);
+                self.finish_replace(count);
+            }
+            Key::Char('q') | Key::Esc => self.finish_replace(run.count),
+            _ => self.mode = Mode::Prompt(Prompt::ReplaceConfirm(run)),
+        }
+    }
+
+    fn replacement_at(&self, at: usize, run: &ReplaceRun) -> Edit {
+        let n = run.query.chars().count();
+        Edit {
+            at,
+            removed: self.buffer.slice_string(at..at + n),
+            inserted: run.with.clone(),
         }
     }
 
@@ -669,6 +865,7 @@ impl App {
             Command::Paste => self.paste(),
             Command::SelectAll => self.buffer.select_all(),
             Command::Find => self.open_search(),
+            Command::Replace => self.open_replace(),
             Command::GotoLine => {
                 self.mode = Mode::Prompt(Prompt::GotoLine {
                     text: String::new(),
@@ -711,7 +908,7 @@ impl App {
         }
         let removed = self.buffer.slice_string(r.clone());
         self.buffer.apply_with_cursor(
-            crate::buffer::Edit {
+            Edit {
                 at: r.start,
                 removed,
                 inserted: String::new(),
@@ -797,6 +994,8 @@ impl App {
                 self.incremental(&query, origin);
             }
             Mode::Prompt(Prompt::GotoLine { text: typed })
+            | Mode::Prompt(Prompt::ReplaceFind { query: typed })
+            | Mode::Prompt(Prompt::ReplaceWith { with: typed, .. })
             | Mode::Prompt(Prompt::SaveAs { text: typed, .. }) => {
                 typed.push_str(text.lines().next().unwrap_or(""));
             }
@@ -981,6 +1180,9 @@ impl App {
             Mode::Palette(_) => "PALETTE",
             Mode::Prompt(Prompt::Search { .. }) => "SEARCH",
             Mode::Prompt(Prompt::GotoLine { .. }) => "GOTO",
+            Mode::Prompt(Prompt::ReplaceFind { .. })
+            | Mode::Prompt(Prompt::ReplaceWith { .. })
+            | Mode::Prompt(Prompt::ReplaceConfirm(_)) => "REPLACE",
             Mode::Prompt(Prompt::ConfirmQuit) => "QUIT?",
             Mode::Prompt(Prompt::SaveAs { .. }) => "SAVE AS",
             Mode::Prompt(Prompt::ConfirmSave { .. }) => "SAVE?",
@@ -1359,6 +1561,130 @@ mod tests {
         assert_eq!(a.buffer.cursor(), 2);
         a.handle_key(Key::Esc, t).unwrap();
         assert_eq!(a.buffer.cursor(), 2);
+    }
+
+    #[test]
+    fn search_up_goes_back_and_ctrl_f_goes_on() {
+        let t = Instant::now();
+        let mut a = search_app();
+        a.handle_key(Key::Ctrl('f'), t).unwrap();
+        typ(&mut a, "ba");
+        a.handle_key(Key::Ctrl('f'), t).unwrap();
+        assert_eq!(a.buffer.cursor(), 8);
+        a.handle_key(Key::Up, t).unwrap();
+        assert_eq!(a.buffer.cursor(), 4);
+        a.handle_key(Key::Up, t).unwrap();
+        assert_eq!(a.buffer.cursor(), 8, "wraps to the end");
+    }
+
+    #[test]
+    fn search_starts_from_a_selected_word() {
+        let t = Instant::now();
+        let mut a = search_app();
+        a.buffer.move_to(7);
+        a.buffer.set_selection_anchor(4);
+        a.handle_key(Key::Ctrl('f'), t).unwrap();
+        assert_eq!(a.search_query(), Some("bar"));
+        assert_eq!(a.buffer.selection(), None);
+        assert_eq!(a.buffer.cursor(), 4);
+    }
+
+    /// Runs Ctrl-R with `query` and `with`, stopping at the first question.
+    fn start_replace(a: &mut App, query: &str, with: &str) {
+        let t = Instant::now();
+        a.handle_key(Key::Ctrl('r'), t).unwrap();
+        typ(a, query);
+        a.handle_key(Key::Enter, t).unwrap();
+        typ(a, with);
+        a.handle_key(Key::Enter, t).unwrap();
+    }
+
+    #[test]
+    fn replace_one_by_one() {
+        let mut a = app("cat cat cat");
+        start_replace(&mut a, "cat", "dog");
+        assert_eq!(a.mode_label(), "REPLACE");
+        assert_eq!(a.buffer.cursor(), 0);
+        typ(&mut a, "y");
+        assert_eq!(a.buffer.to_string(), "dog cat cat");
+        typ(&mut a, "n");
+        typ(&mut a, "y");
+        assert_eq!(a.buffer.to_string(), "dog cat dog");
+        assert_eq!(a.mode, Mode::Insert);
+        assert_eq!(a.message.as_deref(), Some("Replaced 2 matches"));
+    }
+
+    #[test]
+    fn replace_all_is_one_undo_step_and_wraps_around() {
+        let t = Instant::now();
+        let mut a = app("a x b x c x");
+        a.buffer.move_to(6);
+        start_replace(&mut a, "x", "yy");
+        assert_eq!(a.buffer.cursor(), 6);
+        typ(&mut a, "a");
+        assert_eq!(a.buffer.to_string(), "a yy b yy c yy");
+        assert_eq!(a.message.as_deref(), Some("Replaced 3 matches"));
+        a.handle_key(Key::Ctrl('z'), t).unwrap();
+        assert_eq!(a.buffer.to_string(), "a x b x c x");
+    }
+
+    #[test]
+    fn replacing_never_rereads_its_own_output() {
+        let mut a = app("aa aa");
+        start_replace(&mut a, "a", "aa");
+        typ(&mut a, "yyyy");
+        assert_eq!(a.buffer.to_string(), "aaaa aaaa");
+        assert_eq!(a.mode, Mode::Insert);
+    }
+
+    #[test]
+    fn replace_wraps_and_stops_where_it_started_after_growing_the_text() {
+        let mut a = app("x-x-x");
+        a.buffer.move_to(2);
+        start_replace(&mut a, "x", "long");
+        typ(&mut a, "y"); // middle
+        typ(&mut a, "y"); // last
+        typ(&mut a, "y"); // wraps to the first
+        assert_eq!(a.buffer.to_string(), "long-long-long");
+        assert_eq!(a.message.as_deref(), Some("Replaced 3 matches"));
+    }
+
+    #[test]
+    fn replace_with_nothing_deletes_and_stop_keeps_the_rest() {
+        let mut a = app("ab ab ab");
+        start_replace(&mut a, "ab ", "");
+        typ(&mut a, "y");
+        assert_eq!(a.buffer.to_string(), "ab ab");
+        typ(&mut a, "q");
+        assert_eq!(a.mode, Mode::Insert);
+        assert_eq!(a.buffer.to_string(), "ab ab");
+        assert_eq!(a.message.as_deref(), Some("Replaced 1 match"));
+    }
+
+    #[test]
+    fn replace_with_no_match_says_so_and_changes_nothing() {
+        let mut a = app("abc");
+        start_replace(&mut a, "zzz", "y");
+        assert_eq!(a.mode, Mode::Insert);
+        assert_eq!(a.message.as_deref(), Some("No matches replaced"));
+        assert!(!a.buffer.is_dirty());
+    }
+
+    #[test]
+    fn replace_matches_any_case_like_search() {
+        let mut a = app("Foo foo FOO");
+        start_replace(&mut a, "foo", "bar");
+        typ(&mut a, "a");
+        assert_eq!(a.buffer.to_string(), "bar bar bar");
+    }
+
+    #[test]
+    fn replace_empty_find_does_not_advance() {
+        let t = Instant::now();
+        let mut a = app("abc");
+        a.handle_key(Key::Ctrl('r'), t).unwrap();
+        a.handle_key(Key::Enter, t).unwrap();
+        assert!(matches!(a.mode, Mode::Prompt(Prompt::ReplaceFind { .. })));
     }
 
     #[test]

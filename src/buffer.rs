@@ -426,6 +426,32 @@ impl Buffer {
         self.want_col = self.cursor_display_col();
     }
 
+    /// Applies `edits`, in order, as one undo step and leaves the cursor at
+    /// `cursor_after`.
+    pub fn apply_group(&mut self, edits: Vec<Edit>, cursor_after: usize) {
+        if edits.is_empty() {
+            return;
+        }
+        let before = self.cursor;
+        self.anchor = None;
+        for e in &edits {
+            self.raw_apply(e);
+            self.pending_edits.push(e.clone());
+        }
+        self.cursor = self.outside_crlf(cursor_after.min(self.rope.len_chars()));
+        self.dirty = true;
+        self.redo.clear();
+        self.close_group();
+        self.undo.push(Group {
+            edits,
+            cursor_before: before,
+            cursor_after: self.cursor,
+            kind: GroupKind::Operator,
+            open: false,
+        });
+        self.want_col = self.cursor_display_col();
+    }
+
     /// Inserts at the cursor, replacing the selection if there is one.
     pub fn insert_str(&mut self, s: &str, kind: GroupKind) {
         if s.is_empty() {
@@ -849,6 +875,32 @@ mod tests {
         select(&mut y, 4, 2);
         y.delete_forward();
         assert_eq!(y.to_string(), "abef");
+    }
+
+    #[test]
+    fn apply_group_is_one_undo_step() {
+        let mut x = b("a-b-c");
+        x.apply_group(
+            vec![
+                Edit {
+                    at: 3,
+                    removed: "-".into(),
+                    inserted: "++".into(),
+                },
+                Edit {
+                    at: 1,
+                    removed: "-".into(),
+                    inserted: "++".into(),
+                },
+            ],
+            0,
+        );
+        assert_eq!(x.to_string(), "a++b++c");
+        assert_eq!(x.take_pending_edits().len(), 2);
+        assert!(x.undo());
+        assert_eq!(x.to_string(), "a-b-c");
+        assert!(x.redo());
+        assert_eq!(x.to_string(), "a++b++c");
     }
 
     #[test]

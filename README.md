@@ -85,6 +85,7 @@ Environment variables: `KYTE_STATE_DIR` (where swap files go; overrides the defa
 | Ctrl-Q | Quit. With unsaved changes, Kyte asks first: `y` saves and quits, `n` discards, Esc cancels |
 | Ctrl-Z, Ctrl-Y | Undo, redo |
 | Ctrl-F | Search |
+| Ctrl-R | Replace |
 | Esc, Ctrl-Space | Open the operator layer |
 | Alt-*key* | Same as Esc then *key* |
 | Ctrl-P | Open the command palette |
@@ -124,7 +125,7 @@ Under tmux, set `tmux set -g escape-time 10`. tmux's default of 500 ms delays ev
 
 Esc Esc (or Ctrl-P) opens a fuzzy-filtered list. Type to filter, Up and Down to select, Enter to run, Esc to close without running anything.
 
-Commands: Save, Save as, Quit, Quit without saving, Undo, Redo, Cut, Copy, Paste, Select all, Find, Go to line, Toggle line numbers, Show key help.
+Commands: Save, Save as, Quit, Quit without saving, Undo, Redo, Cut, Copy, Paste, Select all, Find, Replace, Go to line, Toggle line numbers, Show key help.
 
 **Save as** asks for a file name, starting from the current one; `~/` means your home directory. It asks before overwriting a file, and refuses a file another Kyte has open. The buffer then belongs to the new file, and the old file stays as it was.
 
@@ -132,7 +133,13 @@ Commands: Save, Save as, Quit, Quit without saving, Undo, Redo, Cut, Copy, Paste
 
 ### Search
 
-Ctrl-F (or Esc `/`) opens `Search:` on the message line. Kyte jumps to the first match as you type. Enter jumps to the next match and wraps around. Esc closes the prompt and leaves the cursor on the match, or puts it back where it was if nothing matched.
+Ctrl-F (or Esc `/`) opens `Search:` on the message line, starting from the selected text if there is any. Kyte jumps to the first match as you type and highlights every match on screen. Enter, Down or Ctrl-F jumps to the next match and Up to the previous one, wrapping around. Esc closes the prompt and leaves the cursor on the match, or puts it back where it was if nothing matched.
+
+Search ignores case until your text has a capital letter, then it matches exactly: `hello` finds `Hello`, and `Hello` doesn't find `hello`.
+
+### Replace
+
+Ctrl-R asks what to replace and what to replace it with. Kyte then starts at the cursor, goes to the end of the file, wraps to the top, and stops where it started. At each match, `y` replaces it, `n` skips it, `a` replaces all the rest as one undo step, and Esc or `q` stops. Replace matches case the same way search does.
 
 ## Swap files and recovery
 
@@ -194,6 +201,7 @@ These Docker files have not been run yet, because the build machine had no Docke
 - UTF-8 files only (others are refused and left untouched).
 - Kyte keeps each line's ending as it is. New lines use the ending most of the file uses, and the status bar shows `CRLF` for those files. It doesn't convert a file from one to the other. A `\r` that isn't part of a line ending shows as a control picture.
 - Linux only (the swap lock checks `/proc`).
+- Search takes under about 30 ms per key on a 38 MB ASCII file. On a file that size with non-ASCII text, ignoring case takes about 240 ms per key.
 - A very long single line costs more per keystroke, depending on what's in it. At the end of a 5 MB line on the build machine, plain ASCII takes about 8 ms, a line full of tabs about 45 ms, and CJK text about 170 ms.
 - Not in this version: reader mode, file tree, the Ctrl-K universal palette, light and high-contrast themes, undo history that survives a restart, mouse, multiple buffers or splits, LSP, plugins, a config file, soft wrap, CRLF conversion, non-UTF-8 files, RPM/COPR packaging, and use as the default `$EDITOR`.
 

@@ -105,6 +105,8 @@ pub fn render(app: &App, area: Rect, cells: &mut Cells, theme: &Theme) -> Option
                 text_w,
                 theme,
             );
+            let row = Rect::new(area.x + gw as u16, y, text_w as u16, 1);
+            paint_matches(app, line, row, cells, theme);
             paint_selection(
                 app,
                 line,
@@ -126,6 +128,53 @@ pub fn render(app: &App, area: Rect, cells: &mut Cells, theme: &Theme) -> Option
         ))
     } else {
         None
+    }
+}
+
+/// Highlights search matches on line `l`. Only the cells on screen are
+/// looked at, so a long line full of matches costs no more than a short one.
+fn paint_matches(app: &App, l: usize, row: Rect, cells: &mut Cells, theme: &Theme) {
+    let Some(query) = app.search_query() else {
+        return;
+    };
+    let buf = &app.buffer;
+    let line = buf.line_text(l);
+    let matches = crate::search::line_matches(&line, query);
+    if matches.is_empty() {
+        return;
+    }
+    let (_, left) = app.scroll();
+    let right = left + row.width as usize;
+    let cursor = buf.cursor().wrapping_sub(buf.line_start(l));
+    let mut walk = graphemes_with_char_offsets(&line);
+    let mut col = walk.skip_plain(left);
+    let mut next = 0;
+    while let Some((off, g)) = walk.next() {
+        if col >= right {
+            break;
+        }
+        let w = grapheme_width(g, col);
+        while matches.get(next).is_some_and(|m| m.end <= off) {
+            next += 1;
+        }
+        let Some(m) = matches.get(next) else {
+            break;
+        };
+        if m.contains(&off) && col + w > left {
+            let style = if m.start == cursor {
+                theme.search_current
+            } else {
+                theme.search_match
+            };
+            let from = col.max(left);
+            let to = (col + w).min(right);
+            let cell = Rect::new(row.x + (from - left) as u16, row.y, (to - from) as u16, 1);
+            cells.set_style(cell, style);
+        }
+        col += w;
+        if col < left {
+            col += walk.skip_plain(left - col);
+        }
     }
 }
 

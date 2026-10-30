@@ -1024,7 +1024,7 @@ fn ac16_empty_query_does_nothing() {
 
 // ---------------------------------------------------------------- AC-17
 
-const COMMANDS: [&str; 14] = [
+const COMMANDS: [&str; 15] = [
     "Save",
     "Save as",
     "Quit",
@@ -1036,6 +1036,7 @@ const COMMANDS: [&str; 14] = [
     "Paste",
     "Select all",
     "Find",
+    "Replace",
     "Go to line",
     "Toggle line numbers",
     "Show key help",
@@ -1070,7 +1071,7 @@ fn ac17_palette_lists_every_command() {
         .collect();
     assert!(first_result(&p).contains("▸ Save"), "{}", p.dump());
     // 8 rows are visible at once; scrolling down reveals the rest
-    for _ in 0..13 {
+    for _ in 0..14 {
         p.send_keys(&["Down"]);
         std::thread::sleep(Duration::from_millis(5));
         for c in COMMANDS {
@@ -1609,6 +1610,102 @@ fn break_lock_opens_a_file_held_by_another_kyte() {
     b.send_str("r");
     b.wait_for("1 │ held base", TIMEOUT);
     b.kill9();
+}
+
+// ---------------------------------------------------------------- search and replace
+
+#[test]
+fn search_ignores_case_until_the_query_has_a_capital() {
+    let env = Env::new();
+    let f = env.write("s.txt", "Hello hello\n");
+    let mut p = env.open(&f);
+    p.send_keys(&["Right"]);
+    wait_status(&p, "Col 2");
+    p.send_keys(&["C-f"]);
+    p.wait_for("Search:", TIMEOUT);
+    p.send_str("hello");
+    wait_status(&p, "Col 7");
+    p.send_keys(&["C-Home"]);
+    p.send_keys(&["Esc"]);
+    wait_status(&p, "INSERT");
+    p.send_keys(&["Home"]);
+    p.send_keys(&["C-f"]);
+    p.wait_for("Search:", TIMEOUT);
+    p.send_str("hello");
+    wait_status(&p, "Col 1");
+    p.send_keys(&["Esc"]);
+    wait_status(&p, "INSERT");
+    quit_clean(&mut p);
+}
+
+#[test]
+fn search_highlights_matches_while_the_prompt_is_open() {
+    let env = Env::new();
+    let f = env.write("s.txt", "cat dog cat\n");
+    let mut p = env.open(&f);
+    let plain = p.bg(0, 6);
+    p.send_keys(&["C-f"]);
+    p.wait_for("Search:", TIMEOUT);
+    p.send_str("cat");
+    p.wait_for("Search: cat", TIMEOUT);
+    let current = p.bg(0, 6);
+    let other = p.bg(0, 14);
+    assert_ne!(current, plain, "the match under the cursor stands out");
+    assert_ne!(other, plain, "other matches do too");
+    assert_ne!(current, other, "and the two differ");
+    assert_eq!(p.bg(0, 10), plain, "text between them doesn't");
+    p.send_keys(&["Esc"]);
+    wait_status(&p, "INSERT");
+    assert_eq!(p.bg(0, 14), plain, "highlights end with the prompt");
+    quit_clean(&mut p);
+}
+
+#[test]
+fn replace_through_the_prompts_then_undo() {
+    let env = Env::new();
+    let f = env.write("r.txt", "one two one\none\n");
+    let mut p = env.open(&f);
+    p.send_keys(&["C-r"]);
+    p.wait_for("Replace:", TIMEOUT);
+    p.send_str("one");
+    p.send_keys(&["Enter"]);
+    p.wait_for("With:", TIMEOUT);
+    p.send_str("1");
+    p.send_keys(&["Enter"]);
+    p.wait_for("Replace this one?", TIMEOUT);
+    p.send_str("n");
+    wait_status(&p, "Col 9");
+    p.send_str("a");
+    p.wait_for("Replaced 2 matches", TIMEOUT);
+    p.wait_for("1 │ one two 1", TIMEOUT);
+    save_and_wait(&mut p);
+    p.send_keys(&["C-z"]);
+    p.wait_for("1 │ one two one", TIMEOUT);
+    p.send_keys(&["C-y"]);
+    p.wait_for("1 │ one two 1", TIMEOUT);
+    save_and_wait(&mut p);
+    quit_clean(&mut p);
+    assert_eq!(fs::read_to_string(&f).unwrap(), "one two 1\n1\n");
+}
+
+#[test]
+fn replace_all_survives_a_crash() {
+    let env = Env::new();
+    let f = work_file(&env, "r.txt", "x x x\n");
+    let mut p = env.open(&f);
+    p.send_keys(&["C-r"]);
+    p.wait_for("Replace:", TIMEOUT);
+    p.send_str("x");
+    p.send_keys(&["Enter"]);
+    p.wait_for("With:", TIMEOUT);
+    p.send_str("long");
+    p.send_keys(&["Enter"]);
+    p.wait_for("Replace this one?", TIMEOUT);
+    p.send_str("a");
+    p.wait_for("Replaced 3 matches", TIMEOUT);
+    std::thread::sleep(Duration::from_millis(100));
+    p.kill9();
+    assert_eq!(print_swap(&env, &f).1, "long long long\n");
 }
 
 // ---------------------------------------------------------------- selection

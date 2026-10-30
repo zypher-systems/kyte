@@ -12,6 +12,14 @@ These replace the matching parts of `ARCHITECTURE`. `docs/ROADMAP.md` holds the 
 - License: MIT. This settles section 16 and the section 4 note.
 - Kyte isn't tied to any one OS. It's meant to be open source for everyone.
 
+## 0.2.0 search and replace
+
+- Search uses smart case instead of a toggle: no capitals matches any case, and any capital is exact. This needs no extra key. It replaces the "case-sensitive, smart-case is out" rule in T7.
+- Case folding is one char to one char, using the first char of `to_lowercase`, so a match keeps its length and char offsets stay right. Full Unicode case folding, where `ß` matches `ss`, is out of scope. ASCII text takes a faster path.
+- Highlighting runs only while a search or replace prompt is open, and only looks at cells on screen. A match that spans lines isn't highlighted, though it's still found.
+- Replace is literal text, with no regular expressions. It runs from the cursor to the end, then wraps to where it started, so it never reads its own output twice. `a` is one undo step, and each `y` is one.
+- `a` uses a new `Buffer::apply_group`, which applies the edits last to first so earlier positions stay valid, and the swap gets them in the same order.
+
 ## 0.2.0 selection and clipboard
 
 - Kyte's shortcuts are its own, so Ctrl-X, Ctrl-C and Ctrl-V are cut, copy and paste, and Ctrl-X no longer quits. This fits the Ctrl-S, Ctrl-Z, Ctrl-Y and Ctrl-F keys Kyte already had.

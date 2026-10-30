@@ -39,7 +39,7 @@ Fixed every known way the build could lose or damage work. Each fix has a regres
 
 - [ ] Open a file from inside the editor
 - [x] Selection, cut, copy and paste, including the system clipboard over OSC 52
-- [ ] Find and replace; case-insensitive search; visible match highlighting
+- [x] Find and replace; case-insensitive search; visible match highlighting
 - [x] Word motion and word delete
 - [ ] Auto-indent, and tabs or spaces per file
 - [ ] Ctrl-K universal palette

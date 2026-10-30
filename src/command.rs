@@ -14,6 +14,7 @@ pub enum Command {
     Paste,
     SelectAll,
     Find,
+    Replace,
     GotoLine,
     ToggleLineNumbers,
     ShowKeyHelp,
@@ -32,6 +33,7 @@ pub const REGISTRY: &[Command] = &[
     Command::Paste,
     Command::SelectAll,
     Command::Find,
+    Command::Replace,
     Command::GotoLine,
     Command::ToggleLineNumbers,
     Command::ShowKeyHelp,
@@ -51,6 +53,7 @@ impl Command {
             Command::Paste => "Paste",
             Command::SelectAll => "Select all",
             Command::Find => "Find",
+            Command::Replace => "Replace",
             Command::GotoLine => "Go to line",
             Command::ToggleLineNumbers => "Toggle line numbers",
             Command::ShowKeyHelp => "Show key help",
@@ -71,6 +74,7 @@ impl Command {
             Command::Paste => "Ctrl-V",
             Command::SelectAll => "Ctrl-A",
             Command::Find => "Ctrl-F",
+            Command::Replace => "Ctrl-R",
             Command::GotoLine => "",
             Command::ToggleLineNumbers => "",
             Command::ShowKeyHelp => "",
@@ -102,7 +106,7 @@ pub const KEY_HELP: &[(&str, &str)] = &[
     ("Ctrl-S (Ctrl-O)", "save"),
     ("Ctrl-Q", "quit (asks if unsaved)"),
     ("Ctrl-Z, Ctrl-Y", "undo, redo"),
-    ("Ctrl-F", "search"),
+    ("Ctrl-F, Ctrl-R", "search, replace"),
     ("Ctrl-P", "command palette"),
     ("Esc, Ctrl-Space, Alt-key", "operator layer:"),
     ("  w  d  k", "del word, del line, del to end"),
@@ -117,7 +121,7 @@ mod tests {
 
     #[test]
     fn every_command_has_a_label() {
-        assert_eq!(REGISTRY.len(), 14);
+        assert_eq!(REGISTRY.len(), 15);
         let labels: Vec<&str> = REGISTRY.iter().map(|c| c.label()).collect();
         assert_eq!(
             labels,
@@ -133,6 +137,7 @@ mod tests {
                 "Paste",
                 "Select all",
                 "Find",
+                "Replace",
                 "Go to line",
                 "Toggle line numbers",
                 "Show key help"
