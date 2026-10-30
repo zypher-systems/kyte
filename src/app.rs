@@ -11,6 +11,7 @@ use crate::fileio;
 use crate::input::{normalize, Input, Key};
 use crate::ops;
 use crate::palette::PaletteState;
+use crate::search;
 
 /// Text-area rows when the terminal size is not known yet.
 const DEFAULT_TEXT_HEIGHT: usize = 28;
@@ -30,6 +31,11 @@ pub enum Mode {
 /// One-line prompts on the message line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Prompt {
+    /// `origin` is the cursor to restore on Esc when nothing matched.
+    Search {
+        query: String,
+        origin: usize,
+    },
     ConfirmQuit,
 }
 
@@ -153,6 +159,7 @@ impl App {
             Mode::Insert => self.insert_key(key, now),
             Mode::Overlay { opened_at } => self.overlay_key(key, opened_at, now),
             Mode::Palette(state) => self.palette_key(key, state),
+            Mode::Prompt(Prompt::Search { query, origin }) => self.search_key(key, query, origin),
             Mode::Prompt(Prompt::ConfirmQuit) => {
                 self.mode = Mode::Insert;
                 if matches!(key, Key::Ctrl('q') | Key::Char('y')) {
@@ -168,6 +175,7 @@ impl App {
         match key {
             Key::Esc | Key::Ctrl(' ') => self.mode = Mode::Overlay { opened_at: now },
             Key::Ctrl('p') => self.open_palette(),
+            Key::Ctrl('f') => self.open_search(),
             Key::Char(c) => b.insert_str(&c.to_string(), GroupKind::Typing),
             Key::Enter => b.insert_str("\n", GroupKind::Typing),
             Key::Tab => b.insert_str("\t", GroupKind::Typing),
@@ -212,11 +220,67 @@ impl App {
             Key::Char('d') => self.op_line(),
             Key::Char('k') => self.op_kill(),
             Key::Char('%') => self.op_bracket(),
+            Key::Char('/') => self.open_search(),
             Key::Char('u') => self.undo(),
             Key::Char('r') => self.redo(),
             Key::Char('s') => self.save(),
             // Any other key closes the overlay and is discarded.
             _ => {}
+        }
+    }
+
+    /// Opens the search prompt (Ctrl-F, Esc /, or the palette's Find).
+    pub fn open_search(&mut self) {
+        self.mode = Mode::Prompt(Prompt::Search {
+            query: String::new(),
+            origin: self.buffer.cursor(),
+        });
+    }
+
+    fn search_key(&mut self, key: Key, mut query: String, origin: usize) {
+        match key {
+            Key::Esc => {
+                let at = self.buffer.cursor();
+                if !search::matches_at(self.buffer.rope(), &query, at) {
+                    self.buffer.move_to(origin);
+                }
+                self.mode = Mode::Insert;
+                return;
+            }
+            Key::Enter => {
+                if !query.is_empty() {
+                    let at = self.buffer.cursor();
+                    match search::find_next(self.buffer.rope(), &query, at) {
+                        Some(i) => self.buffer.move_to(i),
+                        None => self.set_error("No match"),
+                    }
+                }
+            }
+            Key::Char(c) => {
+                query.push(c);
+                self.incremental(&query, origin);
+            }
+            Key::Backspace => {
+                query.pop();
+                self.incremental(&query, origin);
+            }
+            _ => {}
+        }
+        self.mode = Mode::Prompt(Prompt::Search { query, origin });
+    }
+
+    /// Jumps to the first match at or after `origin`, or back to `origin`.
+    fn incremental(&mut self, query: &str, origin: usize) {
+        if query.is_empty() {
+            self.buffer.move_to(origin);
+            return;
+        }
+        match search::find_from(self.buffer.rope(), query, origin) {
+            Some(i) => self.buffer.move_to(i),
+            None => {
+                self.buffer.move_to(origin);
+                self.set_error("No match");
+            }
         }
     }
 
@@ -365,6 +429,7 @@ impl App {
             Mode::Insert => "INSERT",
             Mode::Overlay { .. } => "ESC",
             Mode::Palette(_) => "PALETTE",
+            Mode::Prompt(Prompt::Search { .. }) => "SEARCH",
             Mode::Prompt(_) => "PROMPT",
         }
     }
@@ -555,6 +620,59 @@ mod tests {
         a.handle_key(Key::Ctrl('q'), t).unwrap();
         a.handle_key(Key::Char('y'), t).unwrap();
         assert!(a.quit);
+    }
+
+    fn search_app() -> App {
+        app("foo bar baz")
+    }
+
+    fn typ(a: &mut App, s: &str) {
+        for c in s.chars() {
+            a.handle_key(Key::Char(c), Instant::now()).unwrap();
+        }
+    }
+
+    #[test]
+    fn search_incremental_enter_wrap_and_esc() {
+        let t = Instant::now();
+        let mut a = search_app();
+        a.handle_key(Key::Ctrl('f'), t).unwrap();
+        typ(&mut a, "ba");
+        assert_eq!(a.buffer.cursor(), 4);
+        a.handle_key(Key::Enter, t).unwrap();
+        assert_eq!(a.buffer.cursor(), 8);
+        a.handle_key(Key::Enter, t).unwrap();
+        assert_eq!(a.buffer.cursor(), 4);
+        a.handle_key(Key::Esc, t).unwrap();
+        assert_eq!(a.mode, Mode::Insert);
+        assert_eq!(a.buffer.cursor(), 4);
+    }
+
+    #[test]
+    fn search_no_match_restores_origin() {
+        let t = Instant::now();
+        let mut a = search_app();
+        a.buffer.move_to(2);
+        a.handle_key(Key::Esc, t).unwrap();
+        a.handle_key(Key::Char('/'), t).unwrap();
+        assert!(matches!(a.mode, Mode::Prompt(Prompt::Search { .. })));
+        typ(&mut a, "zz");
+        assert_eq!(a.buffer.cursor(), 2);
+        a.handle_key(Key::Esc, t).unwrap();
+        assert_eq!(a.buffer.cursor(), 2);
+    }
+
+    #[test]
+    fn search_empty_query_does_nothing() {
+        let t = Instant::now();
+        let mut a = search_app();
+        a.handle_key(Key::Ctrl('f'), t).unwrap();
+        a.handle_key(Key::Enter, t).unwrap();
+        assert_eq!(a.buffer.cursor(), 0);
+        assert!(matches!(a.mode, Mode::Prompt(Prompt::Search { .. })));
+        a.handle_key(Key::Esc, t).unwrap();
+        assert_eq!(a.buffer.cursor(), 0);
+        assert!(!a.buffer.is_dirty());
     }
 
     #[test]

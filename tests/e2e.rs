@@ -732,3 +732,68 @@ fn ac15_ctrl_space_opens_overlay() {
     p.wait_gone("abc", TIMEOUT);
     assert_eq!(save_quit_read(&mut p, &f), "");
 }
+
+// ---------------------------------------------------------------- AC-16
+
+#[test]
+fn ac16_search_incremental_enter_wrap_esc() {
+    let env = Env::new();
+    let f = env.write("s.txt", "foo bar baz\n");
+    let mut p = env.open(&f);
+    p.send_keys(&["C-f"]);
+    p.wait_for("Search:", TIMEOUT);
+    p.send_str("b");
+    p.send_str("a");
+    p.wait_for("Search: ba", TIMEOUT);
+    wait_status(&p, "Ln 1, Col 5"); // bar
+    assert_eq!(p.cursor(), (0, 10));
+    p.send_keys(&["Enter"]);
+    wait_status(&p, "Ln 1, Col 9"); // baz
+    p.send_keys(&["Enter"]);
+    wait_status(&p, "Ln 1, Col 5"); // wrapped to bar
+    assert!(p.screen().contains("Search: ba"), "prompt stays open");
+    p.send_keys(&["Esc"]);
+    p.wait_gone("Search:", TIMEOUT);
+    wait_status(&p, "Ln 1, Col 5");
+    assert!(status(&p).contains(" INSERT "));
+    quit_clean(&mut p);
+}
+
+#[test]
+fn ac16_esc_slash_no_match_restores_origin() {
+    let env = Env::new();
+    let f = env.write("s.txt", "foo bar baz\n");
+    let mut p = env.open(&f);
+    p.send_keys(&["Right", "Right"]);
+    wait_status(&p, "Ln 1, Col 3");
+    open_overlay(&mut p);
+    p.send_keys(&["/"]);
+    p.wait_for("Search:", TIMEOUT);
+    p.send_str("b");
+    wait_status(&p, "Ln 1, Col 5");
+    p.send_str("q");
+    p.wait_for("No match", TIMEOUT);
+    wait_status(&p, "Ln 1, Col 3");
+    p.send_keys(&["Esc"]);
+    p.wait_gone("Search:", TIMEOUT);
+    wait_status(&p, "Ln 1, Col 3");
+    quit_clean(&mut p);
+}
+
+#[test]
+fn ac16_empty_query_does_nothing() {
+    let env = Env::new();
+    let f = env.write("s.txt", "foo bar baz\n");
+    let mut p = env.open(&f);
+    p.send_keys(&["C-f"]);
+    p.wait_for("Search:", TIMEOUT);
+    p.send_keys(&["Enter"]);
+    std::thread::sleep(Duration::from_millis(50));
+    wait_status(&p, "Ln 1, Col 1");
+    assert!(p.screen().contains("Search:"));
+    p.send_keys(&["Esc"]);
+    p.wait_gone("Search:", TIMEOUT);
+    wait_status(&p, "Ln 1, Col 1");
+    assert!(!status(&p).contains("[+]"));
+    quit_clean(&mut p);
+}

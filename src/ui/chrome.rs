@@ -44,6 +44,10 @@ pub fn message_line(app: &App, area: Rect, cells: &mut Cells, theme: &Theme) -> 
     }
     let text = match &app.mode {
         Mode::Prompt(Prompt::ConfirmQuit) => CONFIRM_QUIT_TEXT.to_string(),
+        Mode::Prompt(Prompt::Search { query, .. }) => match &app.message {
+            Some(m) => format!("Search: {query}   ({m})"),
+            None => format!("Search: {query}"),
+        },
         _ => app.message.clone().unwrap_or_default(),
     };
     let style = if app.message_is_error && matches!(app.mode, Mode::Insert) {

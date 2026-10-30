@@ -43,3 +43,8 @@ Every deviation from `ARCHITECTURE` (Mnemo page_e336285940d54098ada133cc08df814b
 - `w` works on graphemes (a base letter plus combining marks counts as one word character) and treats newlines as whitespace, so `w` at the end of a line deletes the line break and the next line's indentation.
 - Added `ops::kill_range` (the `k` range built on `ops::eol`) next to the four section 6 functions.
 - A paste while the overlay is open closes the overlay and inserts the paste (it is not an "unknown key"; dropping pasted text silently would lose data). In the palette, pasted text goes into the query with line breaks as spaces; in prompts it is ignored.
+
+## T7 search
+
+- While the search prompt is open the terminal cursor stays on the current match in the text (so the jump is visible); the query is shown on the message line as `Search: <query>`. "No match" is appended there when nothing matches.
+- Keys other than typing, Backspace, Enter and Esc are ignored while the search prompt is open.
