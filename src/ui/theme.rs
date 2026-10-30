@@ -18,6 +18,8 @@ pub struct Theme {
     pub selected: Style,
     pub selection: Style,
     pub reader_dim: Style,
+    pub diff_ours: Style,
+    pub diff_theirs: Style,
     pub search_match: Style,
     pub search_current: Style,
     pub modal: Style,
@@ -54,6 +56,8 @@ pub const DARK: Theme = Theme {
         .add_modifier(Modifier::BOLD),
     selection: Style::new().bg(ix(60)),
     reader_dim: Style::new().fg(ix(240)),
+    diff_ours: Style::new().bg(ix(52)),
+    diff_theirs: Style::new().bg(ix(22)),
     search_match: Style::new().fg(ix(235)).bg(ix(143)),
     search_current: Style::new()
         .fg(ix(235))

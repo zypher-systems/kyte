@@ -1617,6 +1617,172 @@ fn break_lock_opens_a_file_held_by_another_kyte() {
     b.kill9();
 }
 
+// ---------------------------------------------------------------- outside changes
+
+const MARKER: &str = "changed on disk";
+
+fn start_review(p: &mut Pty) {
+    p.wait_for(MARKER, TIMEOUT);
+    p.send_keys(&["Esc"]);
+    p.wait_for("review outside changes", TIMEOUT);
+    p.send_str("c");
+    p.wait_for(" REVIEW ", TIMEOUT);
+}
+
+#[test]
+fn outside_change_is_noticed_without_interrupting() {
+    let env = Env::new();
+    let f = work_file(&env, "o.txt", "one\ntwo\n");
+    let mut p = env.open(&f);
+    fs::write(&f, "one\nTWO\n").unwrap();
+    p.wait_for(MARKER, TIMEOUT);
+    p.send_str("still typing ");
+    p.wait_for("still typing one", TIMEOUT);
+    assert!(status(&p).contains("INSERT"));
+    p.send_keys(&["C-q"]);
+    p.wait_for("Unsaved changes", TIMEOUT);
+    p.send_str("n");
+    assert_eq!(p.wait_exit(TIMEOUT), 0);
+}
+
+#[test]
+fn taking_every_change_on_a_clean_buffer_matches_the_file() {
+    let env = Env::new();
+    let f = work_file(&env, "o.txt", "one\ntwo\nthree\nfour\n");
+    let mut p = env.open(&f);
+    fs::write(&f, "ONE\ntwo\nthree\nFOUR\n").unwrap();
+    start_review(&mut p);
+    wait_status(&p, "change 1 of 2");
+    assert!(p.screen().contains("Take this change"), "{}", p.dump());
+    p.send_str("y");
+    wait_status(&p, "change 2 of 2");
+    p.send_str("y");
+    p.wait_for("Took 2 of 2 changes", TIMEOUT);
+    p.wait_for("1 │ ONE", TIMEOUT);
+    assert!(!status(&p).contains("[+]"), "the buffer matches the file");
+    assert!(!status(&p).contains(MARKER));
+    quit_clean(&mut p);
+}
+
+#[test]
+fn your_unsaved_edits_and_their_changes_both_survive() {
+    let env = Env::new();
+    let f = work_file(&env, "o.txt", "a\nb\nc\nd\ne\nf\n");
+    let mut p = env.open(&f);
+    p.send_str("mine ");
+    wait_status(&p, "[+]");
+    fs::write(&f, "a\nb\nc\nd\ne\nTHEIRS\n").unwrap();
+    start_review(&mut p);
+    wait_status(&p, "change 1 of 1");
+    p.send_str("y");
+    p.wait_for("Took 1 of 1 changes", TIMEOUT);
+    wait_status(&p, "[+]");
+    p.send_keys(&["C-s"]);
+    p.wait_for("Saved 6 lines", TIMEOUT);
+    quit_clean(&mut p);
+    assert_eq!(
+        fs::read_to_string(&f).unwrap(),
+        "mine a\nb\nc\nd\ne\nTHEIRS\n"
+    );
+}
+
+#[test]
+fn keeping_yours_saves_without_asking_again_and_history_has_theirs() {
+    let env = Env::new();
+    let f = work_file(&env, "o.txt", "one\n");
+    let mut p = env.open(&f);
+    fs::write(&f, "theirs\n").unwrap();
+    start_review(&mut p);
+    p.send_str("n");
+    p.wait_for("Took 0 of 1 changes", TIMEOUT);
+    p.wait_for("1 │ one", TIMEOUT);
+    p.send_str("x");
+    wait_status(&p, "[+]");
+    p.send_keys(&["C-s"]);
+    p.wait_for("Saved 1 line", TIMEOUT);
+    assert_eq!(fs::read_to_string(&f).unwrap(), "xone\n");
+    open_history(&mut p);
+    p.send_keys(&["Home"]);
+    p.wait_for("1 │ one", TIMEOUT);
+    p.send_keys(&["Right"]);
+    p.wait_for("changed outside Kyte", TIMEOUT);
+    p.wait_for("1 │ theirs", TIMEOUT);
+    p.send_keys(&["Esc"]);
+    p.wait_gone(" HISTORY ", TIMEOUT);
+    quit_clean(&mut p);
+}
+
+#[test]
+fn the_same_lines_changed_on_both_sides_is_flagged() {
+    let env = Env::new();
+    let f = work_file(&env, "o.txt", "one\n");
+    let mut p = env.open(&f);
+    p.send_str("mine ");
+    wait_status(&p, "[+]");
+    fs::write(&f, "theirs\n").unwrap();
+    start_review(&mut p);
+    p.wait_for("you edited this too", TIMEOUT);
+    p.send_keys(&["Esc"]);
+    p.wait_for("Review stopped", TIMEOUT);
+    assert!(status(&p).contains(MARKER), "it stays until it's answered");
+    p.send_keys(&["C-q"]);
+    p.wait_for("Unsaved changes", TIMEOUT);
+    p.send_str("n");
+    assert_eq!(p.wait_exit(TIMEOUT), 0);
+}
+
+#[test]
+fn take_all_is_one_undo_step() {
+    let env = Env::new();
+    let f = work_file(&env, "o.txt", "1\n2\n3\n4\n5\n");
+    let mut p = env.open(&f);
+    fs::write(&f, "A\n2\n3\n4\nE\n").unwrap();
+    start_review(&mut p);
+    p.send_str("a");
+    p.wait_for("Took 2 of 2 changes", TIMEOUT);
+    p.wait_for("5 │ E", TIMEOUT);
+    p.send_keys(&["C-z"]);
+    p.wait_for("1 │ 1", TIMEOUT);
+    p.wait_for("5 │ 5", TIMEOUT);
+    p.send_keys(&["C-q"]);
+    p.wait_for("Unsaved changes", TIMEOUT);
+    p.send_str("n");
+    assert_eq!(p.wait_exit(TIMEOUT), 0);
+}
+
+#[test]
+fn the_save_question_can_open_the_review() {
+    let env = Env::new();
+    let f = work_file(&env, "o.txt", "one\n");
+    let mut p = env.open(&f);
+    p.send_str("x");
+    wait_status(&p, "[+]");
+    fs::write(&f, "theirs\n").unwrap();
+    p.send_keys(&["C-s"]);
+    p.wait_for("Review the changes", TIMEOUT);
+    p.send_str("r");
+    p.wait_for(" REVIEW ", TIMEOUT);
+    p.send_keys(&["Esc"]);
+    p.wait_for("Review stopped", TIMEOUT);
+    p.send_keys(&["C-q"]);
+    p.wait_for("Unsaved changes", TIMEOUT);
+    p.send_str("n");
+    assert_eq!(p.wait_exit(TIMEOUT), 0);
+}
+
+#[test]
+fn saving_your_own_changes_raises_no_marker() {
+    let env = Env::new();
+    let f = work_file(&env, "o.txt", "one\n");
+    let mut p = env.open(&f);
+    p.send_str("x");
+    wait_status(&p, "[+]");
+    save_and_wait(&mut p);
+    std::thread::sleep(Duration::from_millis(2300));
+    assert!(!status(&p).contains(MARKER), "{}", p.dump());
+    quit_clean(&mut p);
+}
+
 // ---------------------------------------------------------------- reader mode
 
 fn open_reader(p: &mut Pty) {

@@ -203,6 +203,21 @@ Esc `v` (or **Reader mode** in the palette) is for reading code rather than chan
 
 The keys show in a floating box when reader mode opens, and hide at your first key so they don't cover what you're reading. Code over 512 KiB reads by paragraph, because parsing it on every key would lag.
 
+### Changes from other programs
+
+Kyte checks the open file about once a second. If a formatter, script or AI agent changes it, nothing interrupts you. The status bar shows `changed on disk, Esc c reviews`, and Esc `c` starts a review. Ctrl-S also offers it when it asks about overwriting.
+
+A review steps through each change, with your lines tinted red and the incoming lines green, and the keys in a floating box:
+
+| Key | Action |
+| --- | --- |
+| `y` | Take this change |
+| `n` | Keep yours |
+| `a` | Take all the rest, as one undo step |
+| Esc, `q` | Stop for now; the marker stays until every change has an answer |
+
+The review compares against the version you started from, so your unsaved edits are never shown as changes to undo, and both sides survive when they touch different lines. If you both changed the same lines, the box says so. The file's version goes into the history before you choose, so keeping yours can't lose it. Taking a change alters only your buffer, and each one is an undo step. If you take everything and had no edits of your own, the buffer matches the file and has nothing to save.
+
 ### Search
 
 Ctrl-F (or Esc `/`) opens `Search:` on the message line, starting from the selected text if there is any. Kyte jumps to the first match as you type and highlights every match on screen. Enter, Down or Ctrl-F jumps to the next match and Up to the previous one, wrapping around. Esc closes the prompt and leaves the cursor on the match, or puts it back where it was if nothing matched.

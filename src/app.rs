@@ -14,6 +14,7 @@ use crate::input::{normalize, Input, Key, Motion};
 use crate::ops;
 use crate::palette::{Entry, PaletteState};
 use crate::reader::{self, Reader};
+use crate::review::{self, Change as ReviewChange};
 use crate::search;
 use crate::session::{self, Opened};
 use crate::swap::{self, RecoverInfo, SwapStatus, SwapWriter};
@@ -45,6 +46,8 @@ pub enum Mode {
     Prompt(Prompt),
     /// Read-only, with everything outside the current section dimmed.
     Reader,
+    /// Stepping through changes another program made to the file.
+    Review(ReviewRun),
     /// Browsing the file's past, at version `at`.
     History {
         timeline: SharedTimeline,
@@ -109,6 +112,31 @@ pub enum After {
     Stay,
     Quit,
     Open(std::path::PathBuf),
+}
+
+/// A review of outside changes in progress.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewRun {
+    changes: std::sync::Arc<Vec<ReviewChange>>,
+    /// The file as it is now.
+    theirs: std::sync::Arc<String>,
+    /// The change on screen.
+    at: usize,
+    /// How far earlier accepted changes moved the buffer's later lines.
+    shift: isize,
+    accepted: usize,
+}
+
+impl ReviewRun {
+    /// (1-based number of the change on screen, how many there are).
+    pub fn position(&self) -> (usize, usize) {
+        (self.at + 1, self.changes.len())
+    }
+
+    /// Whether the change on screen overlaps the user's own edits.
+    pub fn is_conflict(&self) -> bool {
+        self.changes[self.at].conflict
+    }
 }
 
 /// A replace in progress. It runs from where it started to the end of the
@@ -186,6 +214,16 @@ pub struct App {
     history_failed: bool,
     /// The version being browsed, while `Mode::History` is open.
     version_view: Option<Buffer>,
+    /// The file's text as last read or written, what a review compares with.
+    disk_text: Option<ropey::Rope>,
+    /// The file's size and time when last checked, to spot a change cheaply.
+    disk_stamp: Option<(u64, std::time::SystemTime)>,
+    /// The file on disk has moved on and the change hasn't been reviewed.
+    outside_change: bool,
+    /// Something changed on screen with no key pressed.
+    needs_redraw: bool,
+    /// The view lines of the change on screen: (yours, theirs).
+    pub review_marks: Option<(std::ops::Range<usize>, std::ops::Range<usize>)>,
     /// Reader mode's state, while it's open.
     pub reader: Option<Reader>,
     last_fsync: Option<Instant>,
@@ -216,6 +254,7 @@ impl App {
     pub fn new(buffer: Buffer, swap: Option<SwapWriter>, opts: &Options) -> App {
         let swap_target = buffer.path().and_then(|p| fileio::resolve_target(p).ok());
         let disk = Some(DiskState::of_rope(buffer.rope()));
+        let disk_text = Some(buffer.rope().clone());
         App {
             keep_swap: false,
             swap,
@@ -231,6 +270,11 @@ impl App {
             history: None,
             history_failed: false,
             version_view: None,
+            disk_text,
+            disk_stamp: None,
+            outside_change: false,
+            needs_redraw: false,
+            review_marks: None,
             reader: None,
             last_fsync: None,
             buffer,
@@ -447,6 +491,7 @@ impl App {
             Mode::Recover(info) => self.recover_key(key, info),
             Mode::History { timeline, at } => self.history_key(key, timeline, at),
             Mode::Reader => self.reader_key(key),
+            Mode::Review(run) => self.review_key(key, run),
             Mode::Prompt(Prompt::ConfirmDeleteHistory) => match key {
                 Key::Char('y') => {
                     self.mode = Mode::Insert;
@@ -487,6 +532,10 @@ impl App {
                 _ => {}
             },
             Mode::Prompt(Prompt::ConfirmSave { risk, path, then }) => match key {
+                Key::Char('r') if risk == SaveRisk::ChangedOnDisk => {
+                    self.mode = Mode::Insert;
+                    self.open_review();
+                }
                 Key::Char('y') => {
                     self.mode = Mode::Insert;
                     self.save_after(path, Some(risk), then);
@@ -513,6 +562,7 @@ impl App {
                 if info.file_changed {
                     // Saving this version replaces what's on disk, so ask first.
                     self.disk = None;
+                    self.disk_text = None;
                 }
                 self.start_history();
                 let recovered = self.buffer.rope().clone();
@@ -761,6 +811,9 @@ impl App {
             return rows;
         }
         rows.extend_from_slice(LEGEND);
+        if self.outside_change {
+            rows.push(("c", "review outside changes"));
+        }
         if self.on_bracket() {
             rows.push(("i", "select inside"));
         }
@@ -791,6 +844,7 @@ impl App {
             's' => self.save(),
             'h' => self.open_history(),
             'v' => self.open_reader(),
+            'c' if self.outside_change => self.open_review(),
             'i' if self.on_bracket() => self.select_inside_brackets(),
             '#' => self.toggle_comment(),
             'f' if self.code_path().is_some() => self.select_function(),
@@ -1319,6 +1373,7 @@ impl App {
             | Mode::Help { .. }
             | Mode::Recover(_)
             | Mode::History { .. }
+            | Mode::Review(_)
             | Mode::Reader => {}
         }
         self.flush_edits();
@@ -1339,6 +1394,7 @@ impl App {
                 }
             }
             self.with_history(|h| h.fsync_if_pending());
+            self.check_disk();
             self.last_fsync = Some(now);
         }
         Ok(())
@@ -1487,6 +1543,9 @@ impl App {
         }
         self.swap_target = buffer.path().and_then(|p| fileio::resolve_target(p).ok());
         self.disk = Some(DiskState::of_rope(buffer.rope()));
+        self.disk_text = Some(buffer.rope().clone());
+        self.disk_stamp = None;
+        self.outside_change = false;
         let closing = self.buffer.rope().clone();
         self.with_history(|h| h.close(&closing));
         self.buffer = buffer;
@@ -1557,6 +1616,187 @@ impl App {
             crumbs,
             show_keys,
         });
+    }
+
+    /// Whether the file on disk has changes that haven't been reviewed.
+    pub fn has_outside_change(&self) -> bool {
+        self.outside_change
+    }
+
+    /// Whether something changed with no key pressed.
+    pub fn take_redraw(&mut self) -> bool {
+        std::mem::take(&mut self.needs_redraw)
+    }
+
+    /// Looks for outside changes. The size and time are checked first, so an
+    /// unchanged file costs one stat.
+    fn check_disk(&mut self) {
+        if matches!(self.mode, Mode::Recover(_) | Mode::Review(_)) {
+            return;
+        }
+        let Some(path) = self.buffer.path().map(|p| p.to_path_buf()) else {
+            return;
+        };
+        let Ok(meta) = std::fs::metadata(&path) else {
+            return;
+        };
+        let stamp = meta.modified().ok().map(|t| (meta.len(), t));
+        if stamp == self.disk_stamp {
+            return;
+        }
+        self.disk_stamp = stamp;
+        let changed = matches!(fileio::disk_state(&path), Ok(Some(s)) if Some(s) != self.disk);
+        if changed != self.outside_change {
+            self.outside_change = changed;
+            self.needs_redraw = true;
+        }
+    }
+
+    /// Starts reviewing what changed on disk.
+    fn open_review(&mut self) {
+        let Some(path) = self.buffer.path().map(|p| p.to_path_buf()) else {
+            return;
+        };
+        let theirs = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(e) => {
+                self.set_error(format!("Can't read the file: {e}"));
+                return;
+            }
+        };
+        let ours = self.buffer.to_string();
+        let base = self
+            .disk_text
+            .as_ref()
+            .map_or(ours.clone(), |r| r.to_string());
+        let changes = review::changes(&base, &ours, &theirs);
+        // The version goes in the history before any choice can lose it.
+        let (outside, current) = (ropey::Rope::from_str(&theirs), self.buffer.rope().clone());
+        self.with_history(|h| h.note_outside(&outside, &current));
+        let run = ReviewRun {
+            changes: std::sync::Arc::new(changes),
+            theirs: std::sync::Arc::new(theirs),
+            at: 0,
+            shift: 0,
+            accepted: 0,
+        };
+        if run.changes.is_empty() {
+            self.set_message("Nothing to review; you already have those changes");
+            self.finish_review(&run);
+        } else {
+            self.show_change(run);
+        }
+    }
+
+    /// The buffer's lines for a change, allowing for changes already taken.
+    fn change_lines(&self, run: &ReviewRun, i: usize) -> std::ops::Range<usize> {
+        let c = &run.changes[i];
+        let at = |line: usize| (line as isize + run.shift) as usize;
+        at(c.ours.start)..at(c.ours.end)
+    }
+
+    fn theirs_text(run: &ReviewRun, i: usize) -> String {
+        review::lines(&run.theirs)[run.changes[i].theirs.clone()].concat()
+    }
+
+    /// Shows the change at `run.at`: the buffer, with the incoming lines
+    /// placed under the lines they'd replace.
+    fn show_change(&mut self, run: ReviewRun) {
+        let lines = self.change_lines(&run, run.at);
+        let incoming = Self::theirs_text(&run, run.at);
+        let added = run.changes[run.at].theirs.len();
+        let mut rope = self.buffer.rope().clone();
+        let at = rope.line_to_char(lines.end.min(rope.len_lines()));
+        let needs_break = at > 0 && rope.char(at - 1) != '\n' && !incoming.is_empty();
+        if needs_break {
+            rope.insert(at, self.buffer.eol());
+        }
+        let at = rope.line_to_char(lines.end.min(rope.len_lines()));
+        rope.insert(at, &incoming);
+        let mut view = self.buffer.view_of(rope);
+        let first = lines.start.min(view.line_count() - 1);
+        view.move_to(view.line_start(first));
+        self.review_marks = Some((lines.clone(), lines.end..lines.end + added));
+        self.version_view = Some(view);
+        self.bring_into_view(&(lines.start..lines.end + added));
+        self.mode = Mode::Review(run);
+    }
+
+    /// The edit that takes change `i`.
+    fn change_edit(&self, run: &ReviewRun, i: usize) -> Edit {
+        let lines = self.change_lines(run, i);
+        let rope = self.buffer.rope();
+        let start = rope.line_to_char(lines.start);
+        let end = rope.line_to_char(lines.end.min(rope.len_lines()));
+        Edit {
+            at: start,
+            removed: self.buffer.slice_string(start..end),
+            inserted: Self::theirs_text(run, i),
+        }
+    }
+
+    fn review_key(&mut self, key: Key, mut run: ReviewRun) {
+        let i = run.at;
+        match key {
+            Key::Char('y') => {
+                let edit = self.change_edit(&run, i);
+                let end = edit.at + edit.inserted.chars().count();
+                self.buffer
+                    .apply_with_cursor(edit, GroupKind::Operator, end);
+                let c = &run.changes[i];
+                run.shift += c.theirs.len() as isize - c.ours.len() as isize;
+                run.accepted += 1;
+            }
+            Key::Char('n') => {}
+            Key::Char('a') => {
+                let mut edits: Vec<Edit> = (i..run.changes.len())
+                    .map(|j| self.change_edit(&run, j))
+                    .collect();
+                let at = edits[0].at;
+                run.accepted += edits.len();
+                // Last first, so earlier positions stay right.
+                edits.reverse();
+                self.buffer.apply_group(edits, at);
+                self.finish_review(&run);
+                return;
+            }
+            Key::Esc | Key::Char('q') => {
+                self.close_review();
+                self.set_message("Review stopped; the file still has changes you haven't seen");
+                return;
+            }
+            _ => {
+                self.show_change(run);
+                return;
+            }
+        }
+        run.at += 1;
+        if run.at == run.changes.len() {
+            self.finish_review(&run);
+        } else {
+            self.show_change(run);
+        }
+    }
+
+    fn close_review(&mut self) {
+        self.version_view = None;
+        self.review_marks = None;
+        self.mode = Mode::Insert;
+    }
+
+    /// Every change has an answer, so the file on disk is now the known one.
+    fn finish_review(&mut self, run: &ReviewRun) {
+        self.close_review();
+        self.disk = Some(DiskState::of_bytes(run.theirs.as_bytes()));
+        self.disk_text = Some(ropey::Rope::from_str(&run.theirs));
+        self.outside_change = false;
+        if self.buffer.to_string() == *run.theirs {
+            self.buffer.mark_clean();
+        }
+        if !run.changes.is_empty() {
+            let (took, all) = (run.accepted, run.changes.len());
+            self.set_message(format!("Took {took} of {all} changes"));
+        }
     }
 
     /// Opens the timeline at the newest version.
@@ -1720,6 +1960,10 @@ impl App {
         match fileio::save_atomic(path, &text) {
             Ok(()) => {
                 self.disk = Some(DiskState::of_bytes(text.as_bytes()));
+                self.disk_text = Some(self.buffer.rope().clone());
+                self.disk_stamp = None;
+                self.outside_change = false;
+                self.needs_redraw = true;
                 if self.buffer.path() != Some(path) {
                     self.buffer.set_path(path.to_path_buf());
                     self.swap_target = fileio::resolve_target(path).ok();
@@ -1806,6 +2050,7 @@ impl App {
             Mode::Prompt(Prompt::ConfirmSave { .. }) => "SAVE?",
             Mode::History { .. } => "HISTORY",
             Mode::Reader => "READER",
+            Mode::Review(_) => "REVIEW",
             Mode::Prompt(Prompt::ConfirmDeleteHistory) => "DELETE?",
             Mode::Help { .. } => "HELP",
             Mode::Recover(_) => "RECOVER",

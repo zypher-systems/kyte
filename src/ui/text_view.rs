@@ -101,6 +101,14 @@ pub fn render(app: &App, area: Rect, cells: &mut Cells, theme: &Theme) -> Option
                 cells,
                 theme,
             );
+            if let Some((ours, theirs)) = &app.review_marks {
+                let row = Rect::new(area.x + gw as u16, y, text_w as u16, 1);
+                if ours.contains(&line) {
+                    cells.set_style(row, theme.diff_ours);
+                } else if theirs.contains(&line) {
+                    cells.set_style(row, theme.diff_theirs);
+                }
+            }
             if app
                 .reader
                 .as_ref()

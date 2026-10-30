@@ -49,6 +49,8 @@ pub enum SnapshotKind {
     Recovered,
     /// What a save wrote, when the log didn't already end there.
     Saved,
+    /// The buffer again, after an outside version was stored.
+    Current,
 }
 
 impl SnapshotKind {
@@ -58,6 +60,7 @@ impl SnapshotKind {
             SnapshotKind::Outside => 2,
             SnapshotKind::Recovered => 3,
             SnapshotKind::Saved => 4,
+            SnapshotKind::Current => 5,
         }
     }
 
@@ -66,6 +69,7 @@ impl SnapshotKind {
             2 => SnapshotKind::Outside,
             3 => SnapshotKind::Recovered,
             4 => SnapshotKind::Saved,
+            5 => SnapshotKind::Current,
             _ => SnapshotKind::Opened,
         }
     }
@@ -76,6 +80,7 @@ impl SnapshotKind {
             SnapshotKind::Outside => "changed outside Kyte",
             SnapshotKind::Recovered => "recovered",
             SnapshotKind::Saved => "saved",
+            SnapshotKind::Current => "your version",
         }
     }
 }
@@ -333,6 +338,16 @@ impl FileHistory {
         self.ensure_open(SnapshotKind::Opened)?;
         self.write(&snapshot_bytes(text, kind, now_ms()))?;
         self.synced = false;
+        Ok(())
+    }
+
+    /// Stores an outside version while editing carries on from `current`.
+    pub fn note_outside(&mut self, outside: &Rope, current: &Rope) -> io::Result<()> {
+        self.ensure_open(SnapshotKind::Opened)?;
+        let time = now_ms();
+        self.write(&snapshot_bytes(outside, SnapshotKind::Outside, time))?;
+        self.write(&snapshot_bytes(current, SnapshotKind::Current, time))?;
+        self.synced = true;
         Ok(())
     }
 

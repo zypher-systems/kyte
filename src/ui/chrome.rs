@@ -7,7 +7,7 @@ use super::theme::Theme;
 use ratatui::layout::Rect as R;
 use ratatui::widgets::{Block, Borders, Clear, Widget};
 
-use crate::app::{After, App, Mode, Prompt};
+use crate::app::{After, App, Mode, Prompt, SaveRisk};
 use crate::buffer::Indent;
 use crate::command::{help_max_top, KEY_HELP};
 use crate::history;
@@ -53,6 +53,10 @@ pub fn status_bar(app: &App, area: Rect, cells: &mut Cells, theme: &Theme) {
             history::ago_from_now(timeline.version(*at).time_ms),
             timeline.describe(*at),
         ),
+        Mode::Review(run) => {
+            let (at, all) = run.position();
+            format!("│ {name}{dirty} │ change {at} of {all}")
+        }
         Mode::Reader => {
             let crumbs = app.reader.as_ref().map_or("", |r| r.crumbs.as_str());
             let place = if crumbs.is_empty() {
@@ -72,6 +76,9 @@ pub fn status_bar(app: &App, area: Rect, cells: &mut Cells, theme: &Theme) {
             cells.set_stringn(end, area.y, " │ no crash recovery", left, theme.error);
         } else if app.history_lost() {
             cells.set_stringn(end, area.y, " │ no history", left, theme.error);
+        } else if app.has_outside_change() {
+            let note = " │ changed on disk, Esc c reviews";
+            cells.set_stringn(end, area.y, note, left, theme.error);
         }
     }
 }
@@ -138,7 +145,7 @@ fn input_prompt(
 
 /// A floating list of keys and what they do.
 struct Menu {
-    title: &'static str,
+    title: String,
     rows: Vec<(&'static str, &'static str)>,
     /// Keep clear of the cursor, because what's under it matters. Otherwise
     /// the menu is a question and takes the middle of the screen.
@@ -147,13 +154,13 @@ struct Menu {
 
 /// The menu the current mode wants, if any.
 fn menu_for(app: &App) -> Option<Menu> {
-    let question = |title, rows| Menu {
-        title,
+    let question = |title: &str, rows| Menu {
+        title: title.to_string(),
         rows,
         beside_text: false,
     };
-    let beside = |title, rows| Menu {
-        title,
+    let beside = |title: &str, rows| Menu {
+        title: title.to_string(),
         rows,
         beside_text: true,
     };
@@ -212,12 +219,30 @@ fn menu_for(app: &App) -> Option<Menu> {
                 ("Esc", "Keep editing"),
             ],
         ),
+        Mode::Review(run) => {
+            let (at, all) = run.position();
+            let title = if run.is_conflict() {
+                format!("Change {at} of {all}, you edited this too")
+            } else {
+                format!("Change {at} of {all}")
+            };
+            beside(
+                &title,
+                vec![
+                    ("y", "Take this change"),
+                    ("n", "Keep yours"),
+                    ("a", "Take all the rest"),
+                    ("Esc", "Stop for now"),
+                ],
+            )
+        }
         Mode::Prompt(Prompt::ConfirmSave { risk, .. }) => {
             let (title, yes) = risk.question();
-            question(
-                title,
-                vec![("y", yes), ("n", "Don't save"), ("Esc", "Don't save")],
-            )
+            let mut rows = vec![("y", yes), ("n", "Don't save"), ("Esc", "Don't save")];
+            if *risk == SaveRisk::ChangedOnDisk {
+                rows.insert(0, ("r", "Review the changes"));
+            }
+            question(title, rows)
         }
         Mode::Prompt(Prompt::ConfirmDeleteHistory) => question(
             "Delete all history for this file?",
@@ -270,7 +295,13 @@ pub fn menu(
     } else {
         centered(text_area, w, h)
     };
-    let inner = modal_box(area, cells, menu.title, theme.palette, theme.palette_border);
+    let inner = modal_box(
+        area,
+        cells,
+        &menu.title,
+        theme.palette,
+        theme.palette_border,
+    );
     for (i, (key, label)) in menu.rows.iter().enumerate() {
         let x = inner.x + 1 + (i / per_col * cell_w) as u16;
         let y = inner.y + (i % per_col) as u16;

@@ -57,7 +57,7 @@ Kyte's pitch is an editor you can't lose work in and don't have to learn.
 
 ## Next
 
-- [ ] Review changes made by other tools, built on file history
+- [x] Review changes made by other tools, built on file history
 - [ ] Retention for file history, so logs can't grow without limit
 - [ ] Re-record the demo, which still shows the footer legend (needs `agg`)
 

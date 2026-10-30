@@ -12,6 +12,16 @@ These replace the matching parts of `ARCHITECTURE`. `docs/ROADMAP.md` holds the 
 - License: MIT. This settles section 16 and the section 4 note.
 - Kyte isn't tied to any one OS. It's meant to be open source for everyone.
 
+## Reviewing outside changes
+
+- Kyte never interrupts for an outside change. A popup could take the next keystroke as an answer while someone is typing, so a status marker reports it, and Esc `c` starts the review. Ctrl-S's overwrite question also offers it. A clean buffer doesn't reload by itself either, for the same reason, and because the user should see what changed.
+- The tick checks the file about once a second. An unchanged file costs one `stat`; a changed stamp reads the file and compares its content, so a `touch` raises nothing.
+- The review is three-way: `disk_text` (the last version read or written), the buffer, and the file. A two-way diff would present the user's own unsaved edits as changes to revert. Hunks are placed in the buffer by the user's own diff against the base. Those touching the user's edits are grouped with them and marked as conflicts, and taking one replaces that whole region. A change the buffer already has is dropped.
+- The diff is a small Myers implementation in `diff.rs` rather than a crate. Past 4,096 differing lines it reports one change, so a rewritten file can't stall the editor.
+- Each `y` is one undo step, and `a` is one for all the rest. An answered review records the file as the known version, so Ctrl-S doesn't ask again. Stopping with Esc leaves it unknown, so the marker and the question stay.
+- The file's version goes into the history when the review opens, followed by a snapshot of the buffer, because the edits that follow apply to the buffer and not to the file.
+- A review shows the incoming lines under the lines they'd replace, in a temporary view, using the same view mechanism as history.
+
 ## Reader mode
 
 - Esc `v` opens it, which replaces the design's `esc+Home`. It's read-only, so a stray key can't change the file, and Esc leaves the cursor where reading stopped, ready to edit there.

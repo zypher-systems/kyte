@@ -7,6 +7,7 @@ pub mod buffer;
 pub mod cli;
 pub mod clipboard;
 pub mod command;
+pub mod diff;
 pub mod fileio;
 #[cfg(feature = "highlight")]
 pub mod highlight;
@@ -15,6 +16,7 @@ pub mod input;
 pub mod ops;
 pub mod palette;
 pub mod reader;
+pub mod review;
 pub mod search;
 pub mod session;
 pub mod swap;
@@ -204,6 +206,7 @@ fn event_loop(app: &mut App, no_kitty: bool) -> anyhow::Result<()> {
             }
         }
         app.tick(Instant::now())?;
+        redraw |= app.take_redraw();
     }
     Ok(())
 }
