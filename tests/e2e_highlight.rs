@@ -168,6 +168,20 @@ fn a_go_function_can_be_selected_from_the_esc_menu() {
 }
 
 #[test]
+fn a_script_with_no_extension_is_colored_from_its_first_line() {
+    let (_dir, mut p) = open_named("deploy", "#!/bin/bash\nif true; then echo hi; fi\n");
+    p.wait_for("then echo", TIMEOUT);
+    let col = col_of(&p, 1, "if");
+    assert_ne!(p.fg(1, col), Some(vt100::Color::Idx(252)), "{}", p.dump());
+    p.send_keys(&["Esc"]);
+    p.wait_for("select function", TIMEOUT);
+    p.send_str("z");
+    p.wait_gone("select function", TIMEOUT);
+    p.send_keys(&["C-q"]);
+    p.wait_exit(TIMEOUT);
+}
+
+#[test]
 fn json_offers_syntax_selection_but_no_function_keys() {
     let (_dir, mut p) = open_named("a.json", "{\"a\": 1}\n");
     p.wait_for("Ln 1", TIMEOUT);

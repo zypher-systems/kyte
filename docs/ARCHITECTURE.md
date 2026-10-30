@@ -1,9 +1,10 @@
+**Status:** The original design for Kyte's first build, kept for history. `README.md` describes how Kyte works today, and `docs/DECISIONS.md` records every change from this design and why.
 
 ## 1\. Goal, MVP scope and non-goals
 
 Kyte is a terminal text editor. It starts in plain always-insert mode like Nano. Pressing Esc opens a short-lived operator layer: one keystroke does a bulk edit, and a legend of the available keys shows only while that layer is open. Double-tapping Esc opens a command palette. Unsaved work survives a crash.
 
-The MVP must be small enough to build and verify in one overnight pass, and every behavior in it must be checkable headlessly through a pseudo-terminal (pty).
+The MVP must be small enough to build and verify quickly, and every behavior in it must be checkable headlessly through a pseudo-terminal (pty).
 
 ### In the MVP
 
@@ -25,11 +26,11 @@ The MVP must be small enough to build and verify in one overnight pass, and ever
 
 Reader mode and idle auto-activation, file tree, Ctrl-K universal palette, light and high-contrast themes, undo history that survives restart, mouse, selection and clipboard (the system clipboard and OSC 52), multiple buffers or splits, LSP, plugins, config file, soft wrap, CRLF conversion, non-UTF-8 files, RPM/COPR packaging, making Kyte the default `$EDITOR`. Where a later phase needs a hook, section 13 says where it plugs in.
 
-### Deviations from the concept page (all deliberate)
+### Deviations from the original concept (all deliberate)
 
 - "Ratatouille" is not a Rust crate; the TUI library is **Ratatui**.
 - The hidden swap file lives under the XDG state directory, not next to the file (avoids `git status` noise and read-only directories).
-- Persistent undo, reader mode, file tree, Ctrl-K and extra themes are deferred, in the order Scholar recommended.
+- Persistent undo, reader mode, file tree, Ctrl-K and extra themes are deferred.
 - The overlay is one-shot: it closes after one operator.
 
 ## 2\. System overview
@@ -88,7 +89,7 @@ Hard rules: no network access at runtime, no secrets anywhere, no telemetry. Lin
 ## 4\. Repo, naming and layout
 
 - Cargo package name `kyte-editor` (the `kyte` crate name is taken on crates.io). Library target named `kyte`, binary named `kyte`.
-- No license file until Dusty decides (put "All rights reserved, license TBD" in the README).
+- No license file yet (put "All rights reserved, license TBD" in the README).
 
 ```
 kyte/
@@ -133,7 +134,7 @@ kyte/
     e2e.rs                   # pty scenarios, one #[test] per acceptance criterion group
 ```
 
-One crate, no workspace, so anyone can build it with a single `cargo build`.
+One crate, no workspace, so it builds with a single `cargo build`.
 
 ## 5\. Key handling and Esc disambiguation
 
@@ -245,7 +246,7 @@ pub fn run(opts: Options) -> anyhow::Result<std::process::ExitCode>;
 | ConfirmQuit | Ctrl-Q or y | quit, discarding changes (the swap is deleted) |
 | ConfirmQuit | any other key | cancel |
 
-The legend text, shown on the message line only while Mode is Overlay, is exactly: `w del word d del line k del to end % bracket / search u undo r redo s save Esc Esc palette` (the status bar shows `ESC` instead of `INSERT` at the same time). Builder may shorten spacing, but each key letter and its label must stay.
+The legend text, shown on the message line only while Mode is Overlay, is exactly: `w del word d del line k del to end % bracket / search u undo r redo s save Esc Esc palette` (the status bar shows `ESC` instead of `INSERT` at the same time). The spacing may be shortened, but each key letter and its label must stay.
 
 Palette commands (MVP): Save, Quit, Quit without saving, Undo, Redo, Find, Go to line, Toggle line numbers, Show key help. "Go to line" opens a `GotoLine` prompt; "Show key help" shows the key table above in a modal box (must close on Esc).
 
@@ -311,7 +312,7 @@ pub fn eol(rope: &Rope, at: usize) -> usize;               // for `k`
 pub fn match_bracket(rope: &Rope, at: usize) -> Option<usize>;  // for `%`
 ```
 
-Operator semantics (exact, so Inspector can verify):
+Operator semantics (exact, so they can be verified):
 
 | Op | Definition | Example (▮ is the cursor) |
 | --- | --- | --- |
@@ -390,7 +391,7 @@ Write-ahead behavior: after every command, `App` drains `buffer.take_pending_edi
 | -V, --version | prints kyte 0.1.0 (use the crate version), exit 0 |
 | --esc-ms N | double-tap window in ms (default 300; env KYTE_ESC_MS) |
 | --no-kitty | never enable the kitty keyboard protocol |
-| --print-swap FILE | print the content recovered from FILE's swap to stdout and exit 0; exit 3 if there is no valid swap. Needs no tty. Exists so Inspector and tests can verify recovery without a terminal. |
+| --print-swap FILE | print the content recovered from FILE's swap to stdout and exit 0; exit 3 if there is no valid swap. Needs no tty. Exists so tests can verify recovery without a terminal. |
 
 | Exit code | Meaning |
 | --- | --- |
@@ -430,7 +431,7 @@ Environment: `KYTE_STATE_DIR` (swap directory override, used by tests), `KYTE_ES
 - Minimum terminal size 20x5; below that, draw "terminal too small" instead of panicking.
 - No animation, no timers that repaint: the screen only changes on input, resize or message expiry on the next key. This keeps recordings and screenshots deterministic.
 
-## 10\. Acceptance criteria (Inspector verifies these by running the program)
+## 10\. Acceptance criteria (verified by running the program)
 
 IDs are stable; each maps to tests in `tests/e2e.rs` or the other test files (name the test after the ID, for example `ac05_esc_shows_legend_instantly`). "Screen" means the vt100-emulated screen text of a pty running the real `kyte` binary at 100x30 with `TERM=xterm-256color`, `KYTE_STATE_DIR` set to a temp dir, and `--no-kitty`.
 
@@ -477,7 +478,7 @@ IDs are stable; each maps to tests in `tests/e2e.rs` or the other test files (na
 
 - **AC-25** `scripts/demo.sh` (or `make demo`) runs headless with no display, no tmux required, and produces under `docs/demo/`: `demo.cast`, `demo.gif`, `demo.mp4` (if ffmpeg exists), at least six PNG screenshots, and one text frame per storyboard step in `docs/demo/frames/`. The frames must contain the legend, the palette, and the Recover modal text. If `agg` or ffmpeg is missing the script still writes `demo.cast` and the text frames and prints which artifacts it skipped.
 
-## 11\. Phased plan and tasks for Builder
+## 11\. Phased plan and tasks
 
 Order matters. Every task is small, independently buildable on top of the previous ones, ends with passing tests, and should be one commit (or one issue). Do tasks T0 to T12 in order; T13 only if time remains and everything else is green. Never skip a task's tests.
 
@@ -569,7 +570,7 @@ Order matters. Every task is small, independently buildable on top of the previo
 - Docker is optional and exists so the same results reproduce anywhere. Use Docker (not Podman-specific features). No secrets, no network at runtime, nothing pushed anywhere.
 
 ```
-# Dockerfile (sketch; Builder finalizes)
+# Dockerfile (sketch)
 FROM rust:1 AS dev
 RUN apt-get update && apt-get install -y --no-install-recommends \
       tmux ffmpeg fonts-dejavu-core ca-certificates curl git && rm -rf /var/lib/apt/lists/*
@@ -628,7 +629,7 @@ Alternative for environments that have tmux and asciinema: `scripts/demo-tmux.sh
 | 12-recover | r | the unsaved text is back |
 | 13-quit | Ctrl-S, Ctrl-Q | clean exit |
 
-### What the build hands back for the demo
+### What the demo produces
 
 `docs/demo/` committed to the repo (the cast, gif, mp4 if possible, PNGs, and the text frames), plus a short note in the PR or final message listing which artifacts exist. The text frames alone are acceptable proof when image tools are unavailable, and the cast can always be re-rendered later.
 
@@ -640,7 +641,7 @@ Alternative for environments that have tmux and asciinema: `scripts/demo-tmux.sh
 - **File tree and Ctrl-K:** new `Mode` variants plus a left `Layout` split; the palette widget is reusable for file lists.
 - **Config file:** `cli::Options` is the single source of runtime settings; a config loader fills it before CLI flags override.
 
-## 14\. Risks and guardrails for the overnight build
+## 14\. Risks and guardrails for the first build
 
 | Risk | Guardrail |
 | --- | --- |
@@ -651,7 +652,7 @@ Alternative for environments that have tmux and asciinema: `scripts/demo-tmux.sh
 | Dependency drift | Take the newest compatible version of each crate, record versions in docs/DECISIONS.md. |
 | Unverifiable demo tooling | Demo never depends on a display, tmux or asciinema; agg and ffmpeg are optional extras with a graceful skip. |
 
-## 15\. How Inspector verifies
+## 15\. How to verify
 
 1. `cargo build --release && cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test` (AC-01, AC-02 and every pty-driven AC, since `tests/e2e.rs` runs the real binary).
 2. Read `docs/ACCEPTANCE.md` and spot-check three random criteria by hand: run `kyte` in a real terminal or tmux (`tmux set -g escape-time 10; tmux new-session -d -x 100 -y 30 'target/release/kyte /tmp/t.txt'`; drive with `tmux send-keys`; read with `tmux capture-pane -p`), and compare with the criterion text.
@@ -659,13 +660,13 @@ Alternative for environments that have tmux and asciinema: `scripts/demo-tmux.sh
 4. Run `make demo` and confirm the artifacts listed in AC-25.
 5. Report each criterion as pass or fail with the evidence (command and observed output), not as a summary.
 
-## 16\. Open decisions (defaults chosen, Dusty can change them later)
+## 16\. Open decisions at the time
 
-- Double-tap window 300 ms and instant overlay (Scholar question 4).
-- Overlay is one-shot, counts unsupported (question 6).
-- Swap under XDG state, not beside the file (question 7); `sudoedit` and root-owned files are untreated in the MVP.
-- Reader-mode idle auto-activation deferred and off by default when it arrives (question 1).
-- `esc+Home` for reader mode is replaced by an overlay letter when reader mode lands (question 5).
-- Which tree-sitter languages ship in v1 stays at three (Rust, Python, Bash) and only if T13 happens (question 9).
-- Use as the default `$EDITOR` is a post-MVP decision (question 10).
+- Double-tap window 300 ms and instant overlay.
+- Overlay is one-shot, counts unsupported.
+- Swap under XDG state, not beside the file; `sudoedit` and root-owned files are untreated in the MVP.
+- Reader-mode idle auto-activation deferred and off by default when it arrives.
+- `esc+Home` for reader mode is replaced by an overlay letter when reader mode lands.
+- Which tree-sitter languages ship in v1 stays at three (Rust, Python, Bash) and only if T13 happens.
+- Use as the default `$EDITOR` is a post-MVP decision.
 - License is undecided.

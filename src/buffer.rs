@@ -243,6 +243,11 @@ impl Buffer {
         }
     }
 
+    /// The start of the file, enough to read a `#!` line.
+    pub fn head(&self) -> String {
+        self.rope.line(0).chars().take(256).collect()
+    }
+
     /// A read-only view of `rope` as a version of this buffer's file.
     pub fn view_of(&self, rope: Rope) -> Buffer {
         Buffer {

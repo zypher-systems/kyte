@@ -228,7 +228,8 @@ fn line_spans(
     use crate::highlight::{highlight, Lang};
     let mut per = vec![Vec::new(); rows];
     let buf = app.view_buffer();
-    let Some(lang) = buf.path().and_then(Lang::from_path) else {
+    let head = buf.head();
+    let Some(lang) = buf.path().and_then(|p| Lang::detect(p, &head)) else {
         return per;
     };
     let end = (top + rows).min(buf.line_count());

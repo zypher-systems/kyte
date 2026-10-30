@@ -1,6 +1,6 @@
 # Acceptance results
 
-All 25 criteria from section 10 of `docs/ARCHITECTURE.md`. Each result comes from commands run on the build box (Linux, rustc 1.99.1) on 2026-10-30 (America/New_York). End-to-end tests (`tests/e2e.rs`) run the real `kyte` binary in a pseudo-terminal through `portable-pty` and read the screen through a `vt100` emulator. They wait for screen states (`wait_for`); they do not use fixed sleeps, except where a criterion is about time (the AC-14 pauses).
+All 25 criteria from section 10 of `docs/ARCHITECTURE.md`. Each result comes from commands run on the first build machine (Linux, rustc 1.99.1) on 2026-10-30 (America/New_York). End-to-end tests (`tests/e2e.rs`) run the real `kyte` binary in a pseudo-terminal through `portable-pty` and read the screen through a `vt100` emulator. They wait for screen states (`wait_for`); they do not use fixed sleeps, except where a criterion is about time (the AC-14 pauses).
 
 Gate commands, all run from the repo root:
 
@@ -8,12 +8,12 @@ Gate commands, all run from the repo root:
 cargo build --release                      # 0 warnings (also after `cargo clean --release -p kyte-editor`)
 cargo fmt --check                          # clean
 cargo clippy --all-targets -- -D warnings  # clean
-cargo test                                 # 451 passed, 0 failed, 1 ignored (the AC-25 demo test)
+cargo test                                 # 453 passed, 0 failed, 1 ignored (the AC-25 demo test)
 cargo test --test demo -- --ignored        # 1 passed (AC-25)
 make demo                                  # writes docs/demo/*
 ```
 
-Updated on 2026-10-30, on rustc 1.98.1 with SELinux enforcing. `cargo test` breakdown: lib unit tests 251, `tests/buffer_props.rs` 2 (proptest), `tests/e2e.rs` 124, `tests/e2e_highlight.rs` 9, `tests/fileio.rs` 19, `tests/history.rs` 17, `tests/smoke.rs` 4, `tests/swap.rs` 25, `tests/demo.rs` 0 run and 1 ignored. The full suite was also run three times in a row with no failures.
+Updated on 2026-10-30, on rustc 1.98.1 with SELinux enforcing. `cargo test` breakdown: lib unit tests 252, `tests/buffer_props.rs` 2 (proptest), `tests/e2e.rs` 124, `tests/e2e_highlight.rs` 10, `tests/fileio.rs` 19, `tests/history.rs` 17, `tests/smoke.rs` 4, `tests/swap.rs` 25, `tests/demo.rs` 0 run and 1 ignored. The full suite was also run three times in a row with no failures.
 
 | AC | Result | How it was verified |
 | --- | --- | --- |
@@ -43,6 +43,6 @@ Updated on 2026-10-30, on rustc 1.98.1 with SELinux enforcing. `cargo test` brea
 | AC-24 | pass | e2e `ac24_save_into_read_only_dir_fails_visibly_and_keeps_everything`, `ac24_save_through_symlink_updates_target_keeps_link`; `tests/fileio.rs`. |
 | AC-25 | pass | `make demo` ran headless (no display, no tmux) and wrote `docs/demo/demo.cast`, `demo.gif` (979x694, 33.75 s), `demo.mp4` (h264 978x694, 32.9 s; both checked with `ffprobe`), 13 PNGs, `steps.tsv` and 13 `frames/NN-*.txt`. `frames/03-legend.txt` contains the legend, `07-palette.txt` the palette, and `11-crash.txt` the Recover modal; PNGs 03, 07 and 11 were also inspected by eye. The skip path was checked with agg and ffmpeg removed from `PATH`: it wrote the cast, steps and frames and listed the gif, mp4 and PNGs as skipped. `cargo test --test demo -- --ignored` passed. |
 
-Syntax highlighting (feature `highlight`, on by default): `cargo build --release --no-default-features` 0 warnings, `cargo clippy --all-targets --no-default-features -- -D warnings` clean, `cargo test --no-default-features` 417 passed, 0 failed, 1 ignored. The default build adds 34 tests that need highlighting.
+Syntax highlighting (feature `highlight`, on by default): `cargo build --release --no-default-features` 0 warnings, `cargo clippy --all-targets --no-default-features -- -D warnings` clean, `cargo test --no-default-features` 417 passed, 0 failed, 1 ignored. The default build adds 36 tests that need highlighting.
 
-Not verified: `make docker-test` and the Dockerfile, because Docker is not installed on the build box (see `docs/DECISIONS.md`).
+Not verified: `make docker-test` and the Dockerfile, because Docker is not installed on the first build machine (see `docs/DECISIONS.md`).

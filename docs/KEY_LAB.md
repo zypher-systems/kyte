@@ -1,6 +1,6 @@
 # Key-input lab (task T1)
 
-Results from real pty runs on the build box (Linux, rustc 1.99.1, crossterm 0.29.0 via ratatui 0.30.2), Oct 30, 2026.
+Results from real pty runs on the first build machine (Linux, rustc 1.99.1, crossterm 0.29.0 via ratatui 0.30.2), Oct 30, 2026.
 
 How these were produced (reproducible):
 

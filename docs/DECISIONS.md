@@ -1,6 +1,6 @@
 # Decisions and deviations
 
-Every deviation from `ARCHITECTURE` (Mnemo page_e336285940d54098ada133cc08df814b) with a reason, plus resolved crate versions.
+Every deviation from `docs/ARCHITECTURE.md` with a reason, plus resolved crate versions.
 
 ## Product decisions (Oct 30, 2026)
 
@@ -20,7 +20,7 @@ These replace the matching parts of `ARCHITECTURE`. `docs/ROADMAP.md` holds the 
 - Each grammar's capture names map onto Kyte's existing colors. Adding `tag`, `attribute` and `property` also colors those in the first three languages, such as Rust fields and attributes.
 - Markdown uses the block grammar only: headings and code blocks show, but inline emphasis doesn't, because that needs a second parser per line.
 - Embedded languages aren't colored, such as JavaScript inside HTML or code in a Markdown fence.
-- Language comes from the file name or extension. A script with only a `#!` line stays plain.
+- Language comes from the file name or extension, and failing that from a `#!` line. `env` and its flags are looked past. A buffer with no file name stays plain until it's saved.
 - The cost is size: the binary goes from about 7 MB to about 15 MB, nearly all of it grammar tables, and the release profile now strips symbols. `--no-default-features` gives about 1.3 MB.
 - Typing at the end of a file, per key on a release build: 12 to 22 ms at 100 KB across languages, and 64 ms (Go) to 113 ms (C++) at 500 KB. That's usable, so the 512 KiB cap stays, and incremental parsing is still the way to improve it.
 
@@ -98,7 +98,7 @@ These replace the matching parts of `ARCHITECTURE`. `docs/ROADMAP.md` holds the 
 
 ## 0.2.0 universal palette
 
-- Ctrl-K searches commands and files together, with `:N` for a line and `/text` for search. The concept page wasn't available when this was built, so this is the working definition; change it here if the concept says otherwise.
+- Ctrl-K searches commands and files together, with `:N` for a line and `/text` for search. This is the working definition.
 - Esc Esc and Ctrl-P stay commands-only. That keeps a short, predictable list, and it keeps what the Esc layer's legend promises.
 - A command wins a tie against a file, because the command list is small and it's the more common aim.
 - The scan walks the working directory breadth-first, so the nearest files survive the limits of 20,000 files and 100 ms, and it blocks the key press for no longer than that. It runs on every Ctrl-K, so new files show up. Symlinks aren't followed, since one could point back up the tree. `.gitignore` isn't read; hidden files, `target` and `node_modules` are left out by name.
@@ -198,7 +198,7 @@ The versioning rule makes any release with a new feature a MINOR bump, and 0.1.1
 ## Hosting and environment
 
 - Toolchain: rustc/cargo 1.99.1 (stable, 2026-10-13), edition 2021.
-- Docker is not installed on the build box. `Dockerfile`, `docker-compose.yml` and `make docker-test` are written per section 12 but were **not run**. Bind mounts use the `:Z` suffix for SELinux; SELinux is never disabled.
+- Docker is not installed on the first build machine. `Dockerfile`, `docker-compose.yml` and `make docker-test` are written per section 12 but were **not run**. Bind mounts use the `:Z` suffix for SELinux; SELinux is never disabled.
 
 ## Resolved crate versions (Cargo.lock)
 
@@ -281,7 +281,7 @@ The versioning rule makes any release with a new feature a MINOR bump, and 0.1.1
 
 ## T12 verification
 
-- Docker is not installed on the build box, so `docker build`, `docker compose` and `make docker-test` were **not run**. The files follow section 12; agg's install step ends in `|| true` as the spec sketch does.
+- Docker is not installed on the first build machine, so `docker build`, `docker compose` and `make docker-test` were **not run**. The files follow section 12; agg's install step ends in `|| true` as the spec sketch does.
 - The README claims nothing about Docker beyond the commands; it says the Docker path is unverified.
 
 ## T13 syntax highlighting (stretch, done)

@@ -8,8 +8,11 @@ use std::path::Path;
 /// Code larger than this isn't parsed on every key, because that would lag.
 pub const MAX_LIVE_PARSE_BYTES: usize = 512 * 1024;
 
-/// The line comment for a file, by extension.
-pub fn comment_prefix(path: &Path) -> Option<&'static str> {
+/// The line comment for a file, by extension, or `#` for a `#!` script.
+pub fn comment_prefix(path: &Path, head: &str) -> Option<&'static str> {
+    if head.starts_with("#!") {
+        return Some("#");
+    }
     match path.extension()?.to_str()? {
         "rs" | "c" | "h" | "cc" | "cpp" | "cxx" | "hh" | "hpp" | "hxx" | "go" | "java" | "js"
         | "mjs" | "cjs" | "jsx" | "ts" | "mts" | "cts" | "tsx" | "jsonc" | "swift" | "kt"
@@ -53,15 +56,15 @@ mod code {
     }
 
     /// Whether this file's language can be parsed.
-    pub fn supported(path: &Path) -> bool {
-        Lang::from_path(path).is_some()
+    pub fn supported(path: &Path, head: &str) -> bool {
+        Lang::detect(path, head).is_some()
     }
 
     /// Whether this file's language has functions to move between. Data and
     /// markup formats don't.
-    pub fn has_functions(path: &Path) -> bool {
+    pub fn has_functions(path: &Path, head: &str) -> bool {
         matches!(
-            Lang::from_path(path),
+            Lang::detect(path, head),
             Some(
                 Lang::Rust
                     | Lang::Python
@@ -78,7 +81,7 @@ mod code {
 
     /// The function around `at`. A cursor just past its end still counts.
     pub fn function_at(path: &Path, text: &str, at: usize) -> Option<Range<usize>> {
-        let lang = Lang::from_path(path)?;
+        let lang = Lang::detect(path, text)?;
         let tree = parse(lang, text)?;
         let root = tree.root_node();
         [at, at.saturating_sub(1)].into_iter().find_map(|pos| {
@@ -134,7 +137,7 @@ mod code {
 
     /// The named places around `at`, outermost first.
     pub fn breadcrumb(path: &Path, text: &str, at: usize) -> Vec<String> {
-        let Some(lang) = Lang::from_path(path) else {
+        let Some(lang) = Lang::detect(path, text) else {
             return Vec::new();
         };
         let Some(tree) = parse(lang, text) else {
@@ -153,7 +156,7 @@ mod code {
 
     /// The next larger piece of syntax around `range`.
     pub fn expand(path: &Path, text: &str, range: Range<usize>) -> Option<Range<usize>> {
-        let lang = Lang::from_path(path)?;
+        let lang = Lang::detect(path, text)?;
         let tree = parse(lang, text)?;
         let mut node = tree
             .root_node()
@@ -190,7 +193,7 @@ mod code {
 
     /// The start of the first function after `at`.
     pub fn next_function(path: &Path, text: &str, at: usize) -> Option<usize> {
-        let lang = Lang::from_path(path)?;
+        let lang = Lang::detect(path, text)?;
         let tree = parse(lang, text)?;
         functions(lang, &tree)
             .into_iter()
@@ -200,7 +203,7 @@ mod code {
 
     /// The start of the last function before `at`.
     pub fn prev_function(path: &Path, text: &str, at: usize) -> Option<usize> {
-        let lang = Lang::from_path(path)?;
+        let lang = Lang::detect(path, text)?;
         let tree = parse(lang, text)?;
         functions(lang, &tree)
             .into_iter()
@@ -213,11 +216,11 @@ mod code {
 mod code {
     use super::*;
 
-    pub fn supported(_: &Path) -> bool {
+    pub fn supported(_: &Path, _: &str) -> bool {
         false
     }
 
-    pub fn has_functions(_: &Path) -> bool {
+    pub fn has_functions(_: &Path, _: &str) -> bool {
         false
     }
 
@@ -369,9 +372,9 @@ mod tests {
     #[test]
     fn data_formats_can_expand_but_have_no_functions() {
         let path = Path::new("a.json");
-        assert!(supported(path));
-        assert!(!has_functions(path));
-        assert!(has_functions(Path::new("a.go")));
+        assert!(supported(path, ""));
+        assert!(!has_functions(path, ""));
+        assert!(has_functions(Path::new("a.go"), ""));
         let src = "{\"a\": [1, 2]}\n";
         let at = src.find('1').unwrap();
         let r = expand(path, src, at..at).unwrap();
@@ -415,10 +418,11 @@ mod prefix_tests {
 
     #[test]
     fn comment_prefixes_by_extension() {
-        assert_eq!(comment_prefix(Path::new("a.rs")), Some("//"));
-        assert_eq!(comment_prefix(Path::new("a.py")), Some("#"));
-        assert_eq!(comment_prefix(Path::new("a.sql")), Some("--"));
-        assert_eq!(comment_prefix(Path::new("notes.txt")), None);
-        assert_eq!(comment_prefix(Path::new("Makefile")), None);
+        assert_eq!(comment_prefix(Path::new("a.rs"), ""), Some("//"));
+        assert_eq!(comment_prefix(Path::new("a.py"), ""), Some("#"));
+        assert_eq!(comment_prefix(Path::new("a.sql"), ""), Some("--"));
+        assert_eq!(comment_prefix(Path::new("notes.txt"), ""), None);
+        assert_eq!(comment_prefix(Path::new("Makefile"), ""), None);
+        assert_eq!(comment_prefix(Path::new("tool"), "#!/bin/sh\n"), Some("#"));
     }
 }

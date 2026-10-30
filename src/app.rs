@@ -774,16 +774,23 @@ impl App {
 
     /// The file's path, when Kyte can parse its language.
     fn code_path(&self) -> Option<&std::path::Path> {
-        self.buffer.path().filter(|p| syntax::supported(p))
+        let head = self.buffer.head();
+        self.buffer.path().filter(|p| syntax::supported(p, &head))
     }
 
     /// Whether the file's language has functions to work with.
     fn has_functions(&self) -> bool {
-        self.buffer.path().is_some_and(syntax::has_functions)
+        let head = self.buffer.head();
+        self.buffer
+            .path()
+            .is_some_and(|p| syntax::has_functions(p, &head))
     }
 
     fn comment_prefix(&self) -> Option<&'static str> {
-        self.buffer.path().and_then(syntax::comment_prefix)
+        let head = self.buffer.head();
+        self.buffer
+            .path()
+            .and_then(|p| syntax::comment_prefix(p, &head))
     }
 
     /// Whether the cursor is on a bracket that has a partner.

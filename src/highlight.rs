@@ -54,6 +54,30 @@ impl Lang {
         Lang::Markdown,
     ];
 
+    /// Picks the grammar from the file's name, or failing that the `#!` line
+    /// at the start of `head`.
+    pub fn detect(path: &Path, head: &str) -> Option<Lang> {
+        Lang::from_path(path).or_else(|| Lang::from_shebang(head))
+    }
+
+    fn from_shebang(head: &str) -> Option<Lang> {
+        let line = head.lines().next()?.strip_prefix("#!")?;
+        let mut words = line.split_whitespace();
+        let first = words.next()?;
+        let program = if first.ends_with("/env") {
+            // Skip env's own flags and settings, as in `env -S FOO=1 python3`.
+            words.find(|w| !w.starts_with('-') && !w.contains('='))?
+        } else {
+            first
+        };
+        match program.rsplit('/').next()? {
+            "sh" | "bash" | "zsh" | "dash" | "ksh" => Some(Lang::Bash),
+            "node" | "nodejs" | "deno" | "bun" => Some(Lang::JavaScript),
+            name if name.starts_with("python") => Some(Lang::Python),
+            _ => None,
+        }
+    }
+
     /// Picks the grammar from the file name, then its extension.
     pub fn from_path(path: &Path) -> Option<Lang> {
         match path.file_name()?.to_str()? {
@@ -370,6 +394,27 @@ mod tests {
             Some(Lang::Bash)
         );
         assert_eq!(Lang::from_path(Path::new("Cargo.lock")), Some(Lang::Toml));
+    }
+
+    #[test]
+    fn shebang_picks_the_language_when_the_name_does_not() {
+        let d = |head: &str| Lang::detect(Path::new("/usr/local/bin/tool"), head);
+        assert_eq!(d("#!/bin/sh\necho hi\n"), Some(Lang::Bash));
+        assert_eq!(d("#!/usr/bin/env bash\n"), Some(Lang::Bash));
+        assert_eq!(d("#!/usr/bin/python3.12\n"), Some(Lang::Python));
+        assert_eq!(
+            d("#!/usr/bin/env -S FOO=1 python3 -u\n"),
+            Some(Lang::Python)
+        );
+        assert_eq!(d("#!/usr/bin/env node\n"), Some(Lang::JavaScript));
+        assert_eq!(d("#!/usr/bin/perl\n"), None);
+        assert_eq!(d("just text\n"), None);
+        assert_eq!(d(""), None);
+        assert_eq!(
+            Lang::detect(Path::new("a.rs"), "#!/bin/sh\n"),
+            Some(Lang::Rust),
+            "the name wins"
+        );
     }
 
     #[test]

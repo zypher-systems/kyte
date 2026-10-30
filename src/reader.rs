@@ -50,7 +50,7 @@ fn paragraph_at(b: &Buffer, line: usize) -> Range<usize> {
 
 /// The file's path and text, when it's code small enough to parse on each key.
 fn code(b: &Buffer) -> Option<(&std::path::Path, String)> {
-    let path = b.path().filter(|p| syntax::supported(p))?;
+    let path = b.path().filter(|p| syntax::supported(p, &b.head()))?;
     (b.rope().len_bytes() <= syntax::MAX_LIVE_PARSE_BYTES).then(|| (path, b.to_string()))
 }
 
@@ -73,7 +73,7 @@ pub fn section_at(b: &Buffer) -> (Range<usize>, String) {
         return (paragraph_at(b, line), crumbs);
     };
     let mut start = rope.byte_to_line(r.start);
-    let prefix = syntax::comment_prefix(path);
+    let prefix = syntax::comment_prefix(path, &b.head());
     while start > 0 && leads_in(&b.line_text(start - 1), prefix) {
         start -= 1;
     }

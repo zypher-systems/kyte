@@ -34,7 +34,7 @@ The Makefile targets are thin wrappers:
 | `make demo` | `scripts/demo.sh` (see [Demo](#demo)) |
 | `make docker-test` | `cargo test` inside the Docker dev image (see [Docker](#docker)) |
 
-Kyte highlights Rust, Python, Bash, JavaScript, TypeScript, TSX, C, C++, Go, JSON, HTML, CSS, TOML, YAML and Markdown, picked by file name or extension, using tree-sitter. Building needs a C compiler for the grammars. To leave highlighting and the code actions out, which shrinks the binary from about 15 MB to about 1.3 MB:
+Kyte highlights Rust, Python, Bash, JavaScript, TypeScript, TSX, C, C++, Go, JSON, HTML, CSS, TOML, YAML and Markdown, picked by file name or extension, or the `#!` line of a script, using tree-sitter. Building needs a C compiler for the grammars. To leave highlighting and the code actions out, which shrinks the binary from about 15 MB to about 1.3 MB:
 
 ```
 cargo build --release --no-default-features
