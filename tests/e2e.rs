@@ -387,7 +387,7 @@ fn ac18_quit_dirty_y_saves_and_quits() {
     p.send_str("y");
     assert_eq!(p.wait_exit(TIMEOUT), 0);
     assert_eq!(fs::read_to_string(&f).unwrap(), "more keep me\n");
-    assert!(fs::read_dir(&env.state).unwrap().next().is_none());
+    assert!(swap_files(&env).is_empty());
 }
 
 #[test]
@@ -707,7 +707,7 @@ fn ac12_legend_appears_instantly_and_only_in_overlay() {
         "w del word",
         "d del line",
         "k del to end",
-        "% bracket",
+        "% match",
         "/ search",
         "u undo",
         "r redo",
@@ -1024,7 +1024,7 @@ fn ac16_empty_query_does_nothing() {
 
 // ---------------------------------------------------------------- AC-17
 
-const COMMANDS: [&str; 17] = [
+const COMMANDS: [&str; 19] = [
     "Save",
     "Save as",
     "Open file",
@@ -1041,6 +1041,8 @@ const COMMANDS: [&str; 17] = [
     "Go to line",
     "Toggle line numbers",
     "Toggle tabs and spaces",
+    "File history",
+    "Delete file history",
     "Show key help",
 ];
 
@@ -1073,7 +1075,7 @@ fn ac17_palette_lists_every_command() {
         .collect();
     assert!(first_result(&p).contains("▸ Save"), "{}", p.dump());
     // 8 rows are visible at once; scrolling down reveals the rest
-    for _ in 0..16 {
+    for _ in 0..18 {
         p.send_keys(&["Down"]);
         std::thread::sleep(Duration::from_millis(5));
         for c in COMMANDS {
@@ -1673,6 +1675,228 @@ fn failed_save_message_fits_a_standard_terminal() {
     p.wait_for("Unsaved changes", TIMEOUT);
     p.send_str("n");
     assert_eq!(p.wait_exit(TIMEOUT), 0);
+}
+
+// ---------------------------------------------------------------- file history
+
+fn open_history(p: &mut Pty) {
+    open_overlay(p);
+    p.send_str("h");
+    p.wait_for(" HISTORY ", TIMEOUT);
+}
+
+#[test]
+fn history_steps_through_every_edit_and_restores_one() {
+    let env = Env::new();
+    let f = work_file(&env, "h.txt", "base\n");
+    let mut p = env.open(&f);
+    p.send_str("abc");
+    p.wait_for("abcbase", TIMEOUT);
+    save_and_wait(&mut p);
+    open_history(&mut p);
+    wait_status(&p, "4 of 4");
+    wait_status(&p, "added 1, saved");
+    p.send_keys(&["Left"]);
+    wait_status(&p, "3 of 4");
+    p.wait_for("1 │ abbase", TIMEOUT);
+    p.send_keys(&["Home"]);
+    wait_status(&p, "1 of 4");
+    wait_status(&p, "as opened");
+    p.wait_for("1 │ base", TIMEOUT);
+    p.send_keys(&["Right"]);
+    wait_status(&p, "2 of 4");
+    p.wait_for("1 │ abase", TIMEOUT);
+    p.send_keys(&["Enter"]);
+    p.wait_for("Restored the version from", TIMEOUT);
+    wait_status(&p, "[+]");
+    p.wait_for("1 │ abase", TIMEOUT);
+    p.send_keys(&["C-z"]);
+    p.wait_for("1 │ abcbase", TIMEOUT);
+    p.send_keys(&["C-y"]);
+    p.wait_for("1 │ abase", TIMEOUT);
+    save_and_wait(&mut p);
+    quit_clean(&mut p);
+    assert_eq!(fs::read_to_string(&f).unwrap(), "abase\n");
+}
+
+#[test]
+fn history_browsing_is_read_only_and_esc_returns_to_your_text() {
+    let env = Env::new();
+    let f = work_file(&env, "h.txt", "base\n");
+    let mut p = env.open(&f);
+    p.send_str("x");
+    wait_status(&p, "[+]");
+    open_history(&mut p);
+    p.send_keys(&["Home"]);
+    p.wait_for("1 │ base", TIMEOUT);
+    p.send_str("typing here");
+    std::thread::sleep(Duration::from_millis(50));
+    assert!(!p.screen().contains("typing"), "{}", p.dump());
+    p.send_keys(&["Esc"]);
+    p.wait_gone(" HISTORY ", TIMEOUT);
+    p.wait_for("1 │ xbase", TIMEOUT);
+    p.send_keys(&["C-q"]);
+    p.wait_for("Unsaved changes", TIMEOUT);
+    p.send_str("n");
+    assert_eq!(p.wait_exit(TIMEOUT), 0);
+}
+
+#[test]
+fn history_survives_quitting_and_keeps_discarded_edits() {
+    let env = Env::new();
+    let f = work_file(&env, "h.txt", "base\n");
+    let mut p = env.open(&f);
+    p.send_str("kept ");
+    wait_status(&p, "[+]");
+    save_and_wait(&mut p);
+    p.send_str("thrown away ");
+    p.wait_for("kept thrown away", TIMEOUT);
+    p.send_keys(&["C-q"]);
+    p.wait_for("Unsaved changes", TIMEOUT);
+    p.send_str("n");
+    assert_eq!(p.wait_exit(TIMEOUT), 0);
+    assert_eq!(fs::read_to_string(&f).unwrap(), "kept base\n");
+    let mut p = env.open(&f);
+    open_history(&mut p);
+    p.wait_for("1 │ kept thrown away base", TIMEOUT);
+    p.send_keys(&["Enter"]);
+    p.wait_for("Restored the version from", TIMEOUT);
+    save_and_wait(&mut p);
+    quit_clean(&mut p);
+    assert_eq!(fs::read_to_string(&f).unwrap(), "kept thrown away base\n");
+}
+
+#[test]
+fn history_keeps_a_version_a_save_overwrote() {
+    let env = Env::new();
+    let f = work_file(&env, "h.txt", "v1\n");
+    let mut p = env.open(&f);
+    p.send_str("mine ");
+    wait_status(&p, "[+]");
+    fs::write(&f, "theirs\n").unwrap();
+    p.send_keys(&["C-s"]);
+    p.wait_for("File changed on disk!", TIMEOUT);
+    p.send_str("y");
+    p.wait_for("Saved 1 line", TIMEOUT);
+    assert_eq!(fs::read_to_string(&f).unwrap(), "mine v1\n");
+    open_history(&mut p);
+    p.send_keys(&["Left"]);
+    wait_status(&p, "changed outside Kyte");
+    p.wait_for("1 │ theirs", TIMEOUT);
+    p.send_keys(&["Enter"]);
+    p.wait_for("1 │ theirs", TIMEOUT);
+    save_and_wait(&mut p);
+    quit_clean(&mut p);
+    assert_eq!(fs::read_to_string(&f).unwrap(), "theirs\n");
+}
+
+#[test]
+fn history_of_a_deleted_file_still_opens() {
+    let env = Env::new();
+    let f = work_file(&env, "h.txt", "precious\n");
+    let mut p = env.open(&f);
+    p.send_str("x");
+    wait_status(&p, "[+]");
+    save_and_wait(&mut p);
+    quit_clean(&mut p);
+    fs::remove_file(&f).unwrap();
+    let mut p = env.open(&f);
+    open_history(&mut p);
+    p.wait_for("1 │ xprecious", TIMEOUT);
+    p.send_keys(&["Enter"]);
+    p.wait_for("Restored the version from", TIMEOUT);
+    save_and_wait(&mut p);
+    quit_clean(&mut p);
+    assert_eq!(fs::read_to_string(&f).unwrap(), "xprecious\n");
+}
+
+#[test]
+fn history_survives_a_crash_and_recovery() {
+    let env = Env::new();
+    let f = work_file(&env, "h.txt", "base\n");
+    edit_and_kill(&env, &f, "crashed ");
+    let mut p = open_raw(&env, &f);
+    p.wait_for("Recover unsaved changes", TIMEOUT);
+    p.send_str("r");
+    p.wait_for("1 │ crashed base", TIMEOUT);
+    open_history(&mut p);
+    wait_status(&p, "recovered");
+    p.send_keys(&["Home"]);
+    p.wait_for("1 │ base", TIMEOUT);
+    p.send_keys(&["Esc"]);
+    p.wait_gone(" HISTORY ", TIMEOUT);
+    p.send_keys(&["C-q"]);
+    p.wait_for("Unsaved changes", TIMEOUT);
+    p.send_str("n");
+    assert_eq!(p.wait_exit(TIMEOUT), 0);
+}
+
+#[test]
+fn opening_without_editing_writes_no_history() {
+    let env = Env::new();
+    let f = work_file(&env, "h.txt", "base\n");
+    let mut p = env.open(&f);
+    open_overlay(&mut p);
+    p.send_str("h");
+    p.wait_for("No history yet", TIMEOUT);
+    quit_clean(&mut p);
+    assert!(!env.state.join("history").exists());
+}
+
+#[test]
+fn no_history_flag_keeps_nothing() {
+    let env = Env::new();
+    let f = work_file(&env, "h.txt", "base\n");
+    let mut p = env.open_args(&f, &["--no-history"]);
+    p.send_str("secret");
+    wait_status(&p, "[+]");
+    save_and_wait(&mut p);
+    open_overlay(&mut p);
+    p.send_str("h");
+    p.wait_for("File history is off", TIMEOUT);
+    quit_clean(&mut p);
+    assert!(!env.state.join("history").exists());
+}
+
+#[test]
+fn delete_file_history_asks_then_clears_it() {
+    let env = Env::new();
+    let f = work_file(&env, "h.txt", "base\n");
+    let mut p = env.open(&f);
+    p.send_str("x");
+    wait_status(&p, "[+]");
+    save_and_wait(&mut p);
+    open_palette(&mut p);
+    p.send_str("delete file");
+    p.wait_for("▸ Delete file history", TIMEOUT);
+    p.send_keys(&["Enter"]);
+    p.wait_for("Delete all history", TIMEOUT);
+    p.send_str("y");
+    p.wait_for("Deleted this file's history", TIMEOUT);
+    open_overlay(&mut p);
+    p.send_str("h");
+    p.wait_for("No history yet", TIMEOUT);
+    quit_clean(&mut p);
+    let left: Vec<_> = fs::read_dir(env.state.join("history")).unwrap().collect();
+    assert!(left.is_empty());
+}
+
+#[test]
+fn save_as_gives_the_new_file_its_own_history() {
+    let env = Env::new();
+    let f = work_file(&env, "a.txt", "text\n");
+    let new = f.with_file_name("b.txt");
+    let mut p = env.open(&f);
+    save_as(&mut p, new.to_str().unwrap());
+    p.wait_for("Saved 1 line", TIMEOUT);
+    p.send_str("x");
+    wait_status(&p, "[+]");
+    open_history(&mut p);
+    wait_status(&p, "2 of 2");
+    p.send_keys(&["Esc"]);
+    p.wait_gone(" HISTORY ", TIMEOUT);
+    save_and_wait(&mut p);
+    quit_clean(&mut p);
 }
 
 // ---------------------------------------------------------------- universal palette

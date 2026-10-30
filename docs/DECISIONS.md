@@ -12,6 +12,22 @@ These replace the matching parts of `ARCHITECTURE`. `docs/ROADMAP.md` holds the 
 - License: MIT. This settles section 16 and the section 4 note.
 - Kyte isn't tied to any one OS. It's meant to be open source for everyone.
 
+## File history
+
+- Every edit is kept, by decision: not only saves and crashes. So a file's log grows with every keystroke, and nothing prunes it yet. Measured with a million single-character edits on a 30 KB file: the log is 34 MB (34 bytes per edit), the timeline opens in 105 ms, any version shows in about 8 µs, and a session's first edit takes 31 ms, because it reads the log. Later edits take under a microsecond.
+- The log is separate from the swap. The swap is short-lived and protects the session; the log is permanent. Keeping them apart leaves tested crash recovery alone, at the cost of writing each edit twice.
+- A log is written only from the first edit on, so opening a file costs nothing and leaves nothing behind. The first edit reads the log, drops a torn tail, and stores the current text only if the log doesn't already end there. So a file changed between sessions becomes a version of its own, and a normal reopen adds just the edit.
+- The log's end state comes from its last snapshot or mark. After a crash the log ends in edits, so the state isn't known and the next session stores a snapshot. That's one file copy, only after a crash.
+- Discarded edits stay in the log. A version a save overwrites from outside Kyte goes in as well, so answering `y` to the overwrite question loses nothing.
+- Version text comes from replaying forward. Timeline keeps a `Rope` every 256 versions, and ropes share memory, so any step replays at most 255 edits. The log therefore stores no removed text.
+- Time shows as "5 minutes ago", which needs no time-zone database.
+- Restore uses `Buffer::replace_all`, which trims the common start and end, so the undo step and the log record hold only what differs.
+- The browser swaps in a read-only `Buffer` through `App::view_buffer`, so text view, highlighting and scrolling work unchanged, and what a step added is shown as a selection.
+- History is keyed by path. Following renames would need file identity that survives across tools, which is out of scope for now.
+- A failed history write stops history for the session and shows `no history`, and never stops editing.
+- The logs are off in unit tests unless `enable_history` is called, because `App::new` alone must not touch the real state directory.
+- The legend went to single spaces to fit `h history` in 100 columns, with `% bracket` shortened to `% match`. Its narrow form drops `u` and `r`, which Ctrl-Z and Ctrl-Y cover.
+
 ## Highlighting on by default
 
 - `highlight` is now a default feature; `--no-default-features` leaves it out. The binary grows from about 1.5 MB to about 7 MB, and building needs a C compiler. This replaces T13's "off by default".

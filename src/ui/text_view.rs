@@ -67,7 +67,7 @@ pub fn visible_text(line: &str, left: usize, width: usize) -> String {
 
 /// Draws the text area into `area` and returns the terminal cursor position.
 pub fn render(app: &App, area: Rect, cells: &mut Cells, theme: &Theme) -> Option<(u16, u16)> {
-    let buf = &app.buffer;
+    let buf = app.view_buffer();
     let (top, left) = app.scroll();
     let gw = gutter_width(buf.line_count(), app.show_line_numbers);
     let text_w = (area.width as usize).saturating_sub(gw);
@@ -124,7 +124,7 @@ fn paint_matches(app: &App, l: usize, row: Rect, cells: &mut Cells, theme: &Them
     let Some(query) = app.search_query() else {
         return;
     };
-    let buf = &app.buffer;
+    let buf = app.view_buffer();
     let line = buf.line_text(l);
     let matches = crate::search::line_matches(&line, query);
     if matches.is_empty() {
@@ -168,7 +168,7 @@ fn paint_matches(app: &App, l: usize, row: Rect, cells: &mut Cells, theme: &Them
 /// Styles the selected part of line `l` in `row`. A selection running past
 /// the end of the line takes one more cell, so an empty line shows as selected.
 fn paint_selection(app: &App, l: usize, row: Rect, cells: &mut Cells, theme: &Theme) {
-    let buf = &app.buffer;
+    let buf = app.view_buffer();
     let Some(sel) = buf.selection() else {
         return;
     };
@@ -212,7 +212,7 @@ fn line_spans(
 ) -> Vec<Vec<(std::ops::Range<usize>, ratatui::style::Style)>> {
     use crate::highlight::{highlight, Lang};
     let mut per = vec![Vec::new(); rows];
-    let buf = &app.buffer;
+    let buf = app.view_buffer();
     let Some(lang) = buf.path().and_then(Lang::from_path) else {
         return per;
     };

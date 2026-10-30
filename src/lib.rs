@@ -10,6 +10,7 @@ pub mod command;
 pub mod fileio;
 #[cfg(feature = "highlight")]
 pub mod highlight;
+pub mod history;
 pub mod input;
 pub mod ops;
 pub mod palette;
@@ -54,6 +55,9 @@ pub fn run(opts: Options) -> anyhow::Result<ExitCode> {
         },
         None => open_untitled(&opts),
     };
+    if !opts.no_history {
+        app.enable_history();
+    }
     let result = event_loop(&mut app, opts.no_kitty);
     if result.is_ok() {
         app.finish();

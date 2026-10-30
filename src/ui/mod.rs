@@ -166,6 +166,7 @@ mod tests {
         assert!(row(&t, 23).contains("w word"));
         let t = draw(&mut a, 100, 30);
         assert!(row(&t, 29).contains("w del word"), "{}", row(&t, 29));
+        assert!(row(&t, 29).contains("h history"));
         assert!(row(&t, 29).contains("Esc Esc palette"));
     }
 

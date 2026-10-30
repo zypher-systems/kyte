@@ -19,6 +19,8 @@ pub enum Command {
     GotoLine,
     ToggleLineNumbers,
     ToggleIndent,
+    History,
+    DeleteHistory,
     ShowKeyHelp,
 }
 
@@ -40,6 +42,8 @@ pub const REGISTRY: &[Command] = &[
     Command::GotoLine,
     Command::ToggleLineNumbers,
     Command::ToggleIndent,
+    Command::History,
+    Command::DeleteHistory,
     Command::ShowKeyHelp,
 ];
 
@@ -62,6 +66,8 @@ impl Command {
             Command::GotoLine => "Go to line",
             Command::ToggleLineNumbers => "Toggle line numbers",
             Command::ToggleIndent => "Toggle tabs and spaces",
+            Command::History => "File history",
+            Command::DeleteHistory => "Delete file history",
             Command::ShowKeyHelp => "Show key help",
         }
     }
@@ -85,6 +91,8 @@ impl Command {
             Command::GotoLine => "",
             Command::ToggleLineNumbers => "",
             Command::ToggleIndent => "",
+            Command::History => "Esc h",
+            Command::DeleteHistory => "",
             Command::ShowKeyHelp => "",
         }
     }
@@ -122,6 +130,7 @@ pub const KEY_HELP: &[(&str, &str)] = &[
     ("  w  d  k", "del word, del line, del to end"),
     ("  %  /", "matching bracket, search"),
     ("  u  r  s", "undo, redo, save"),
+    ("  h", "file history"),
     ("  Esc (quickly)", "command palette"),
 ];
 
@@ -141,7 +150,7 @@ mod tests {
 
     #[test]
     fn every_command_has_a_label() {
-        assert_eq!(REGISTRY.len(), 17);
+        assert_eq!(REGISTRY.len(), 19);
         let labels: Vec<&str> = REGISTRY.iter().map(|c| c.label()).collect();
         assert_eq!(
             labels,
@@ -162,6 +171,8 @@ mod tests {
                 "Go to line",
                 "Toggle line numbers",
                 "Toggle tabs and spaces",
+                "File history",
+                "Delete file history",
                 "Show key help"
             ]
         );

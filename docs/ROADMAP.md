@@ -45,16 +45,20 @@ Fixed every known way the build could lose or damage work. Each fix has a regres
 - [x] Ctrl-K universal palette
 - [x] Replace the Nano-derived aliases: Ctrl-X, Ctrl-C and Ctrl-V for cut, copy and paste, and Ctrl-O to open a file.
 
-## Next: looks
+## Next: what makes Kyte stand out
 
-Kyte works, and its appearance is the next thing to improve. The details are still to be decided.
+Kyte's pitch is an editor you can't lose work in and don't have to learn.
 
-Keep using Kyte for real work along the way, on actual terminals with the kitty keyboard protocol, and over SSH and tmux.
+- [x] File history: every edit kept across sessions, browsable and restorable
+- [ ] Retention for file history, so logs can't grow without limit
+- [ ] Smart Esc layer: a legend that changes with context, using tree-sitter
+- [ ] Reader mode
+- [ ] Review changes made by other tools, built on file history
+
+Looks are still open too, with details to be decided. Keep using Kyte for real work along the way, on actual terminals with the kitty keyboard protocol, and over SSH and tmux.
 
 ## Later
 
-- Reader mode
-- Undo history that survives a restart
 - Light and high-contrast themes
 - Config file
 - File tree

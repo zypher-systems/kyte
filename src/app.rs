@@ -9,6 +9,7 @@ use crate::buffer::{Buffer, Edit, GroupKind, Indent};
 use crate::cli::Options;
 use crate::command::{self, Command};
 use crate::fileio::{self, DiskState};
+use crate::history::{self, Change, FileHistory, SharedTimeline, SnapshotKind, Timeline};
 use crate::input::{normalize, Input, Key, Motion};
 use crate::ops;
 use crate::palette::{Entry, PaletteState};
@@ -37,6 +38,11 @@ pub enum Mode {
     },
     Palette(PaletteState),
     Prompt(Prompt),
+    /// Browsing the file's past, at version `at`.
+    History {
+        timeline: SharedTimeline,
+        at: usize,
+    },
     /// The "Show key help" modal, scrolled to row `top`; Esc closes it.
     Help {
         top: usize,
@@ -64,6 +70,8 @@ pub enum Prompt {
     Open {
         text: String,
     },
+    /// Asks before deleting the file's history.
+    ConfirmDeleteHistory,
     /// Asks what to replace.
     ReplaceFind {
         query: String,
@@ -163,6 +171,13 @@ pub struct App {
     clipboard_whole_line: bool,
     /// Bytes for the terminal itself, written after the next key.
     terminal_output: Option<String>,
+    /// File history is wanted this session.
+    history_on: bool,
+    history: Option<FileHistory>,
+    /// A history write failed, so no more are being kept.
+    history_failed: bool,
+    /// The version being browsed, while `Mode::History` is open.
+    version_view: Option<Buffer>,
     last_fsync: Option<Instant>,
     scroll_top: usize,
     scroll_left: usize,
@@ -174,14 +189,19 @@ pub const LEGEND: &[(&str, &str, &str)] = &[
     ("w", "del word", "word"),
     ("d", "del line", "line"),
     ("k", "del to end", "to end"),
-    ("%", "bracket", "bracket"),
+    ("%", "match", "match"),
     ("/", "search", "search"),
-    ("u", "undo", "undo"),
-    ("r", "redo", "redo"),
+    ("u", "undo", ""),
+    ("r", "redo", ""),
     ("s", "save", "save"),
+    ("h", "history", "history"),
     ("Esc Esc", "palette", "palette"),
 ];
 
+pub const CONFIRM_DELETE_HISTORY_TEXT: &str =
+    "Delete all history for this file? y deletes it, n or Esc cancels";
+pub const HISTORY_KEYS: &str =
+    "Left/Right edit  Up/Down burst  PgUp/PgDn save  Enter restore  Esc close";
 pub const REPLACE_CONFIRM_TEXT: &str = "Replace this one? y yes, n skip, a all, Esc stop";
 
 pub const CONFIRM_QUIT_TEXT: &str = "Unsaved changes! y saves and quits, n discards, Esc cancels";
@@ -201,6 +221,10 @@ impl App {
             clipboard: String::new(),
             clipboard_whole_line: false,
             terminal_output: None,
+            history_on: false,
+            history: None,
+            history_failed: false,
+            version_view: None,
             last_fsync: None,
             buffer,
             mode: Mode::Insert,
@@ -213,6 +237,46 @@ impl App {
             scroll_left: 0,
             view: (0, 0),
         }
+    }
+
+    /// The buffer on screen: the version being browsed, or the file.
+    pub fn view_buffer(&self) -> &Buffer {
+        self.version_view.as_ref().unwrap_or(&self.buffer)
+    }
+
+    /// Starts keeping history for this session.
+    pub fn enable_history(&mut self) {
+        self.history_on = true;
+        self.start_history();
+    }
+
+    /// Points the history at the current file and text.
+    fn start_history(&mut self) {
+        self.history = None;
+        self.history_failed = false;
+        if self.history_on {
+            self.history = self
+                .swap_target
+                .as_ref()
+                .map(|t| FileHistory::new(t, self.buffer.rope()));
+        }
+    }
+
+    /// Runs one history write. A failure stops history but never the editing.
+    fn with_history(&mut self, f: impl FnOnce(&mut FileHistory) -> std::io::Result<()>) {
+        let Some(h) = self.history.as_mut() else {
+            return;
+        };
+        if let Err(e) = f(h) {
+            self.history = None;
+            self.history_failed = true;
+            self.set_error(format!("History write failed: {e}"));
+        }
+    }
+
+    /// Whether edits have stopped reaching the history.
+    pub fn history_lost(&self) -> bool {
+        self.history_failed
     }
 
     /// (top line, left display column) of the text view.
@@ -233,18 +297,19 @@ impl App {
     pub fn layout(&mut self, width: u16, height: u16) {
         self.view = (width, height);
         let h = (height as usize).saturating_sub(2).max(1);
-        let gw =
-            crate::ui::text_view::gutter_width(self.buffer.line_count(), self.show_line_numbers);
+        let buf = self.view_buffer();
+        let gw = crate::ui::text_view::gutter_width(buf.line_count(), self.show_line_numbers);
         let w = (width as usize).saturating_sub(gw).max(1);
-        let line = self.buffer.cursor_line();
+        let line = buf.cursor_line();
+        let lines = buf.line_count();
+        let col = buf.cursor_display_col();
         if line < self.scroll_top {
             self.scroll_top = line;
         } else if line >= self.scroll_top + h {
             self.scroll_top = line + 1 - h;
         }
-        let max_top = self.buffer.line_count().saturating_sub(1);
+        let max_top = lines.saturating_sub(1);
         self.scroll_top = self.scroll_top.min(max_top);
-        let col = self.buffer.cursor_display_col();
         if col < self.scroll_left {
             self.scroll_left = col;
         } else if col >= self.scroll_left + w {
@@ -312,7 +377,11 @@ impl App {
     /// Write-ahead: every edit reaches `write()` before anything else happens.
     fn flush_edits(&mut self) {
         let edits = self.buffer.take_pending_edits();
-        if edits.is_empty() || self.swap_failed {
+        if edits.is_empty() {
+            return;
+        }
+        self.with_history(|h| h.append(&edits));
+        if self.swap_failed {
             return;
         }
         if let Some(w) = self.swap.as_mut() {
@@ -342,6 +411,8 @@ impl App {
 
     /// Called once after the event loop: removes the swap unless it must be kept.
     pub fn finish(&mut self) {
+        let text = self.buffer.rope().clone();
+        self.with_history(|h| h.close(&text));
         if let Some(w) = self.swap.take() {
             if self.keep_swap {
                 let _ = { w }.fsync_if_pending();
@@ -367,6 +438,15 @@ impl App {
             }
             Mode::Prompt(Prompt::ReplaceConfirm(run)) => self.replace_confirm_key(key, run),
             Mode::Recover(info) => self.recover_key(key, info),
+            Mode::History { timeline, at } => self.history_key(key, timeline, at),
+            Mode::Prompt(Prompt::ConfirmDeleteHistory) => match key {
+                Key::Char('y') => {
+                    self.mode = Mode::Insert;
+                    self.delete_history();
+                }
+                Key::Char('n') | Key::Esc => self.mode = Mode::Insert,
+                _ => {}
+            },
             Mode::Help { top } => {
                 let last = command::help_max_top(self.text_height());
                 match key {
@@ -426,6 +506,9 @@ impl App {
                     // Saving this version replaces what's on disk, so ask first.
                     self.disk = None;
                 }
+                self.start_history();
+                let recovered = self.buffer.rope().clone();
+                self.with_history(|h| h.snapshot(&recovered, SnapshotKind::Recovered));
                 match SwapWriter::adopt(&info.swap_path) {
                     Ok(w) => {
                         self.swap = Some(w);
@@ -635,6 +718,7 @@ impl App {
             Key::Char('u') => self.undo(),
             Key::Char('r') => self.redo(),
             Key::Char('s') => self.save(),
+            Key::Char('h') => self.open_history(),
             // Any other key closes the overlay and is discarded.
             _ => {}
         }
@@ -943,6 +1027,10 @@ impl App {
             }
             Command::ToggleLineNumbers => self.show_line_numbers = !self.show_line_numbers,
             Command::ToggleIndent => self.toggle_indent(),
+            Command::History => self.open_history(),
+            Command::DeleteHistory => {
+                self.mode = Mode::Prompt(Prompt::ConfirmDeleteHistory);
+            }
             Command::ShowKeyHelp => self.mode = Mode::Help { top: 0 },
         }
     }
@@ -1068,7 +1156,7 @@ impl App {
             | Mode::Prompt(Prompt::SaveAs { text: typed, .. }) => {
                 typed.push_str(text.lines().next().unwrap_or(""));
             }
-            Mode::Prompt(_) | Mode::Help { .. } | Mode::Recover(_) => {}
+            Mode::Prompt(_) | Mode::Help { .. } | Mode::Recover(_) | Mode::History { .. } => {}
         }
         self.flush_edits();
         Ok(())
@@ -1087,6 +1175,7 @@ impl App {
                     self.set_error(format!("Swap fsync failed: {e}"));
                 }
             }
+            self.with_history(|h| h.fsync_if_pending());
             self.last_fsync = Some(now);
         }
         Ok(())
@@ -1235,9 +1324,12 @@ impl App {
         }
         self.swap_target = buffer.path().and_then(|p| fileio::resolve_target(p).ok());
         self.disk = Some(DiskState::of_rope(buffer.rope()));
+        let closing = self.buffer.rope().clone();
+        self.with_history(|h| h.close(&closing));
         self.buffer = buffer;
         self.swap = swap;
         self.swap_failed = false;
+        self.start_history();
         self.scroll_top = 0;
         self.scroll_left = 0;
         self.mode = recover.map_or(Mode::Insert, Mode::Recover);
@@ -1246,6 +1338,86 @@ impl App {
         } else if self.mode == Mode::Insert {
             let name = path.file_name().unwrap_or_default().to_string_lossy();
             self.set_message(format!("Opened {name}"));
+        }
+    }
+
+    /// Opens the timeline at the newest version.
+    fn open_history(&mut self) {
+        let Some(h) = self.history.as_ref() else {
+            let why = if !self.history_on {
+                "File history is off this session"
+            } else {
+                "This buffer has no file yet, so it has no history"
+            };
+            self.set_message(why);
+            return;
+        };
+        match Timeline::load(h.path()) {
+            Ok(t) if t.is_empty() => {
+                self.set_message("No history yet; it starts with your first edit")
+            }
+            Ok(t) => {
+                let at = t.len() - 1;
+                self.show_version(std::sync::Arc::new(t), at);
+            }
+            Err(e) => self.set_error(format!("Can't read the history: {e}")),
+        }
+    }
+
+    /// Shows version `at`, with what it changed selected.
+    fn show_version(&mut self, timeline: SharedTimeline, at: usize) {
+        let mut view = self.buffer.view_of(timeline.text_at(at));
+        if let Change::Edit { at: pos, ins, .. } = &timeline.version(at).change {
+            let end = pos + ins.chars().count();
+            view.move_to(end);
+            view.set_selection_anchor(*pos);
+        }
+        self.version_view = Some(view);
+        self.mode = Mode::History { timeline, at };
+    }
+
+    fn close_history(&mut self) {
+        self.version_view = None;
+        self.mode = Mode::Insert;
+    }
+
+    fn history_key(&mut self, key: Key, timeline: SharedTimeline, at: usize) {
+        let target = match key {
+            Key::Left => at.saturating_sub(1),
+            Key::Right => (at + 1).min(timeline.len() - 1),
+            Key::Up => timeline.prev_burst(at),
+            Key::Down => timeline.next_burst(at),
+            Key::PageUp => timeline.prev_saved(at).unwrap_or(at),
+            Key::PageDown => timeline.next_saved(at).unwrap_or(at),
+            Key::Home => 0,
+            Key::End => timeline.len() - 1,
+            Key::Enter => {
+                let text = timeline.text_at(at).to_string();
+                let when = history::ago_from_now(timeline.version(at).time_ms);
+                self.close_history();
+                if self.buffer.replace_all(&text) {
+                    self.set_message(format!(
+                        "Restored the version from {when}; Ctrl-Z undoes it"
+                    ));
+                } else {
+                    self.set_message("That's the version you have now");
+                }
+                return;
+            }
+            Key::Esc | Key::Char('q') => {
+                self.close_history();
+                return;
+            }
+            _ => at,
+        };
+        self.show_version(timeline, target);
+    }
+
+    fn delete_history(&mut self) {
+        let text = self.buffer.rope().clone();
+        self.with_history(|h| h.delete(&text));
+        if self.history.is_some() {
+            self.set_message("Deleted this file's history");
         }
     }
 
@@ -1326,6 +1498,7 @@ impl App {
 
     fn write_file(&mut self, path: &std::path::Path, then: After) {
         let text = self.buffer.to_string();
+        let overwritten = self.outside_version(path);
         match fileio::save_atomic(path, &text) {
             Ok(()) => {
                 self.disk = Some(DiskState::of_bytes(text.as_bytes()));
@@ -1334,6 +1507,7 @@ impl App {
                     self.swap_target = fileio::resolve_target(path).ok();
                 }
                 self.buffer.mark_clean();
+                self.note_save(path, overwritten);
                 let n = self.buffer.saved_line_count();
                 self.set_message(format!("Saved {n} line{}", if n == 1 { "" } else { "s" }));
                 // The saved file is the new base: replace the swap with an empty one.
@@ -1353,6 +1527,34 @@ impl App {
             }
             Err(e) => self.set_error(format!("Save failed: {e}. Use Save as in the palette")),
         }
+    }
+
+    /// The file's content, if it isn't what Kyte last read or wrote. A save is
+    /// about to replace it, so the history should keep it.
+    fn outside_version(&self, path: &std::path::Path) -> Option<String> {
+        if self.buffer.path() != Some(path) || self.history.is_none() {
+            return None;
+        }
+        let state = fileio::disk_state(path).ok()??;
+        (Some(state) != self.disk)
+            .then(|| std::fs::read_to_string(path).ok())
+            .flatten()
+    }
+
+    /// Records a finished save in the history, for the file it went to.
+    fn note_save(&mut self, path: &std::path::Path, overwritten: Option<String>) {
+        let moved = self.history.as_ref().map(|h| h.target());
+        if moved != fileio::resolve_target(path).ok().as_deref() {
+            self.swap_target = fileio::resolve_target(path).ok();
+            self.start_history();
+        }
+        let text = self.buffer.rope().clone();
+        self.with_history(|h| {
+            if let Some(old) = overwritten {
+                h.snapshot(&ropey::Rope::from_str(&old), SnapshotKind::Outside)?;
+            }
+            h.mark_saved(&text)
+        });
     }
 
     /// Ctrl-Q: quit now when clean, otherwise ask.
@@ -1384,6 +1586,8 @@ impl App {
             Mode::Prompt(Prompt::Open { .. }) => "OPEN",
             Mode::Prompt(Prompt::SaveAs { .. }) => "SAVE AS",
             Mode::Prompt(Prompt::ConfirmSave { .. }) => "SAVE?",
+            Mode::History { .. } => "HISTORY",
+            Mode::Prompt(Prompt::ConfirmDeleteHistory) => "DELETE?",
             Mode::Help { .. } => "HELP",
             Mode::Recover(_) => "RECOVER",
         }

@@ -243,6 +243,58 @@ impl Buffer {
         }
     }
 
+    /// A read-only view of `rope` as a version of this buffer's file.
+    pub fn view_of(&self, rope: Rope) -> Buffer {
+        Buffer {
+            rope,
+            path: self.path.clone(),
+            cursor: 0,
+            want_col: 0,
+            dirty: false,
+            undo: Vec::new(),
+            redo: Vec::new(),
+            pending_edits: Vec::new(),
+            eol: self.eol,
+            indent: self.indent,
+            anchor: None,
+        }
+    }
+
+    /// Changes the whole text to `text` as one undo step, touching only what
+    /// differs. Returns false if there's nothing to change.
+    pub fn replace_all(&mut self, text: &str) -> bool {
+        let old = self.rope.to_string();
+        let prefix = old
+            .chars()
+            .zip(text.chars())
+            .take_while(|(a, b)| a == b)
+            .count();
+        let (old_n, new_n) = (self.rope.len_chars(), text.chars().count());
+        let limit = old_n.min(new_n) - prefix;
+        let suffix = old
+            .chars()
+            .rev()
+            .zip(text.chars().rev())
+            .take(limit)
+            .take_while(|(a, b)| a == b)
+            .count();
+        if prefix == old_n && prefix == new_n {
+            return false;
+        }
+        let inserted: String = text
+            .chars()
+            .skip(prefix)
+            .take(new_n - prefix - suffix)
+            .collect();
+        let edit = Edit {
+            at: prefix,
+            removed: self.slice_string(prefix..old_n - suffix),
+            inserted,
+        };
+        self.apply(edit, GroupKind::Operator);
+        true
+    }
+
     /// The selected char range, if any.
     pub fn selection(&self) -> Option<Range<usize>> {
         let a = self.anchor?;
@@ -1084,6 +1136,26 @@ mod tests {
         select(&mut y, 4, 2);
         y.delete_forward();
         assert_eq!(y.to_string(), "abef");
+    }
+
+    #[test]
+    fn replace_all_touches_only_what_differs() {
+        let mut x = b("one two three");
+        assert!(x.replace_all("one 2 three"));
+        assert_eq!(x.to_string(), "one 2 three");
+        let e = x.take_pending_edits();
+        assert_eq!(e[0].at, 4);
+        assert_eq!(e[0].removed, "two");
+        assert_eq!(e[0].inserted, "2");
+        assert!(x.undo());
+        assert_eq!(x.to_string(), "one two three");
+        assert!(!x.replace_all("one two three"), "nothing to do");
+        assert!(x.replace_all(""));
+        assert_eq!(x.to_string(), "");
+        assert!(x.replace_all("abab"));
+        let mut y = b("aa");
+        assert!(y.replace_all("aaa"));
+        assert_eq!(y.to_string(), "aaa", "overlap isn't counted twice");
     }
 
     #[test]

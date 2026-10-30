@@ -94,10 +94,15 @@ pub struct Header {
     pub len: usize,
 }
 
-/// Swap file name for `target`: the absolute path with `%` as `%25` and `/` as
-/// `%2F`, plus `.kyteswp`. A name over the file-name limit keeps the end of the
-/// path and adds a hash of the whole path.
+/// Swap file name for `target`.
 pub fn escape_name(target: &Path) -> String {
+    name_for(target, SUFFIX)
+}
+
+/// A state file name for `target`: the absolute path with `%` as `%25` and `/`
+/// as `%2F`, plus `suffix`. A name over the file-name limit keeps the end of
+/// the path and adds a hash of the whole path.
+pub fn name_for(target: &Path, suffix: &str) -> String {
     let s = target.to_string_lossy();
     let mut out = String::with_capacity(s.len() + 16);
     for c in s.chars() {
@@ -107,15 +112,15 @@ pub fn escape_name(target: &Path) -> String {
             c => out.push(c),
         }
     }
-    if out.len() + SUFFIX.len() > NAME_MAX {
+    if out.len() + suffix.len() > NAME_MAX {
         let tag = format!("~{:08x}{:08x}", crc(s.as_bytes()), s.len());
-        let mut cut = out.len() - (NAME_MAX - SUFFIX.len() - tag.len());
+        let mut cut = out.len() - (NAME_MAX - suffix.len() - tag.len());
         while !out.is_char_boundary(cut) {
             cut += 1;
         }
         out = format!("{}{tag}", &out[cut..]);
     }
-    out.push_str(SUFFIX);
+    out.push_str(suffix);
     out
 }
 
@@ -233,7 +238,7 @@ pub fn encode_record(e: &Edit) -> Vec<u8> {
 }
 
 /// Wraps a payload in its length and CRC.
-fn frame(payload: &[u8]) -> Vec<u8> {
+pub(crate) fn frame(payload: &[u8]) -> Vec<u8> {
     let mut rec = Vec::with_capacity(8 + payload.len());
     rec.extend_from_slice(&(payload.len() as u32).to_le_bytes());
     rec.extend_from_slice(&crc(payload).to_le_bytes());
@@ -259,7 +264,7 @@ fn encode_base(base: &Rope) -> Vec<u8> {
 }
 
 /// One framed record starting at `pos`: its payload and the offset after it.
-fn record_at(bytes: &[u8], pos: usize) -> Option<(&[u8], usize)> {
+pub(crate) fn record_at(bytes: &[u8], pos: usize) -> Option<(&[u8], usize)> {
     let len = u32_at(bytes, pos)? as usize;
     let sum = u32_at(bytes, pos + 4)?;
     let payload = bytes.get(pos + 8..pos + 8 + len)?;

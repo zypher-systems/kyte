@@ -8,10 +8,12 @@ use ratatui::layout::Rect as R;
 use ratatui::widgets::{Block, Borders, Clear, Widget};
 
 use crate::app::{
-    After, App, Mode, Prompt, CONFIRM_OPEN_TEXT, CONFIRM_QUIT_TEXT, LEGEND, REPLACE_CONFIRM_TEXT,
+    After, App, Mode, Prompt, CONFIRM_DELETE_HISTORY_TEXT, CONFIRM_OPEN_TEXT, CONFIRM_QUIT_TEXT,
+    HISTORY_KEYS, LEGEND, REPLACE_CONFIRM_TEXT,
 };
 use crate::buffer::Indent;
 use crate::command::{help_max_top, KEY_HELP};
+use crate::history;
 use crate::palette::VISIBLE_ROWS;
 
 /// Status bar: mode, file name, dirty marker, position (one full row).
@@ -31,7 +33,7 @@ pub fn status_bar(app: &App, area: Rect, cells: &mut Cells, theme: &Theme) {
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "Untitled".to_string());
     let dirty = if app.buffer.is_dirty() { " [+]" } else { "" };
-    let (l, c) = app.buffer.line_col();
+    let (l, c) = app.view_buffer().line_col();
     let eol = if app.buffer.eol() == "\r\n" {
         " │ CRLF"
     } else {
@@ -46,13 +48,24 @@ pub fn status_bar(app: &App, area: Rect, cells: &mut Cells, theme: &Theme) {
         Indent::Tabs => String::new(),
         Indent::Spaces(n) => format!(" │ Spaces {n}"),
     };
-    let rest = format!("│ {name}{dirty} │ Ln {l}, Col {c}{sel}{indent}{eol}");
+    let rest = match &app.mode {
+        Mode::History { timeline, at } => format!(
+            "│ {name} │ {} of {} │ {} │ {}",
+            at + 1,
+            timeline.len(),
+            history::ago_from_now(timeline.version(*at).time_ms),
+            timeline.describe(*at),
+        ),
+        _ => format!("│ {name}{dirty} │ Ln {l}, Col {c}{sel}{indent}{eol}"),
+    };
     let x = mode.chars().count();
     if x < w {
         let (end, _) = cells.set_stringn(area.x + x as u16, area.y, rest, w - x, theme.status);
+        let left = (area.x + area.width).saturating_sub(end) as usize;
         if app.recovery_off() {
-            let left = (area.x + area.width).saturating_sub(end) as usize;
             cells.set_stringn(end, area.y, " │ no crash recovery", left, theme.error);
+        } else if app.history_lost() {
+            cells.set_stringn(end, area.y, " │ no history", left, theme.error);
         }
     }
 }
@@ -73,6 +86,8 @@ pub fn message_line(app: &App, area: Rect, cells: &mut Cells, theme: &Theme) -> 
         }
         Mode::Prompt(Prompt::ConfirmSave { risk, .. }) => risk.question().to_string(),
         Mode::Prompt(Prompt::ReplaceConfirm(_)) => REPLACE_CONFIRM_TEXT.to_string(),
+        Mode::Prompt(Prompt::ConfirmDeleteHistory) => CONFIRM_DELETE_HISTORY_TEXT.to_string(),
+        Mode::History { .. } => HISTORY_KEYS.to_string(),
         Mode::Prompt(Prompt::ReplaceFind { query }) => {
             return input_prompt(app, "Replace", query, area, cells, theme)
         }
@@ -130,17 +145,20 @@ fn legend(area: Rect, cells: &mut Cells, theme: &Theme) {
     cells.set_style(area, theme.legend);
     let mut x = area.x + 1;
     let right = area.x + area.width;
-    // The full wording takes about 100 cells; the short one fits in 80, and
-    // the coloured key letters keep the entries apart.
+    // The full wording takes about 100 cells. The short one fits in 80 by
+    // leaving out what Ctrl-Z and Ctrl-Y already do. Coloured key letters keep
+    // the entries apart.
     let full = area.width >= 100;
-    let gap = if full { "  " } else { " " };
     for (key, long, short) in LEGEND {
         let label = if full { long } else { short };
+        if label.is_empty() {
+            continue;
+        }
         for (text, style) in [
             (*key, theme.legend_key),
             (" ", theme.legend),
             (*label, theme.legend),
-            (gap, theme.legend),
+            (" ", theme.legend),
         ] {
             if x >= right {
                 return;

@@ -216,6 +216,22 @@ pub struct DiskState {
 }
 
 impl DiskState {
+    pub fn new(len: u64, crc: u32) -> DiskState {
+        DiskState { len, crc }
+    }
+
+    pub fn len(&self) -> u64 {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub fn crc(&self) -> u32 {
+        self.crc
+    }
+
     pub fn of_bytes(bytes: &[u8]) -> DiskState {
         DiskState {
             len: bytes.len() as u64,
@@ -383,6 +399,16 @@ pub fn state_dir() -> PathBuf {
         std::env::var_os("XDG_STATE_HOME").map(PathBuf::from),
         std::env::var_os("HOME").map(PathBuf::from),
     )
+}
+
+/// History directory: inside `$KYTE_STATE_DIR` if set, else next to `swap`.
+pub fn history_dir() -> PathBuf {
+    let swap = state_dir();
+    if std::env::var_os("KYTE_STATE_DIR").is_some_and(|d| !d.is_empty()) {
+        swap.join("history")
+    } else {
+        swap.with_file_name("history")
+    }
 }
 
 /// Pure form of [`state_dir`] for tests. Empty values count as unset.

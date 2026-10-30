@@ -5,6 +5,7 @@ A terminal text editor written in Rust with Ratatui.
 - **Comfort first.** Kyte always starts in insert mode, like Nano: typing types, arrows move, Ctrl-S saves, Ctrl-Q quits.
 - **Power one key away.** Esc opens a one-key operator layer and shows a legend. Pressing Esc twice opens a command palette.
 - **Crash-safe.** Every edit is written to a swap log before it reaches the screen. After a crash, `kill -9` or a power cut, Kyte offers to recover.
+- **Every edit kept.** Kyte keeps a file's whole history across sessions. Esc `h` steps back through every edit, and any version can be restored.
 
 MIT License. See [LICENSE](LICENSE).
 
@@ -54,6 +55,7 @@ kyte [OPTIONS] [FILE]
 | `-V`, `--version` | Print `kyte 0.2.0` and exit 0 |
 | `--esc-ms N` | Double-tap window for Esc Esc in milliseconds (default 300; env `KYTE_ESC_MS`) |
 | `--no-kitty` | Never enable the kitty keyboard protocol |
+| `--no-history` | Keep no file history this session |
 | `--break-lock` | Open FILE even if another Kyte seems to hold it. Only use this if that Kyte is gone. |
 | `--print-swap FILE` | Print the text recovered from FILE's swap to stdout and exit 0, or exit 3 if no valid swap exists. Works without a terminal. |
 
@@ -104,10 +106,10 @@ Copy and cut also reach the system clipboard, through the terminal's OSC 52 sequ
 Esc never waits. The layer opens at once, the status bar shows `ESC`, and the message line shows the legend:
 
 ```
-w del word  d del line  k del to end  % bracket  / search  u undo  r redo  s save  Esc Esc palette
+w del word d del line k del to end % match / search u undo r redo s save h history Esc Esc palette
 ```
 
-On a terminal narrower than 100 columns the legend uses shorter words, so it still fits in 80: `w word d line k to end ...`.
+On a terminal narrower than 100 columns the legend uses shorter words, and leaves out `u` and `r`, so it still fits in 80: `w word d line k to end ...`.
 
 The next key runs one operator and closes the layer:
 
@@ -120,6 +122,7 @@ The next key runs one operator and closes the layer:
 | `/` | Search |
 | `u`, `r` | Undo, redo |
 | `s` | Save |
+| `h` | Open the file's history |
 | Esc, within 300 ms of the first Esc | Open the command palette |
 | Esc, later | Close the layer |
 | Any other key | Close the layer; the key is discarded, nothing is inserted |
@@ -153,6 +156,23 @@ Ctrl-K opens one box for getting anywhere. Type to search commands and files tog
 | `/text` | Search for `text` |
 
 Files are listed from the directory you started Kyte in, nearest first. Hidden files, `target` and `node_modules` are left out, and the list stops at 20,000 files or 100 ms, so a very large directory shows only part of its tree. Choosing a file works like Ctrl-O, including the question about unsaved changes.
+
+### File history
+
+Kyte keeps every edit to a file, across sessions, including edits you later undo or discard. A version that a save replaced from outside Kyte is kept too. Esc `h` (or **File history** in the palette) opens a read-only view of the file's past, starting at the newest version. What each step added is selected.
+
+| Key | Action |
+| --- | --- |
+| Left, Right | One edit older or newer |
+| Up, Down | One burst of work older or newer (edits stop being a burst after a 3 second gap or a save) |
+| PageUp, PageDown | The previous or next saved version |
+| Home, End | The first or newest version |
+| Enter | Restore this version. It comes back as one undo step, and the file changes only when you save |
+| Esc, `q` | Close, back to your text |
+
+History is stored under `$XDG_STATE_HOME/kyte/history/` (default `~/.local/state/kyte/history/`), one log per file, with mode 0600 in a 0700 directory. It's kept by path, so a renamed file starts a new history; Save as does too. A buffer with no file name has no history until it's saved. Nothing is written until your first edit, so reading a file leaves no trace.
+
+A million typed characters take about 34 MB, and a pasted block adds its own size. **It keeps everything you type, in plain text, with no limit on size.** That includes a password you typed and then deleted. **Delete file history** in the palette removes one file's log, and `--no-history` keeps none for a session. Use `--no-history` for files holding secrets.
 
 ### Search
 
@@ -227,7 +247,7 @@ These Docker files have not been run yet, because the build machine had no Docke
 - Files over 512 KiB aren't syntax highlighted, because each keystroke re-parses the file. Typing near that size takes up to about 55 ms per key.
 - Search takes under about 30 ms per key on a 38 MB ASCII file. On a file that size with non-ASCII text, ignoring case takes about 240 ms per key.
 - A very long single line costs more per keystroke, depending on what's in it. At the end of a 5 MB line on the build machine, plain ASCII takes about 8 ms, a line full of tabs about 45 ms, and CJK text about 170 ms.
-- Not in this version: reader mode, file tree, light and high-contrast themes, undo history that survives a restart, mouse, multiple buffers or splits, LSP, plugins, a config file, soft wrap, CRLF conversion, non-UTF-8 files, RPM/COPR packaging, and use as the default `$EDITOR`.
+- Not in this version: reader mode, file tree, light and high-contrast themes, mouse, multiple buffers or splits, LSP, plugins, a config file, soft wrap, CRLF conversion, non-UTF-8 files, RPM/COPR packaging, and use as the default `$EDITOR`.
 
 ## Documentation
 
