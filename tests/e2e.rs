@@ -1024,7 +1024,7 @@ fn ac16_empty_query_does_nothing() {
 
 // ---------------------------------------------------------------- AC-17
 
-const COMMANDS: [&str; 16] = [
+const COMMANDS: [&str; 17] = [
     "Save",
     "Save as",
     "Open file",
@@ -1040,6 +1040,7 @@ const COMMANDS: [&str; 16] = [
     "Replace",
     "Go to line",
     "Toggle line numbers",
+    "Toggle tabs and spaces",
     "Show key help",
 ];
 
@@ -1072,7 +1073,7 @@ fn ac17_palette_lists_every_command() {
         .collect();
     assert!(first_result(&p).contains("▸ Save"), "{}", p.dump());
     // 8 rows are visible at once; scrolling down reveals the rest
-    for _ in 0..15 {
+    for _ in 0..16 {
         p.send_keys(&["Down"]);
         std::thread::sleep(Duration::from_millis(5));
         for c in COMMANDS {
@@ -1611,6 +1612,50 @@ fn break_lock_opens_a_file_held_by_another_kyte() {
     b.send_str("r");
     b.wait_for("1 │ held base", TIMEOUT);
     b.kill9();
+}
+
+// ---------------------------------------------------------------- indent
+
+#[test]
+fn enter_and_tab_follow_the_file_indent() {
+    let env = Env::new();
+    let f = env.write("i.py", "def a():\n  if b:\n    c\n");
+    let mut p = env.open(&f);
+    wait_status(&p, "Spaces 2");
+    p.send_keys(&["Down", "Down", "End", "Enter"]);
+    wait_status(&p, "Ln 4, Col 5");
+    p.send_str("d");
+    p.send_keys(&["Enter", "Tab"]);
+    wait_status(&p, "Ln 5, Col 7");
+    p.send_str("e");
+    p.send_keys(&["Enter", "Backspace"]);
+    wait_status(&p, "Ln 6, Col 5");
+    save_and_wait(&mut p);
+    quit_clean(&mut p);
+    assert_eq!(
+        fs::read_to_string(&f).unwrap(),
+        "def a():\n  if b:\n    c\n    d\n      e\n    \n"
+    );
+}
+
+#[test]
+fn tab_and_shift_tab_move_selected_lines() {
+    let env = Env::new();
+    let f = env.write("i.txt", "a\nb\nc\n");
+    let mut p = env.open(&f);
+    p.send(SHIFT_DOWN);
+    p.send(SHIFT_DOWN);
+    wait_status(&p, "4 selected");
+    p.send_keys(&["Tab"]);
+    p.wait_for("2 │ ", TIMEOUT);
+    wait_status(&p, "5 selected");
+    save_and_wait(&mut p);
+    assert_eq!(fs::read_to_string(&f).unwrap(), "\ta\n\tb\nc\n");
+    p.send(b"\x1b[Z");
+    wait_status(&p, "4 selected");
+    save_and_wait(&mut p);
+    quit_clean(&mut p);
+    assert_eq!(fs::read_to_string(&f).unwrap(), "a\nb\nc\n");
 }
 
 // ---------------------------------------------------------------- opening files

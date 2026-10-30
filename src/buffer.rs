@@ -154,6 +154,48 @@ fn measure(text: &str, off: usize) -> (usize, usize) {
     }
 }
 
+/// What one level of indent is in a file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Indent {
+    Tabs,
+    Spaces(usize),
+}
+
+/// How many lines to read when working out a file's indent.
+const INDENT_SAMPLE_LINES: usize = 10_000;
+
+/// The indent `text` uses, by counting its indented lines. A file with none
+/// uses tabs. Steps of one space are usually comment alignment, so they don't
+/// count towards the width.
+fn detect_indent(text: &str) -> Indent {
+    let (mut tabs, mut spaces, mut previous) = (0usize, 0usize, 0usize);
+    let mut steps = [0usize; 9];
+    for line in text.lines().take(INDENT_SAMPLE_LINES) {
+        if line.starts_with('\t') {
+            tabs += 1;
+            continue;
+        }
+        let width = line.bytes().take_while(|b| *b == b' ').count();
+        if width == line.len() {
+            continue; // blank lines say nothing
+        }
+        if width > 0 {
+            spaces += 1;
+        }
+        let step = width.abs_diff(previous);
+        if (2..=8).contains(&step) {
+            steps[step] += 1;
+        }
+        previous = width;
+    }
+    if tabs >= spaces {
+        return Indent::Tabs;
+    }
+    // Ties go to the smaller step, which a mix of depths also implies.
+    let width = (2..=8).rev().max_by_key(|n| steps[*n]).unwrap_or(4);
+    Indent::Spaces(if steps[width] == 0 { 4 } else { width })
+}
+
 /// One open UTF-8 document.
 pub struct Buffer {
     rope: Rope,
@@ -166,6 +208,7 @@ pub struct Buffer {
     pending_edits: Vec<Edit>,
     /// What Enter inserts: the line ending most of the file uses.
     eol: &'static str,
+    indent: Indent,
     /// The other end of the selection. Every motion and edit clears it, so
     /// only code that means to extend a selection has to think about it.
     anchor: Option<usize>,
@@ -195,6 +238,7 @@ impl Buffer {
             redo: Vec::new(),
             pending_edits: Vec::new(),
             eol: dominant_eol(text),
+            indent: detect_indent(text),
             anchor: None,
         }
     }
@@ -245,9 +289,157 @@ impl Buffer {
         self.eol
     }
 
-    /// Enter: inserts the file's line ending.
+    /// One level of indent in this file.
+    pub fn indent(&self) -> Indent {
+        self.indent
+    }
+
+    pub fn set_indent(&mut self, indent: Indent) {
+        self.indent = indent;
+    }
+
+    /// Enter: inserts the file's line ending and carries the indent over. On
+    /// a line that's only indent, that indent moves down, so nothing is left
+    /// behind as trailing whitespace.
     pub fn insert_newline(&mut self) {
-        self.insert_str(self.eol, GroupKind::Typing);
+        let at = self.selection().map_or(self.cursor, |r| r.start);
+        let line = self.rope.char_to_line(at);
+        let start = self.line_start(line);
+        let off = at - start;
+        let text = self.line_text(line);
+        let indent: String = text
+            .chars()
+            .take(off)
+            .take_while(|c| *c == ' ' || *c == '\t')
+            .collect();
+        let blank = off > 0 && indent.chars().count() == off && off == text.chars().count();
+        let inserted = format!("{}{indent}", self.eol);
+        if blank && self.selection().is_none() {
+            let edit = Edit {
+                at: start,
+                removed: indent,
+                inserted,
+            };
+            self.apply(edit, GroupKind::Typing);
+        } else {
+            self.insert_str(&inserted, GroupKind::Typing);
+        }
+    }
+
+    /// Tab: indents the selected lines, or adds one level at the cursor. A
+    /// selection on one line is replaced, like any typing.
+    pub fn insert_tab(&mut self) {
+        let across_lines = self
+            .selection()
+            .is_some_and(|r| self.rope.char_to_line(r.start) != self.rope.char_to_line(r.end));
+        if across_lines {
+            self.shift_lines(false);
+            return;
+        }
+        let text = match self.indent {
+            Indent::Tabs => "\t".to_string(),
+            Indent::Spaces(n) => {
+                let at = self.selection().map_or(self.cursor, |r| r.start);
+                let line = self.rope.char_to_line(at);
+                let col = self.display_col(line, at - self.line_start(line));
+                " ".repeat(n - col % n)
+            }
+        };
+        self.insert_str(&text, GroupKind::Typing);
+    }
+
+    /// The lines a line-wise action touches: the selection's, or the cursor's.
+    /// A selection ending at the very start of a line doesn't include it.
+    fn touched_lines(&self) -> std::ops::RangeInclusive<usize> {
+        match self.selection() {
+            Some(r) => {
+                let first = self.rope.char_to_line(r.start);
+                let mut last = self.rope.char_to_line(r.end);
+                if last > first && self.line_start(last) == r.end {
+                    last -= 1;
+                }
+                first..=last
+            }
+            None => {
+                let l = self.cursor_line();
+                l..=l
+            }
+        }
+    }
+
+    /// How much indent to take off line `l`: one level at most.
+    fn outdent_len(&self, l: usize) -> usize {
+        let text = self.rope.line(l);
+        match text.get_char(0) {
+            Some('\t') => 1,
+            Some(' ') => {
+                let n = match self.indent {
+                    Indent::Spaces(n) => n,
+                    Indent::Tabs => crate::buffer::TAB_WIDTH,
+                };
+                text.chars().take(n).take_while(|c| *c == ' ').count()
+            }
+            _ => 0,
+        }
+    }
+
+    /// Adds or removes one level of indent on the touched lines, as one undo
+    /// step, keeping the cursor and the selection on the same text. Blank
+    /// lines stay blank.
+    pub fn shift_lines(&mut self, outdent: bool) {
+        let unit = match self.indent {
+            Indent::Tabs => "\t".to_string(),
+            Indent::Spaces(n) => " ".repeat(n),
+        };
+        let unit_len = unit.chars().count();
+        // (line start, chars added or removed), first line first
+        let mut changes: Vec<(usize, usize)> = Vec::new();
+        let mut edits = Vec::new();
+        for l in self.touched_lines() {
+            let start = self.line_start(l);
+            let n = if outdent {
+                self.outdent_len(l)
+            } else if self.line_text(l).is_empty() {
+                0
+            } else {
+                unit_len
+            };
+            if n == 0 {
+                continue;
+            }
+            changes.push((start, n));
+            edits.push(if outdent {
+                Edit {
+                    at: start,
+                    removed: self.slice_string(start..start + n),
+                    inserted: String::new(),
+                }
+            } else {
+                Edit::insert(start, &unit)
+            });
+        }
+        if edits.is_empty() {
+            return;
+        }
+        let moved = |pos: usize| {
+            let mut out = pos;
+            for &(start, n) in &changes {
+                if start > pos {
+                    break;
+                }
+                if outdent {
+                    out -= n.min(pos - start);
+                } else {
+                    out += n;
+                }
+            }
+            out
+        };
+        let (cursor, anchor) = (moved(self.cursor), self.anchor.map(moved));
+        // Last line first, so earlier positions stay right.
+        edits.reverse();
+        self.apply_group(edits, cursor);
+        self.anchor = anchor.filter(|a| *a != self.cursor);
     }
 
     #[allow(clippy::inherent_to_string)]
@@ -473,7 +665,7 @@ impl Buffer {
         if self.delete_selection() || self.cursor == 0 {
             return;
         }
-        let prev = self.prev_boundary(self.cursor);
+        let prev = self.backspace_target();
         let removed = self.slice_string(prev..self.cursor);
         self.apply(
             Edit {
@@ -483,6 +675,23 @@ impl Buffer {
             },
             GroupKind::Other,
         );
+    }
+
+    /// Where Backspace deletes back to: the previous grapheme, or the previous
+    /// indent stop inside a file's space indent.
+    fn backspace_target(&self) -> usize {
+        let plain = self.prev_boundary(self.cursor);
+        let Indent::Spaces(n) = self.indent else {
+            return plain;
+        };
+        let line = self.cursor_line();
+        let start = self.line_start(line);
+        let off = self.cursor - start;
+        if off == 0 || !self.rope.line(line).chars().take(off).all(|c| c == ' ') {
+            return plain;
+        }
+        let step = if off.is_multiple_of(n) { n } else { off % n };
+        self.cursor - step
     }
 
     /// Deletes the next grapheme (joins with the next line at a line end).
@@ -901,6 +1110,151 @@ mod tests {
         assert_eq!(x.to_string(), "a-b-c");
         assert!(x.redo());
         assert_eq!(x.to_string(), "a++b++c");
+    }
+
+    #[test]
+    fn indent_is_read_from_the_file() {
+        assert_eq!(b("").indent(), Indent::Tabs);
+        assert_eq!(b("no indent\nat all\n").indent(), Indent::Tabs);
+        assert_eq!(b("a\n\tb\n\tc\n").indent(), Indent::Tabs);
+        assert_eq!(b("a\n  b\n    c\n  d\n").indent(), Indent::Spaces(2));
+        assert_eq!(b("a\n    b\n        c\n").indent(), Indent::Spaces(4));
+        assert_eq!(b("a\n   b\n      c\n   d\n").indent(), Indent::Spaces(3));
+        assert_eq!(b("/*\n * comment\n */\n").indent(), Indent::Spaces(4));
+        assert_eq!(
+            b("\ta\n\tb\n  c\n").indent(),
+            Indent::Tabs,
+            "the majority wins"
+        );
+    }
+
+    #[test]
+    fn enter_carries_the_indent_over() {
+        let mut x = b("    foo\n");
+        x.move_end();
+        x.insert_newline();
+        typed(&mut x, "bar");
+        assert_eq!(x.to_string(), "    foo\n    bar\n");
+        let mut t = b("\t\tfoo");
+        t.move_end();
+        t.insert_newline();
+        assert_eq!(t.to_string(), "\t\tfoo\n\t\t");
+    }
+
+    #[test]
+    fn enter_inside_the_indent_only_keeps_what_is_before_the_cursor() {
+        let mut x = b("    foo");
+        x.move_to(2);
+        x.insert_newline();
+        assert_eq!(x.to_string(), "  \n    foo");
+    }
+
+    #[test]
+    fn enter_on_a_line_of_only_indent_leaves_no_trailing_whitespace() {
+        let mut x = b("    foo\n");
+        x.move_end();
+        x.insert_newline();
+        x.insert_newline();
+        assert_eq!(x.to_string(), "    foo\n\n    \n");
+        assert!(x.undo());
+        assert_eq!(x.to_string(), "    foo\n    \n");
+    }
+
+    #[test]
+    fn enter_uses_the_file_line_ending_with_the_indent() {
+        let mut x = b("  a\r\n  b\r\n");
+        x.move_end();
+        x.insert_newline();
+        assert_eq!(x.to_string(), "  a\r\n  \r\n  b\r\n");
+    }
+
+    #[test]
+    fn enter_over_a_selection_replaces_it_and_keeps_the_indent() {
+        let mut x = b("  abc");
+        select(&mut x, 3, 5);
+        x.insert_newline();
+        assert_eq!(x.to_string(), "  a\n  ");
+    }
+
+    #[test]
+    fn tab_goes_to_the_next_stop_in_a_spaces_file() {
+        let mut x = b("a\n  b\n    c\n");
+        assert_eq!(x.indent(), Indent::Spaces(2));
+        x.insert_tab();
+        assert_eq!(x.to_string(), "  a\n  b\n    c\n");
+        x.move_right();
+        x.insert_tab();
+        assert_eq!(x.to_string(), "  a \n  b\n    c\n", "col 3 goes to col 4");
+        let mut t = b("");
+        t.insert_tab();
+        assert_eq!(t.to_string(), "\t");
+    }
+
+    #[test]
+    fn tab_on_a_selection_within_a_line_replaces_it() {
+        let mut x = b("abc");
+        select(&mut x, 0, 2);
+        x.insert_tab();
+        assert_eq!(x.to_string(), "\tc");
+    }
+
+    #[test]
+    fn tab_indents_selected_lines_as_one_undo_step() {
+        let mut x = b("a\n\nb\nc\n");
+        select(&mut x, 0, 5);
+        x.insert_tab();
+        assert_eq!(x.to_string(), "\ta\n\n\tb\nc\n", "blank lines stay blank");
+        assert_eq!(x.selection(), Some(1..7), "the selection follows the text");
+        assert!(x.undo());
+        assert_eq!(x.to_string(), "a\n\nb\nc\n");
+    }
+
+    #[test]
+    fn a_selection_ending_at_a_line_start_leaves_that_line_alone() {
+        let mut x = b("a\nb\nc\n");
+        select(&mut x, 0, 4);
+        x.insert_tab();
+        assert_eq!(x.to_string(), "\ta\n\tb\nc\n");
+    }
+
+    #[test]
+    fn outdent_removes_one_level_and_keeps_the_cursor_on_its_text() {
+        let mut x = b("    a\n  b\nc\n\td\n");
+        assert_eq!(x.indent(), Indent::Spaces(2));
+        x.move_to(4);
+        x.shift_lines(true);
+        assert_eq!(x.to_string(), "  a\n  b\nc\n\td\n");
+        assert_eq!(x.cursor(), 2);
+        x.select_all();
+        x.shift_lines(true);
+        assert_eq!(x.to_string(), "a\nb\nc\nd\n");
+        assert_eq!(x.selection(), Some(0..8));
+        assert!(x.undo());
+        assert_eq!(x.to_string(), "  a\n  b\nc\n\td\n");
+    }
+
+    #[test]
+    fn outdent_with_nothing_to_remove_changes_nothing() {
+        let mut x = b("abc");
+        x.shift_lines(true);
+        assert!(!x.is_dirty());
+    }
+
+    #[test]
+    fn backspace_steps_through_a_space_indent() {
+        let mut x = b("a\n    b\n");
+        x.move_to(6);
+        assert_eq!(x.indent(), Indent::Spaces(4));
+        x.backspace();
+        assert_eq!(x.to_string(), "a\nb\n", "a whole level");
+        let mut y = b("a\n    b\n");
+        y.move_to(5);
+        y.backspace();
+        assert_eq!(y.to_string(), "a\n b\n", "to the stop");
+        let mut z = b("a\n    b c\n");
+        z.move_to(8);
+        z.backspace();
+        assert_eq!(z.to_string(), "a\n    bc\n", "past the indent, one char");
     }
 
     #[test]

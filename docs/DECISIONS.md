@@ -12,6 +12,14 @@ These replace the matching parts of `ARCHITECTURE`. `docs/ROADMAP.md` holds the 
 - License: MIT. This settles section 16 and the section 4 note.
 - Kyte isn't tied to any one OS. It's meant to be open source for everyone.
 
+## 0.2.0 indent
+
+- Tab replaces the "Tab inserts a real tab" rule of the MVP where the file uses spaces. The indent is read from the file, using the first 10,000 lines: the majority of indented lines picks tabs or spaces, and the most common step between neighbouring lines picks the width. Steps of one space are skipped, because they're usually comment alignment. With no signal, spaces default to 4. A file with no indent at all uses tabs, as before.
+- Tab stops on screen stay at 4 columns for real tabs. Config is on the later list.
+- Enter copies the indent before the cursor. On a line that's only indent, the indent moves down with the cursor, so Enter leaves no trailing whitespace.
+- Backspace inside a space indent goes back to the previous stop. Past the indent it deletes one grapheme.
+- Tab with a selection across lines indents those lines as one undo step and skips blank ones; within one line it replaces the selection, like any typing. A selection ending at the very start of a line leaves that line alone.
+
 ## 0.2.0 opening files
 
 - Ctrl-O opens a file, so it no longer saves. Kyte holds one buffer at a time; opening a file replaces it, and multiple buffers stay on the later list. The clipboard survives the switch, which makes it the way to move text between files.

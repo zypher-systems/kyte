@@ -73,8 +73,11 @@ Environment variables: `KYTE_STATE_DIR` (where swap files go; overrides the defa
 
 | Key | Action |
 | --- | --- |
-| Printable characters, Enter, Tab | Insert at the cursor (Tab inserts a real tab) |
-| Backspace, Delete | Delete the previous or next character (joins lines at line edges) |
+| Printable characters | Insert at the cursor |
+| Enter | Start a new line with the same indent |
+| Tab | Indent: one tab, or spaces to the next stop, depending on the file. With several lines selected, indent them |
+| Shift-Tab | Outdent the current or selected lines |
+| Backspace, Delete | Delete the previous or next character (joins lines at line edges). In a file indented with spaces, Backspace in the indent goes back one stop |
 | Arrows, Home, End, PageUp, PageDown, Ctrl-Home, Ctrl-End | Move |
 | Ctrl-Left, Ctrl-Right (also Alt) | Move by word |
 | Ctrl-Backspace, Ctrl-Delete (also Alt) | Delete the word before or after the cursor |
@@ -126,7 +129,9 @@ Under tmux, set `tmux set -g escape-time 10`. tmux's default of 500 ms delays ev
 
 Esc Esc (or Ctrl-P) opens a fuzzy-filtered list. Type to filter, Up and Down to select, Enter to run, Esc to close without running anything.
 
-Commands: Save, Save as, Open file, Quit, Quit without saving, Undo, Redo, Cut, Copy, Paste, Select all, Find, Replace, Go to line, Toggle line numbers, Show key help.
+Commands: Save, Save as, Open file, Quit, Quit without saving, Undo, Redo, Cut, Copy, Paste, Select all, Find, Replace, Go to line, Toggle line numbers, Toggle tabs and spaces, Show key help.
+
+Kyte works out whether a file indents with tabs or spaces, and how many, from its first 10,000 lines. A file with no indent uses tabs. The status bar shows `Spaces N` for space-indented files. **Toggle tabs and spaces** changes what new indent uses until the file is closed; it doesn't rewrite existing lines.
 
 **Save as** asks for a file name, starting from the current one; `~/` means your home directory, and Tab completes the path. It asks before overwriting a file, and refuses a file another Kyte has open. The buffer then belongs to the new file, and the old file stays as it was.
 

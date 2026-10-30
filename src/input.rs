@@ -26,6 +26,8 @@ pub enum Key {
     Char(char),
     Enter,
     Tab,
+    /// Shift-Tab.
+    BackTab,
     Backspace,
     Delete,
     Esc,
@@ -118,6 +120,7 @@ fn map_key(k: KeyEvent) -> Option<Key> {
         KeyCode::Char(c) => Key::Char(c),
         KeyCode::Enter => Key::Enter,
         KeyCode::Tab => Key::Tab,
+        KeyCode::BackTab => Key::BackTab,
         KeyCode::Backspace if ctrl || alt => Key::WordBackspace,
         KeyCode::Delete if ctrl || alt => Key::WordDelete,
         KeyCode::Backspace => Key::Backspace,

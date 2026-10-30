@@ -10,6 +10,7 @@ use ratatui::widgets::{Block, Borders, Clear, Widget};
 use crate::app::{
     After, App, Mode, Prompt, CONFIRM_OPEN_TEXT, CONFIRM_QUIT_TEXT, LEGEND, REPLACE_CONFIRM_TEXT,
 };
+use crate::buffer::Indent;
 use crate::command::KEY_HELP;
 use crate::palette::VISIBLE_ROWS;
 
@@ -41,7 +42,11 @@ pub fn status_bar(app: &App, area: Rect, cells: &mut Cells, theme: &Theme) {
         .selection()
         .map(|r| format!(" │ {} selected", r.len()))
         .unwrap_or_default();
-    let rest = format!("│ {name}{dirty} │ Ln {l}, Col {c}{sel}{eol}");
+    let indent = match app.buffer.indent() {
+        Indent::Tabs => String::new(),
+        Indent::Spaces(n) => format!(" │ Spaces {n}"),
+    };
+    let rest = format!("│ {name}{dirty} │ Ln {l}, Col {c}{sel}{indent}{eol}");
     let x = mode.chars().count();
     if x < w {
         let (end, _) = cells.set_stringn(area.x + x as u16, area.y, rest, w - x, theme.status);

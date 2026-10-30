@@ -18,6 +18,7 @@ pub enum Command {
     Replace,
     GotoLine,
     ToggleLineNumbers,
+    ToggleIndent,
     ShowKeyHelp,
 }
 
@@ -38,6 +39,7 @@ pub const REGISTRY: &[Command] = &[
     Command::Replace,
     Command::GotoLine,
     Command::ToggleLineNumbers,
+    Command::ToggleIndent,
     Command::ShowKeyHelp,
 ];
 
@@ -59,6 +61,7 @@ impl Command {
             Command::Replace => "Replace",
             Command::GotoLine => "Go to line",
             Command::ToggleLineNumbers => "Toggle line numbers",
+            Command::ToggleIndent => "Toggle tabs and spaces",
             Command::ShowKeyHelp => "Show key help",
         }
     }
@@ -81,6 +84,7 @@ impl Command {
             Command::Replace => "Ctrl-R",
             Command::GotoLine => "",
             Command::ToggleLineNumbers => "",
+            Command::ToggleIndent => "",
             Command::ShowKeyHelp => "",
         }
     }
@@ -98,7 +102,8 @@ pub fn parse_line_number(text: &str) -> Result<usize, String> {
 
 /// The key table shown by "Show key help".
 pub const KEY_HELP: &[(&str, &str)] = &[
-    ("Typing, Enter, Tab", "insert at the cursor"),
+    ("Typing, Enter", "insert at the cursor, keep indent"),
+    ("Tab, Shift-Tab", "indent, outdent"),
     ("Backspace, Delete", "delete previous / next character"),
     ("Arrows, Home, End", "move"),
     ("Ctrl-Left, Ctrl-Right", "move by word"),
@@ -125,7 +130,7 @@ mod tests {
 
     #[test]
     fn every_command_has_a_label() {
-        assert_eq!(REGISTRY.len(), 16);
+        assert_eq!(REGISTRY.len(), 17);
         let labels: Vec<&str> = REGISTRY.iter().map(|c| c.label()).collect();
         assert_eq!(
             labels,
@@ -145,6 +150,7 @@ mod tests {
                 "Replace",
                 "Go to line",
                 "Toggle line numbers",
+                "Toggle tabs and spaces",
                 "Show key help"
             ]
         );

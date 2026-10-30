@@ -41,7 +41,7 @@ Fixed every known way the build could lose or damage work. Each fix has a regres
 - [x] Selection, cut, copy and paste, including the system clipboard over OSC 52
 - [x] Find and replace; case-insensitive search; visible match highlighting
 - [x] Word motion and word delete
-- [ ] Auto-indent, and tabs or spaces per file
+- [x] Auto-indent, and tabs or spaces per file
 - [ ] Ctrl-K universal palette
 - [x] Replace the Nano-derived aliases: Ctrl-X, Ctrl-C and Ctrl-V for cut, copy and paste, and Ctrl-O to open a file.
 

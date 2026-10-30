@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 
-use crate::buffer::{Buffer, Edit, GroupKind};
+use crate::buffer::{Buffer, Edit, GroupKind, Indent};
 use crate::cli::Options;
 use crate::command::{self, Command};
 use crate::fileio::{self, DiskState};
@@ -456,7 +456,8 @@ impl App {
             Key::Ctrl('r') => self.open_replace(),
             Key::Char(c) => b.insert_str(&c.to_string(), GroupKind::Typing),
             Key::Enter => b.insert_newline(),
-            Key::Tab => b.insert_str("\t", GroupKind::Typing),
+            Key::Tab => b.insert_tab(),
+            Key::BackTab => b.shift_lines(true),
             Key::Backspace => b.backspace(),
             Key::Delete => b.delete_forward(),
             Key::Left => self.motion(Motion::Left),
@@ -889,6 +890,7 @@ impl App {
                 })
             }
             Command::ToggleLineNumbers => self.show_line_numbers = !self.show_line_numbers,
+            Command::ToggleIndent => self.toggle_indent(),
             Command::ShowKeyHelp => self.mode = Mode::Help,
         }
     }
@@ -1198,6 +1200,19 @@ impl App {
         }
     }
 
+    /// Switches this file between tabs and spaces for new indent.
+    fn toggle_indent(&mut self) {
+        let next = match self.buffer.indent() {
+            Indent::Tabs => Indent::Spaces(4),
+            Indent::Spaces(_) => Indent::Tabs,
+        };
+        self.buffer.set_indent(next);
+        self.set_message(match next {
+            Indent::Tabs => "Indenting with tabs".to_string(),
+            Indent::Spaces(n) => format!("Indenting with {n} spaces"),
+        });
+    }
+
     /// Does what a save, or a decision to discard, was for.
     fn after_save(&mut self, then: After) {
         match then {
@@ -1429,6 +1444,22 @@ mod tests {
                 text: "1".to_string()
             })
         );
+    }
+
+    #[test]
+    fn indent_keys_and_the_toggle() {
+        let t = Instant::now();
+        let mut a = app("x\n");
+        a.handle_key(Key::Tab, t).unwrap();
+        assert_eq!(a.buffer.to_string(), "\tx\n");
+        a.handle_key(Key::BackTab, t).unwrap();
+        assert_eq!(a.buffer.to_string(), "x\n");
+        a.run_command(Command::ToggleIndent);
+        assert_eq!(a.message.as_deref(), Some("Indenting with 4 spaces"));
+        a.handle_key(Key::Tab, t).unwrap();
+        assert_eq!(a.buffer.to_string(), "    x\n");
+        a.run_command(Command::ToggleIndent);
+        assert_eq!(a.message.as_deref(), Some("Indenting with tabs"));
     }
 
     #[test]
