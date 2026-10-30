@@ -232,6 +232,12 @@ pub struct App {
     last_fsync: Option<Instant>,
     scroll_top: usize,
     scroll_left: usize,
+    /// With soft wrap, which row of the top line is at the top of the screen.
+    scroll_row: usize,
+    /// Long lines wrap at the edge of the screen.
+    pub soft_wrap: bool,
+    /// The column Up and Down hold to while moving by wrapped rows.
+    visual_col: Option<usize>,
     view: (u16, u16),
 }
 
@@ -292,6 +298,9 @@ impl App {
             quit: false,
             scroll_top: 0,
             scroll_left: 0,
+            scroll_row: 0,
+            soft_wrap: opts.soft_wrap,
+            visual_col: None,
             view: (0, 0),
         }
     }
@@ -336,6 +345,93 @@ impl App {
         self.history_failed
     }
 
+    /// The row of the top line at the top of the screen, with soft wrap.
+    pub fn scroll_row(&self) -> usize {
+        self.scroll_row
+    }
+
+    /// Columns of text beside the gutter.
+    fn text_width(&self) -> usize {
+        let buf = self.view_buffer();
+        let gw = crate::ui::text_view::gutter_width(buf.line_count(), self.show_line_numbers);
+        (self.view.0 as usize).saturating_sub(gw).max(1)
+    }
+
+    /// Scrolls so the cursor's row shows, counting wrapped rows upward from it.
+    fn layout_wrapped(&mut self, height: usize, width: usize) {
+        let buf = self.view_buffer();
+        let rows_of = |l: usize| crate::wrap::segments(&buf.line_text(l), width);
+        let line = buf.cursor_line();
+        let row = crate::wrap::row_of(&rows_of(line), buf.cursor() - buf.line_start(line));
+        let (mut l, mut r) = (line, row);
+        let mut above = height - 1;
+        while above > 0 {
+            if r >= above {
+                r -= above;
+                break;
+            }
+            above -= r + 1;
+            if l == 0 {
+                r = 0;
+                break;
+            }
+            l -= 1;
+            r = rows_of(l).len() - 1;
+        }
+        let top_rows = rows_of(self.scroll_top.min(line)).len();
+        let mut at = (self.scroll_top, self.scroll_row.min(top_rows - 1));
+        if (line, row) < at {
+            at = (line, row);
+        } else if at < (l, r) {
+            at = (l, r);
+        }
+        (self.scroll_top, self.scroll_row) = at;
+        self.scroll_left = 0;
+    }
+
+    /// One wrapped row up or down, holding the column.
+    fn visual_step(&mut self, down: bool) {
+        let width = self.text_width();
+        let b = &self.buffer;
+        let line = b.cursor_line();
+        let text = b.line_text(line);
+        let segments = crate::wrap::segments(&text, width);
+        let off = b.cursor() - b.line_start(line);
+        let row = crate::wrap::row_of(&segments, off);
+        let here = &segments[row];
+        let col = self.visual_col.unwrap_or_else(|| {
+            crate::buffer::measure(&text[here.bytes.clone()], off - here.chars.start).0
+        });
+        let (target_line, target_row) = if down {
+            if row + 1 < segments.len() {
+                (line, row + 1)
+            } else if line + 1 < b.line_count() {
+                (line + 1, 0)
+            } else {
+                return;
+            }
+        } else if row > 0 {
+            (line, row - 1)
+        } else if line > 0 {
+            let above = crate::wrap::segments(&b.line_text(line - 1), width);
+            (line - 1, above.len() - 1)
+        } else {
+            return;
+        };
+        let text = b.line_text(target_line);
+        let segments = crate::wrap::segments(&text, width);
+        let seg = &segments[target_row];
+        let piece = &text[seg.bytes.clone()];
+        let mut at = crate::wrap::offset_at_col(piece, col);
+        // A row's end is the start of the next one.
+        if at == seg.chars.len() && target_row + 1 < segments.len() {
+            at = at.saturating_sub(1);
+        }
+        let target = b.line_start(target_line) + seg.chars.start + at;
+        self.buffer.move_to(target);
+        self.visual_col = Some(col);
+    }
+
     /// (top line, left display column) of the text view.
     pub fn scroll(&self) -> (usize, usize) {
         (self.scroll_top, self.scroll_left)
@@ -354,6 +450,11 @@ impl App {
     pub fn layout(&mut self, width: u16, height: u16) {
         self.view = (width, height);
         let h = (height as usize).saturating_sub(2).max(1);
+        if self.soft_wrap {
+            let w = self.text_width();
+            self.layout_wrapped(h, w);
+            return;
+        }
         let buf = self.view_buffer();
         let gw = crate::ui::text_view::gutter_width(buf.line_count(), self.show_line_numbers);
         let w = (width as usize).saturating_sub(gw).max(1);
@@ -482,6 +583,17 @@ impl App {
         self.message = None;
         self.message_is_error = false;
         self.completions.clear();
+        let vertical = matches!(
+            key,
+            Key::Up
+                | Key::Down
+                | Key::PageUp
+                | Key::PageDown
+                | Key::Select(Motion::Up | Motion::Down | Motion::PageUp | Motion::PageDown)
+        );
+        if !vertical {
+            self.visual_col = None;
+        }
         let mode = self.mode.clone();
         match mode {
             Mode::Insert => self.insert_key(key, now),
@@ -670,6 +782,17 @@ impl App {
         match m {
             Motion::Left => b.move_left(),
             Motion::Right => b.move_right(),
+            Motion::Up | Motion::Down | Motion::PageUp | Motion::PageDown if self.soft_wrap => {
+                let steps = if matches!(m, Motion::Up | Motion::Down) {
+                    1
+                } else {
+                    page as usize
+                };
+                let down = matches!(m, Motion::Down | Motion::PageDown);
+                for _ in 0..steps {
+                    self.visual_step(down);
+                }
+            }
             Motion::Up => b.move_up(),
             Motion::Down => b.move_down(),
             Motion::Home => b.move_home(),
@@ -1259,6 +1382,11 @@ impl App {
             }
             Command::ToggleLineNumbers => self.show_line_numbers = !self.show_line_numbers,
             Command::ToggleIndent => self.toggle_indent(),
+            Command::ToggleWrap => {
+                self.soft_wrap = !self.soft_wrap;
+                self.scroll_row = 0;
+                self.scroll_left = 0;
+            }
             Command::History => self.open_history(),
             Command::Reader => self.open_reader(),
             Command::Settings => self.open_settings(),
@@ -1577,6 +1705,7 @@ impl App {
         self.start_history();
         self.scroll_top = 0;
         self.scroll_left = 0;
+        self.scroll_row = 0;
         self.mode = recover.map_or(Mode::Insert, Mode::Recover);
         if let Some(w) = warning {
             self.set_error(w);
@@ -1618,6 +1747,7 @@ impl App {
         let bottom = self.scroll_top + self.text_height();
         if lines.start < self.scroll_top || lines.end > bottom {
             self.scroll_top = lines.start.saturating_sub(READER_LINES_ABOVE);
+            self.scroll_row = 0;
         }
     }
 
@@ -2994,6 +3124,79 @@ mod tests {
         assert!(!rows.contains(&"f") && !rows.contains(&"n"), "{rows:?}");
         let go = code_app("/x/a.go", "func f() {}\n");
         assert!(go.layer_rows().contains(&("f", "select function")));
+    }
+
+    fn wrapped(text: &str) -> App {
+        let opts = Options {
+            soft_wrap: true,
+            line_numbers: false,
+            ..Options::default()
+        };
+        let mut a = App::new(Buffer::from_str(text, None), None, &opts);
+        a.layout(10, 7);
+        a
+    }
+
+    #[test]
+    fn up_and_down_move_by_wrapped_row_and_hold_the_column() {
+        let t = Instant::now();
+        let mut a = wrapped(&format!("{}\nshort\n", "a".repeat(25)));
+        a.buffer.move_to(3);
+        a.handle_key(Key::Down, t).unwrap();
+        assert_eq!(a.buffer.cursor(), 13, "same line, one row down");
+        a.handle_key(Key::Down, t).unwrap();
+        assert_eq!(a.buffer.cursor(), 23);
+        a.handle_key(Key::Down, t).unwrap();
+        assert_eq!(a.buffer.line_col(), (2, 4), "onto the next line");
+        a.handle_key(Key::Up, t).unwrap();
+        assert_eq!(a.buffer.cursor(), 23);
+        a.handle_key(Key::Up, t).unwrap();
+        a.handle_key(Key::Up, t).unwrap();
+        assert_eq!(a.buffer.cursor(), 3);
+        a.handle_key(Key::Up, t).unwrap();
+        assert_eq!(a.buffer.cursor(), 3, "the top stays put");
+    }
+
+    #[test]
+    fn the_column_survives_a_short_row() {
+        let t = Instant::now();
+        let mut a = wrapped("abcdefgh\nxy\nabcdefgh\n");
+        a.buffer.move_to(6);
+        a.handle_key(Key::Down, t).unwrap();
+        assert_eq!(a.buffer.line_col(), (2, 3));
+        a.handle_key(Key::Down, t).unwrap();
+        assert_eq!(a.buffer.line_col(), (3, 7));
+    }
+
+    #[test]
+    fn scrolling_can_stop_inside_a_long_line() {
+        let t = Instant::now();
+        let mut a = wrapped(&"a".repeat(200));
+        a.handle_key(Key::CtrlEnd, t).unwrap();
+        a.layout(10, 7);
+        assert_eq!(a.scroll().0, 0);
+        assert!(a.scroll_row() > 0, "{}", a.scroll_row());
+        a.handle_key(Key::CtrlHome, t).unwrap();
+        a.layout(10, 7);
+        assert_eq!(a.scroll_row(), 0);
+    }
+
+    #[test]
+    fn selection_extends_by_wrapped_rows() {
+        let t = Instant::now();
+        let mut a = wrapped(&"a".repeat(25));
+        a.handle_key(Key::Select(Motion::Down), t).unwrap();
+        assert_eq!(a.buffer.selection(), Some(0..10));
+    }
+
+    #[test]
+    fn toggling_wrap_resets_the_view() {
+        let mut a = wrapped(&"a".repeat(200));
+        a.run_command(Command::ToggleWrap);
+        assert!(!a.soft_wrap);
+        a.run_command(Command::ToggleWrap);
+        assert!(a.soft_wrap);
+        assert_eq!(a.scroll_row(), 0);
     }
 
     #[test]

@@ -12,6 +12,16 @@ These replace the matching parts of `ARCHITECTURE`. `docs/ROADMAP.md` holds the 
 - License: MIT. This settles section 16 and the section 4 note.
 - Kyte isn't tied to any one OS. It's meant to be open source for everyone.
 
+## Soft wrap
+
+- `wrap.rs` is the only code that decides where rows break. Nothing is stored: rows are worked out from the text and the width each time, so edits and resizes can't leave them stale.
+- Lines break after a space or tab where they can, otherwise at the last grapheme that fits. A grapheme wider than the screen gets a row of its own. A row that fills the width exactly is followed by an empty one, so the cursor has somewhere to sit at the end of a line.
+- `render` now works in screen rows for both modes. Without wrap each line is one row, so both modes share the same drawing, selection and match code.
+- Up, Down and the page keys move by screen row and hold their column, and Shift extends the selection the same way. Home and End stay on the whole line, which keeps them predictable and cheap.
+- Scrolling keeps the top line plus a row within it, so a line taller than the screen can be scrolled through. To keep the cursor on screen, it counts rows upward from the cursor, which costs at most a screen's worth of lines.
+- A tab's width is counted from the start of its screen row.
+- Soft wrap is off by default, so existing behaviour doesn't change. It's a setting and a palette toggle.
+
 ## Settings
 
 - `~/.config/kyte/config.toml`, flat `key = value` lines. It's a small subset of TOML, parsed by hand in `config.rs` rather than adding a crate, because Kyte has no sections or lists to read.

@@ -210,7 +210,7 @@ mod tests {
     #[test]
     fn empty_query_keeps_registry_order() {
         assert_eq!(filter(""), REGISTRY.to_vec());
-        assert_eq!(PaletteState::default().results.len(), 21);
+        assert_eq!(PaletteState::default().results.len(), 22);
     }
 
     fn universal(files: &[&str]) -> PaletteState {
@@ -327,16 +327,16 @@ mod tests {
         let mut s = PaletteState::default();
         s.up();
         assert_eq!(s.selected, 0);
-        for _ in 0..20 {
+        for _ in 0..40 {
             s.down();
         }
-        assert_eq!(s.selected, 20);
+        assert_eq!(s.selected, 21);
         assert_eq!(s.selected_command(), Some(Command::ShowKeyHelp));
-        assert_eq!(s.scroll_offset(), 13);
+        assert_eq!(s.scroll_offset(), 14);
         s.push('s');
         assert_eq!(s.selected, 0);
         assert_eq!(s.selected_command(), Some(Command::Save));
         s.pop();
-        assert_eq!(s.results.len(), 21);
+        assert_eq!(s.results.len(), 22);
     }
 }

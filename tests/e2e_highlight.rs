@@ -6,7 +6,7 @@ mod common;
 
 use std::path::Path;
 
-use common::{Pty, TIMEOUT};
+use common::{Pty, Spawn, TIMEOUT};
 
 /// Screen column of the first `pat` in row `r` (the gutter has multi-byte `│`).
 fn col_of(p: &Pty, r: usize, pat: &str) -> u16 {
@@ -177,6 +177,32 @@ fn a_script_with_no_extension_is_colored_from_its_first_line() {
     p.wait_for("select function", TIMEOUT);
     p.send_str("z");
     p.wait_gone("select function", TIMEOUT);
+    p.send_keys(&["C-q"]);
+    p.wait_exit(TIMEOUT);
+}
+
+#[test]
+fn colors_follow_text_onto_wrapped_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    std::fs::create_dir(&state).unwrap();
+    let config = dir.path().join("config.toml");
+    std::fs::write(&config, "soft_wrap = true\n").unwrap();
+    let file = dir.path().join("a.rs");
+    let text = format!("// {}\nfn f() {{}}\n", "comment ".repeat(30));
+    std::fs::write(&file, text).unwrap();
+    let mut p = Pty::spawn(
+        Spawn::new(env!("CARGO_BIN_EXE_kyte"))
+            .env("KYTE_STATE_DIR", state.to_string_lossy())
+            .env("KYTE_CONFIG", config.to_string_lossy())
+            .arg("--no-kitty")
+            .arg(file.to_str().unwrap()),
+    );
+    p.wait_for("fn f", TIMEOUT);
+    let first = p.fg(0, 10);
+    let col = col_of(&p, 1, "comment");
+    assert_eq!(p.fg(1, col), first, "the comment's color carries on");
+    assert_ne!(first, Some(vt100::Color::Idx(252)));
     p.send_keys(&["C-q"]);
     p.wait_exit(TIMEOUT);
 }

@@ -152,7 +152,7 @@ Under tmux, set `tmux set -g escape-time 10`. tmux's default of 500 ms delays ev
 
 Esc Esc (or Ctrl-P) opens a fuzzy-filtered list. Type to filter, Up and Down to select, Enter to run, Esc to close without running anything.
 
-Commands: Save, Save as, Open file, Quit, Quit without saving, Undo, Redo, Cut, Copy, Paste, Select all, Find, Replace, Go to line, Toggle line numbers, Toggle tabs and spaces, Show key help.
+Commands: Save, Save as, Open file, Quit, Quit without saving, Undo, Redo, Cut, Copy, Paste, Select all, Find, Replace, Go to line, Toggle line numbers, Toggle tabs and spaces, Toggle soft wrap, Show key help.
 
 Kyte works out whether a file indents with tabs or spaces, and how many, from its first 10,000 lines. A file with no indent uses tabs. The status bar shows `Spaces N` for space-indented files. **Toggle tabs and spaces** changes what new indent uses until the file is closed; it doesn't rewrite existing lines.
 
@@ -229,6 +229,10 @@ Search ignores case until your text has a capital letter, then it matches exactl
 
 Ctrl-R asks what to replace and what to replace it with. Kyte then starts at the cursor, goes to the end of the file, wraps to the top, and stops where it started. At each match, `y` replaces it, `n` skips it, `a` replaces all the rest as one undo step, and Esc or `q` stops. Replace matches case the same way search does.
 
+## Soft wrap
+
+With soft wrap on, a long line continues on the next screen row, breaking after a space where it can. It changes only how the line is shown: the file is the same, and the line keeps one number. Up and Down move by screen row, and Home and End still go to the start and end of the whole line. Ordinary text is unaffected, but very long lines cost more, because each keystroke re-measures them: about 25 ms per key at 1 MB on one line, and 110 ms at 5 MB.
+
 ## Settings
 
 **Open settings** in the palette opens `~/.config/kyte/config.toml` (or `$XDG_CONFIG_HOME/kyte/config.toml`), and creates it the first time with every setting commented out. `KYTE_CONFIG` points somewhere else. Changes apply the next time Kyte starts.
@@ -239,7 +243,7 @@ Ctrl-R asks what to replace and what to replace it with. Kyte then starts at the
 | `indent` | `"tabs"` | What Tab inserts in a file with no indent to go by: `"tabs"` or `"spaces"` |
 | `indent_width` | `4` | How many spaces, when `indent` is `"spaces"` |
 | `line_numbers` | `true` | Show line numbers |
-| `soft_wrap` | `false` | Wrap long lines at the edge of the screen |
+| `soft_wrap` | `false` | Wrap long lines at the edge of the screen. **Toggle soft wrap** in the palette changes it for the session |
 | `esc_ms` | `300` | Milliseconds to press Esc again for the palette |
 | `history` | `true` | Keep a history of every edit to each file |
 | `history_limit_mb` | `100` | Trim a file's history when it passes this size |
@@ -309,7 +313,7 @@ These Docker files have not been run yet, because the build machine had no Docke
 - Files over 512 KiB aren't syntax highlighted, because each keystroke re-parses the file. Typing takes under about 25 ms per key at 100 KB, and 60 to 115 ms near the limit, depending on the language.
 - Search takes under about 30 ms per key on a 38 MB ASCII file. On a file that size with non-ASCII text, ignoring case takes about 240 ms per key.
 - A very long single line costs more per keystroke, depending on what's in it. At the end of a 5 MB line on the build machine, plain ASCII takes about 8 ms, a line full of tabs about 45 ms, and CJK text about 170 ms.
-- Not in this version: file tree, light and high-contrast themes, mouse, multiple buffers or splits, LSP, plugins, soft wrap, CRLF conversion, non-UTF-8 files, RPM/COPR packaging, and use as the default `$EDITOR`.
+- Not in this version: file tree, light and high-contrast themes, mouse, multiple buffers or splits, LSP, plugins, CRLF conversion, non-UTF-8 files, RPM/COPR packaging, and use as the default `$EDITOR`.
 
 ## Documentation
 

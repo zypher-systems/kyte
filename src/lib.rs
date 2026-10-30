@@ -24,6 +24,7 @@ pub mod swap;
 pub mod syntax;
 pub mod term;
 pub mod ui;
+pub mod wrap;
 
 use std::io::{IsTerminal, Write};
 use std::path::Path;

@@ -1060,7 +1060,7 @@ fn ac16_empty_query_does_nothing() {
 
 // ---------------------------------------------------------------- AC-17
 
-const COMMANDS: [&str; 21] = [
+const COMMANDS: [&str; 22] = [
     "Save",
     "Save as",
     "Open file",
@@ -1077,6 +1077,7 @@ const COMMANDS: [&str; 21] = [
     "Go to line",
     "Toggle line numbers",
     "Toggle tabs and spaces",
+    "Toggle soft wrap",
     "File history",
     "Delete file history",
     "Reader mode",
@@ -1113,7 +1114,7 @@ fn ac17_palette_lists_every_command() {
         .collect();
     assert!(first_result(&p).contains("▸ Save"), "{}", p.dump());
     // 8 rows are visible at once; scrolling down reveals the rest
-    for _ in 0..20 {
+    for _ in 0..21 {
         p.send_keys(&["Down"]);
         std::thread::sleep(Duration::from_millis(5));
         for c in COMMANDS {
@@ -1941,6 +1942,122 @@ fn tab_shows_completions_in_a_floating_list() {
     p.wait_gone("Matches", TIMEOUT);
     p.send_keys(&["Esc"]);
     wait_status(&p, "INSERT");
+    quit_clean(&mut p);
+}
+
+// ---------------------------------------------------------------- soft wrap
+
+fn open_wrapped(env: &Env, file: &Path) -> Pty {
+    open_with_settings(env, file, "soft_wrap = true\n", &[])
+}
+
+#[test]
+fn a_long_line_wraps_and_stays_one_line_in_the_file() {
+    let env = Env::new();
+    let text = format!("{}\nnext\n", "word ".repeat(40));
+    let f = env.write("w.txt", &text);
+    let mut p = open_wrapped(&env, &f);
+    p.wait_for("word", TIMEOUT);
+    p.wait_for("2 │ next", TIMEOUT);
+    assert!(
+        p.row(1).contains("word"),
+        "the line continues: {}",
+        p.dump()
+    );
+    assert!(p.row(1).trim_start().starts_with("│"), "no number on it");
+    p.send_keys(&["Down"]);
+    wait_status(&p, "Ln 1");
+    p.send_keys(&["End"]);
+    wait_status(&p, "Col 201");
+    type_text(&mut p, "!");
+    save_and_wait(&mut p);
+    quit_clean(&mut p);
+    assert_eq!(
+        fs::read_to_string(&f).unwrap(),
+        format!("{}!\nnext\n", "word ".repeat(40))
+    );
+}
+
+#[test]
+fn nothing_scrolls_sideways_when_wrapped() {
+    let env = Env::new();
+    let f = env.write("w.txt", &"x".repeat(500));
+    let mut p = open_wrapped(&env, &f);
+    p.send_keys(&["C-End"]);
+    wait_status(&p, "Col 501");
+    let (row, col) = p.cursor();
+    assert!(row < 28 && col < 100, "cursor on screen at {row},{col}");
+    p.send_keys(&["C-Home"]);
+    wait_status(&p, "Col 1");
+    p.wait_for("1 │ xxx", TIMEOUT);
+    quit_clean(&mut p);
+}
+
+#[test]
+fn selection_and_search_show_on_wrapped_rows() {
+    let env = Env::new();
+    let f = env.write("w.txt", &format!("{}needle\n", "a".repeat(120)));
+    let mut p = open_wrapped(&env, &f);
+    let plain = p.bg(0, 10);
+    p.send_keys(&["C-f"]);
+    p.wait_for("Search:", TIMEOUT);
+    p.send_str("needle");
+    p.wait_for("Search: needle", TIMEOUT);
+    let row: String = p.row(1);
+    let col = row.find("needle").expect("the match is on the second row");
+    let col = row[..col].chars().count() as u16;
+    assert_ne!(p.bg(1, col), plain, "{}", p.dump());
+    assert_eq!(p.bg(0, 10), plain, "the first row has no match");
+    p.send_keys(&["Esc"]);
+    wait_status(&p, "INSERT");
+    p.send_keys(&["C-a"]);
+    wait_status(&p, "selected");
+    assert_ne!(p.bg(0, 10), plain, "a selection covers every row");
+    assert_ne!(p.bg(1, col), plain);
+    quit_clean_after_selection(&mut p);
+}
+
+fn quit_clean_after_selection(p: &mut Pty) {
+    p.send_keys(&["Right"]);
+    p.wait_until("the selection to end", TIMEOUT, |s| !s.contains("selected"));
+    quit_clean(p);
+}
+
+#[test]
+fn soft_wrap_can_be_toggled_from_the_palette() {
+    let env = Env::new();
+    let f = env.write("w.txt", &"y".repeat(150));
+    let mut p = env.open(&f);
+    assert!(!p.row(1).contains("yyy"), "off by default");
+    open_palette(&mut p);
+    p.send_str("soft wrap");
+    p.wait_for("▸ Toggle soft wrap", TIMEOUT);
+    p.send_keys(&["Enter"]);
+    p.wait_until("the line to wrap", TIMEOUT, |s| {
+        s.lines().nth(1).is_some_and(|l| l.contains("yyy"))
+    });
+    quit_clean(&mut p);
+}
+
+#[test]
+fn resizing_rewraps() {
+    let env = Env::new();
+    let f = env.write("w.txt", &"z".repeat(300));
+    let mut p = open_wrapped(&env, &f);
+    p.send_keys(&["C-End"]);
+    wait_status(&p, "Col 301");
+    p.resize(10, 40);
+    p.wait_until("status bar on row 8 of 10", TIMEOUT, |_| {
+        p.row(8).contains("INSERT")
+    });
+    let (r, c) = p.cursor();
+    assert!(r < 8 && c < 40, "cursor {r},{c}\n{}", p.dump());
+    p.resize(30, 100);
+    p.wait_until("status bar on row 28 of 30", TIMEOUT, |_| {
+        p.row(28).contains("INSERT")
+    });
+    let (r, c) = p.cursor();
+    assert!(r < 28 && c < 100, "cursor {r},{c}\n{}", p.dump());
     quit_clean(&mut p);
 }
 

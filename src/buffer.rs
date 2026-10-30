@@ -106,7 +106,7 @@ impl<'a> GraphemeWalk<'a> {
         let rest = &self.text.as_bytes()[self.byte..];
         let run = rest
             .iter()
-            .take(cols + 1)
+            .take(cols.saturating_add(1))
             .take_while(|b| is_plain(**b))
             .count();
         let n = run.saturating_sub(1).min(cols);
@@ -147,7 +147,7 @@ pub fn graphemes_with_char_offsets(s: &str) -> GraphemeWalk<'_> {
 }
 
 /// Display column and grapheme count before char offset `off` in `text`.
-fn measure(text: &str, off: usize) -> (usize, usize) {
+pub fn measure(text: &str, off: usize) -> (usize, usize) {
     let mut walk = graphemes_with_char_offsets(text);
     let (mut col, mut count) = (0, 0);
     loop {
