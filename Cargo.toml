@@ -1,0 +1,31 @@
+[package]
+name = "kyte-editor"
+version = "0.1.0"
+edition = "2021"
+description = "Kyte: a terminal text editor"
+publish = false
+
+[lib]
+name = "kyte"
+path = "src/lib.rs"
+
+[[bin]]
+name = "kyte"
+path = "src/main.rs"
+
+[dependencies]
+ratatui = "0.30"
+ropey = "1.6"
+unicode-segmentation = "1"
+unicode-width = "0.2"
+crc32fast = "1"
+anyhow = "1"
+
+[dev-dependencies]
+tempfile = "3"
+proptest = "1"
+portable-pty = "0.9"
+vt100 = "0.18"
+
+[profile.release]
+debug = false
