@@ -1105,3 +1105,229 @@ fn ac23_second_instance_exits_2_naming_pid_and_leaves_swap() {
     a.send_keys(&["y"]);
     assert_eq!(a.wait_exit(TIMEOUT), 0);
 }
+
+// ---------------------------------------------------------------- crash helpers
+
+/// Opens `f`, types `text`, waits 100 ms and SIGKILLs kyte.
+fn edit_and_kill(env: &Env, f: &Path, text: &str) {
+    let mut p = env.open(f);
+    p.send_str(text);
+    p.wait_for(text, TIMEOUT);
+    wait_status(&p, "[+]");
+    std::thread::sleep(Duration::from_millis(100));
+    p.kill9();
+}
+
+/// Starts kyte on a file with a swap, without waiting for the insert screen.
+fn open_raw(env: &Env, f: &Path) -> Pty {
+    Pty::kyte(&bin(), &env.state, &[f.to_str().unwrap()])
+}
+
+// ---------------------------------------------------------------- AC-20
+
+#[test]
+fn ac20_kill9_then_print_swap_and_recover_r() {
+    let env = Env::new();
+    let f = work_file(&env, "crash.txt", "line one\nline two\n");
+    edit_and_kill(&env, &f, "unsaved text");
+    assert_eq!(fs::read_to_string(&f).unwrap(), "line one\nline two\n");
+    assert_eq!(
+        print_swap(&env, &f),
+        (0, "unsaved textline one\nline two\n".to_string())
+    );
+    let mut p = open_raw(&env, &f);
+    p.wait_for("Recover unsaved changes", TIMEOUT);
+    assert!(p.screen().contains("crash.txt"));
+    assert!(p.screen().contains("r  Recover the unsaved changes"));
+    assert!(p.screen().contains("Swap file written"));
+    p.send_str("r");
+    p.wait_for("1 │ unsaved textline one", TIMEOUT);
+    wait_status(&p, "crash.txt [+]");
+    save_and_wait(&mut p);
+    quit_clean(&mut p);
+    assert_eq!(
+        fs::read_to_string(&f).unwrap(),
+        "unsaved textline one\nline two\n"
+    );
+    assert_eq!(print_swap(&env, &f).0, 3, "clean exit leaves no swap");
+}
+
+#[test]
+fn ac20_recover_then_more_edits_survive_a_second_crash() {
+    let env = Env::new();
+    let f = work_file(&env, "crash.txt", "base\n");
+    edit_and_kill(&env, &f, "one ");
+    let mut p = open_raw(&env, &f);
+    p.wait_for("Recover unsaved changes", TIMEOUT);
+    p.send_str("r");
+    p.wait_for("one base", TIMEOUT);
+    p.send_keys(&["End"]);
+    p.send_str("two");
+    p.wait_for("one basetwo", TIMEOUT);
+    std::thread::sleep(Duration::from_millis(100));
+    p.kill9();
+    assert_eq!(print_swap(&env, &f), (0, "one basetwo\n".to_string()));
+}
+
+#[test]
+fn ac20_recover_d_discards_and_opens_original() {
+    let env = Env::new();
+    let f = work_file(&env, "crash.txt", "original\n");
+    edit_and_kill(&env, &f, "unsaved text");
+    let mut p = open_raw(&env, &f);
+    p.wait_for("Recover unsaved changes", TIMEOUT);
+    p.send_str("d");
+    p.wait_for("1 │ original", TIMEOUT);
+    assert!(!p.screen().contains("unsaved text"));
+    assert!(!status(&p).contains("[+]"));
+    assert_eq!(print_swap(&env, &f), (0, "original\n".to_string()));
+    quit_clean(&mut p);
+    assert_eq!(fs::read_to_string(&f).unwrap(), "original\n");
+}
+
+#[test]
+fn ac20_recover_q_quits_without_touching_anything() {
+    let env = Env::new();
+    let f = work_file(&env, "crash.txt", "original\n");
+    edit_and_kill(&env, &f, "unsaved text");
+    let swap = swap_files(&env).pop().unwrap();
+    let before = fs::read(&swap).unwrap();
+    let mut p = open_raw(&env, &f);
+    p.wait_for("Recover unsaved changes", TIMEOUT);
+    p.send_str("q");
+    assert_eq!(p.wait_exit(TIMEOUT), 0);
+    assert_eq!(fs::read(&swap).unwrap(), before);
+    assert_eq!(fs::read_to_string(&f).unwrap(), "original\n");
+}
+
+// ---------------------------------------------------------------- AC-21
+
+fn torn_case(damage: impl Fn(&Path)) {
+    let env = Env::new();
+    let f = work_file(&env, "torn.txt", "base\n");
+    // each typed key is its own record
+    edit_and_kill(&env, &f, "abc");
+    let swap = swap_files(&env).pop().unwrap();
+    damage(&swap);
+    assert_eq!(print_swap(&env, &f), (0, "abbase\n".to_string()));
+    let mut p = open_raw(&env, &f);
+    p.wait_for("Recover unsaved changes", TIMEOUT);
+    p.send_str("r");
+    p.wait_for("1 │ abbase", TIMEOUT);
+    save_and_wait(&mut p);
+    quit_clean(&mut p);
+    assert_eq!(fs::read_to_string(&f).unwrap(), "abbase\n");
+}
+
+#[test]
+fn ac21_torn_tail_truncated_3_bytes() {
+    torn_case(|swap| {
+        let len = fs::metadata(swap).unwrap().len();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(swap)
+            .unwrap()
+            .set_len(len - 3)
+            .unwrap();
+    });
+}
+
+#[test]
+fn ac21_torn_tail_last_byte_flipped() {
+    torn_case(|swap| {
+        let mut b = fs::read(swap).unwrap();
+        let last = b.len() - 1;
+        b[last] ^= 0xff;
+        fs::write(swap, b).unwrap();
+    });
+}
+
+// ---------------------------------------------------------------- AC-22
+
+#[test]
+fn ac22_stale_swap_offers_only_discard_or_quit() {
+    let env = Env::new();
+    let f = work_file(&env, "stale.txt", "version 1\n");
+    edit_and_kill(&env, &f, "lost edit ");
+    fs::write(&f, "version 2 from elsewhere\n").unwrap();
+    let mut p = open_raw(&env, &f);
+    p.wait_for("Stale swap file", TIMEOUT);
+    let s = p.screen();
+    assert!(s.contains("stale"), "{s}");
+    assert!(s.contains("d  Discard the stale swap"));
+    assert!(s.contains("q  Quit"));
+    assert!(!s.contains("r  Recover"));
+    // r is not offered and does nothing
+    p.send_str("r");
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(p.screen().contains("Stale swap file"));
+    p.send_str("q");
+    assert_eq!(p.wait_exit(TIMEOUT), 0);
+    assert_eq!(
+        fs::read_to_string(&f).unwrap(),
+        "version 2 from elsewhere\n"
+    );
+    assert_eq!(
+        print_swap(&env, &f).0,
+        3,
+        "a stale swap is not a valid swap"
+    );
+    // d discards and opens the file as it is on disk
+    let mut p = open_raw(&env, &f);
+    p.wait_for("Stale swap file", TIMEOUT);
+    p.send_str("d");
+    p.wait_for("1 │ version 2 from elsewhere", TIMEOUT);
+    assert!(!p.screen().contains("lost edit"));
+    quit_clean(&mut p);
+    assert_eq!(
+        fs::read_to_string(&f).unwrap(),
+        "version 2 from elsewhere\n"
+    );
+}
+
+// ---------------------------------------------------------------- AC-24
+
+#[test]
+fn ac24_save_into_read_only_dir_fails_visibly_and_keeps_everything() {
+    let env = Env::new();
+    let f = work_file(&env, "ro.txt", "untouched\n");
+    let dir = f.parent().unwrap().to_path_buf();
+    let mut p = env.open(&f);
+    p.send_str("edit ");
+    wait_status(&p, "[+]");
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
+    p.send_keys(&["C-s"]);
+    p.wait_for("Save failed", TIMEOUT);
+    let after = fs::read_to_string(&f).unwrap();
+    let names = dir_names(&dir);
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(after, "untouched\n");
+    assert_eq!(names, vec!["ro.txt".to_string()], "no temp file left");
+    assert!(status(&p).contains("[+]"), "buffer stays dirty");
+    let swaps = swap_files(&env);
+    assert_eq!(swaps.len(), 1, "swap remains");
+    assert_eq!(print_swap(&env, &f), (0, "edit untouched\n".to_string()));
+    p.send_keys(&["C-q"]);
+    p.wait_for("Unsaved changes", TIMEOUT);
+    p.send_keys(&["C-q"]);
+    p.wait_exit(TIMEOUT);
+}
+
+#[test]
+fn ac24_save_through_symlink_updates_target_keeps_link() {
+    let env = Env::new();
+    let real = work_file(&env, "real.txt", "real\n");
+    let link = real.parent().unwrap().join("link.txt");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let mut p = env.open(&link);
+    p.send_str("via link ");
+    wait_status(&p, "[+]");
+    save_and_wait(&mut p);
+    quit_clean(&mut p);
+    assert_eq!(fs::read_to_string(&real).unwrap(), "via link real\n");
+    assert!(fs::symlink_metadata(&link)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert_eq!(fs::read_link(&link).unwrap(), real);
+}

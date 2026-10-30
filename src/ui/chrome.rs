@@ -213,3 +213,55 @@ pub fn help(app: &App, text_area: Rect, cells: &mut Cells, theme: &Theme) {
         cells.set_stringn(inner.x, y, line, inner.width as usize, theme.modal);
     }
 }
+
+/// The Recover (or Stale) modal shown at startup.
+pub fn recover(app: &App, text_area: Rect, cells: &mut Cells, theme: &Theme) {
+    let Mode::Recover(info) = &app.mode else {
+        return;
+    };
+    let path = info.target.display().to_string();
+    let lines: Vec<String> = if info.recovered.is_some() {
+        vec![
+            "Kyte found unsaved changes for:".to_string(),
+            format!("  {path}"),
+            format!("Swap file written {}", info.modified),
+            String::new(),
+            "r  Recover the unsaved changes".to_string(),
+            "d  Discard them and open the file as it is on disk".to_string(),
+            "q  Quit without changing anything (also Esc)".to_string(),
+        ]
+    } else {
+        vec![
+            "The swap file is stale for:".to_string(),
+            format!("  {path}"),
+            "The file changed on disk after the swap was written.".to_string(),
+            format!("Swap file written {}", info.modified),
+            String::new(),
+            "d  Discard the stale swap and open the file".to_string(),
+            "q  Quit without changing anything (also Esc)".to_string(),
+        ]
+    };
+    let title = if info.recovered.is_some() {
+        "Recover unsaved changes"
+    } else {
+        "Stale swap file"
+    };
+    let longest = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) as u16;
+    let w = (longest + 4).max(40).min(text_area.width);
+    let h = (lines.len() as u16 + 2).min(text_area.height);
+    let area = centered(text_area, w, h);
+    let inner = modal_box(area, cells, title, theme.modal, theme.palette_border);
+    for (i, l) in lines.iter().enumerate() {
+        let y = inner.y + i as u16;
+        if y >= inner.y + inner.height {
+            break;
+        }
+        cells.set_stringn(
+            inner.x + 1,
+            y,
+            l,
+            inner.width.saturating_sub(1) as usize,
+            theme.modal,
+        );
+    }
+}

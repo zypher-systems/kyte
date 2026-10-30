@@ -26,7 +26,7 @@ use ratatui::Terminal;
 
 pub use cli::Options;
 
-use app::App;
+use app::{App, Mode};
 use buffer::Buffer;
 use swap::{SwapStatus, SwapWriter};
 
@@ -85,13 +85,15 @@ fn open_file(p: &Path, opts: &Options) -> anyhow::Result<Result<App, ExitCode>> 
                 }
             },
         },
-        SwapStatus::Recoverable(_) | SwapStatus::Stale => {
-            eprintln!(
-                "kyte: {} has a swap file; inspect it with `kyte --print-swap {}`",
-                p.display(),
-                p.display()
-            );
-            Ok(Err(ExitCode::from(2)))
+        SwapStatus::Recoverable(info) => {
+            let mut app = App::new(buffer, None, opts);
+            app.mode = Mode::Recover(info);
+            Ok(Ok(app))
+        }
+        SwapStatus::Stale => {
+            let mut app = App::new(buffer, None, opts);
+            app.mode = Mode::Recover(swap::stale_info(&target));
+            Ok(Ok(app))
         }
     }
 }

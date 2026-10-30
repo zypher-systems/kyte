@@ -34,11 +34,21 @@ pub fn render(app: &App, frame: &mut Frame) {
     let status_area = Rect::new(area.x, area.y + area.height - 2, area.width, 1);
     let msg_area = Rect::new(area.x, area.y + area.height - 1, area.width, 1);
     let cells = frame.buffer_mut();
-    let text_cursor = text_view::render(app, text_area, cells, theme);
+    let text_cursor = if matches!(app.mode, crate::app::Mode::Recover(_)) {
+        // The modal sits over an empty text view.
+        cells.set_style(text_area, theme.text);
+        for y in text_area.y..text_area.y + text_area.height {
+            cells.set_stringn(text_area.x, y, "~", 1, theme.tilde);
+        }
+        None
+    } else {
+        text_view::render(app, text_area, cells, theme)
+    };
     chrome::status_bar(app, status_area, cells, theme);
     let prompt_cursor = chrome::message_line(app, msg_area, cells, theme);
     let popup_cursor = chrome::palette(app, text_area, cells, theme);
     chrome::help(app, text_area, cells, theme);
+    chrome::recover(app, text_area, cells, theme);
     if let Some((x, y)) = popup_cursor.or(prompt_cursor).or(text_cursor) {
         frame.set_cursor_position((x, y));
     }

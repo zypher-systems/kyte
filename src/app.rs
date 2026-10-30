@@ -13,7 +13,7 @@ use crate::input::{normalize, Input, Key};
 use crate::ops;
 use crate::palette::PaletteState;
 use crate::search;
-use crate::swap::SwapWriter;
+use crate::swap::{RecoverInfo, SwapWriter};
 
 /// Text-area rows when the terminal size is not known yet.
 const DEFAULT_TEXT_HEIGHT: usize = 28;
@@ -30,6 +30,8 @@ pub enum Mode {
     Prompt(Prompt),
     /// The "Show key help" modal; Esc closes it.
     Help,
+    /// Startup modal for a recoverable (or stale) swap.
+    Recover(RecoverInfo),
 }
 
 /// One-line prompts on the message line.
@@ -215,6 +217,7 @@ impl App {
             Mode::Palette(state) => self.palette_key(key, state),
             Mode::Prompt(Prompt::Search { query, origin }) => self.search_key(key, query, origin),
             Mode::Prompt(Prompt::GotoLine { text }) => self.goto_key(key, text),
+            Mode::Recover(info) => self.recover_key(key, info),
             Mode::Help => {
                 if matches!(key, Key::Esc | Key::Enter | Key::Char('q')) {
                     self.mode = Mode::Insert;
@@ -226,6 +229,46 @@ impl App {
                     self.discard_and_quit();
                 }
             }
+        }
+    }
+
+    /// Recover modal: `r` replays the swap, `d` discards it, `q`/Esc quit
+    /// without touching anything. A stale swap offers only `d` and `q`.
+    fn recover_key(&mut self, key: Key, info: RecoverInfo) {
+        match key {
+            Key::Char('r') if info.recovered.is_some() => {
+                let text = info.recovered.clone().unwrap_or_default();
+                let path = self.buffer.path().map(|p| p.to_path_buf());
+                self.buffer = Buffer::from_str(&text, path);
+                self.buffer.set_dirty();
+                self.mode = Mode::Insert;
+                match SwapWriter::adopt(&info.swap_path) {
+                    Ok(w) => {
+                        self.swap = Some(w);
+                        self.set_message("Recovered unsaved changes; Ctrl-S saves them");
+                    }
+                    Err(e) => {
+                        self.set_error(format!("Recovered, but the swap could not be reused: {e}"))
+                    }
+                }
+            }
+            Key::Char('d') => {
+                let _ = std::fs::remove_file(&info.swap_path);
+                self.mode = Mode::Insert;
+                let base = self.buffer.to_string();
+                match SwapWriter::create(&info.target, base.as_bytes()) {
+                    Ok(w) => {
+                        self.swap = Some(w);
+                        self.set_message("Discarded the swap file");
+                    }
+                    Err(e) => self.set_error(format!("Discarded the swap; new swap failed: {e}")),
+                }
+            }
+            Key::Char('q') | Key::Esc => {
+                self.keep_swap = true;
+                self.quit = true;
+            }
+            _ => {}
         }
     }
 
@@ -498,7 +541,7 @@ impl App {
                 let q = format!("{}{}", state.query, text.replace('\n', " "));
                 state.set_query(q);
             }
-            Mode::Prompt(_) | Mode::Help => {}
+            Mode::Prompt(_) | Mode::Help | Mode::Recover(_) => {}
         }
         self.flush_edits();
         Ok(())
@@ -572,6 +615,7 @@ impl App {
             Mode::Prompt(Prompt::GotoLine { .. }) => "GOTO",
             Mode::Prompt(Prompt::ConfirmQuit) => "QUIT?",
             Mode::Help => "HELP",
+            Mode::Recover(_) => "RECOVER",
         }
     }
 }

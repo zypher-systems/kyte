@@ -67,3 +67,11 @@ Every deviation from `ARCHITECTURE` (Mnemo page_e336285940d54098ada133cc08df814b
 - Replay also stops at a record whose edit falls outside the text (bounds check), in addition to short and CRC-bad records. Unknown record kinds are skipped by length (section 13 hook).
 - Very long paths can exceed the 255-byte file-name limit once escaped; this is not handled in the MVP (swap creation fails with a warning and the file still opens).
 - Added `SwapWriter::create_in` and `swap::inspect_in` taking an explicit directory so tests do not mutate process-wide environment variables, plus `record_count`, `parse_header`, `encode_record`, `stale_info`, `live_lock_pid`.
+
+## T10 recovery UI
+
+- Recover modal title "Recover unsaved changes", Stale modal title "Stale swap file"; both name the canonical file path and the swap's modification time in UTC (no time-zone database in the MVP). `r` is ignored in the Stale modal.
+- After `r` the replayed text becomes the buffer (marked dirty, undo history empty: persistent undo is out of the MVP) and the swap is adopted (torn tail dropped, PID rewritten), so a second crash still recovers everything.
+- After `d` the old swap is deleted and a fresh one is created for the file as it is on disk.
+- `q`/Esc leave the swap exactly as it was (bytes unchanged) and exit 0.
+- `--print-swap` on a stale swap exits 3 ("no valid swap").
