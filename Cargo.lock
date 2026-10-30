@@ -666,6 +666,7 @@ dependencies = [
  "proptest",
  "ratatui",
  "ropey",
+ "rustix",
  "tempfile",
  "tree-sitter",
  "tree-sitter-bash",

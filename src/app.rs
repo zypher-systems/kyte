@@ -8,7 +8,7 @@ use anyhow::Result;
 use crate::buffer::{Buffer, GroupKind};
 use crate::cli::Options;
 use crate::command::{self, Command};
-use crate::fileio;
+use crate::fileio::{self, DiskState};
 use crate::input::{normalize, Input, Key};
 use crate::ops;
 use crate::palette::PaletteState;
@@ -46,6 +46,30 @@ pub enum Prompt {
         text: String,
     },
     ConfirmQuit,
+    /// A save that needs a yes first. `quit_after` quits once it succeeds.
+    ConfirmSave {
+        risk: SaveRisk,
+        path: std::path::PathBuf,
+        quit_after: bool,
+    },
+}
+
+/// Why a save stopped to ask, in the order the questions are asked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SaveRisk {
+    ChangedOnDisk,
+    ReadOnly,
+}
+
+impl SaveRisk {
+    pub fn question(self) -> &'static str {
+        match self {
+            SaveRisk::ChangedOnDisk => {
+                "File changed on disk! y overwrites those changes, n or Esc cancels"
+            }
+            SaveRisk::ReadOnly => "File is read-only! y replaces it anyway, n or Esc cancels",
+        }
+    }
 }
 
 pub struct App {
@@ -63,6 +87,8 @@ pub struct App {
     swap: Option<SwapWriter>,
     /// Canonical path the swap is keyed by.
     swap_target: Option<std::path::PathBuf>,
+    /// The file as last read or written; `None` means it's not known.
+    disk: Option<DiskState>,
     last_fsync: Option<Instant>,
     scroll_top: usize,
     scroll_left: usize,
@@ -88,10 +114,12 @@ pub const CONFIRM_QUIT_TEXT: &str =
 impl App {
     pub fn new(buffer: Buffer, swap: Option<SwapWriter>, opts: &Options) -> App {
         let swap_target = buffer.path().and_then(|p| fileio::resolve_target(p).ok());
+        let disk = Some(DiskState::of_rope(buffer.rope()));
         App {
             keep_swap: false,
             swap,
             swap_target,
+            disk,
             last_fsync: None,
             buffer,
             mode: Mode::Insert,
@@ -229,6 +257,21 @@ impl App {
                     self.discard_and_quit();
                 }
             }
+            Mode::Prompt(Prompt::ConfirmSave {
+                risk,
+                path,
+                quit_after,
+            }) => match key {
+                Key::Char('y') => {
+                    self.mode = Mode::Insert;
+                    self.save_after(path, Some(risk), quit_after);
+                }
+                Key::Char('n') | Key::Esc => {
+                    self.mode = Mode::Insert;
+                    self.set_message("Save cancelled");
+                }
+                _ => {}
+            },
         }
     }
 
@@ -242,6 +285,10 @@ impl App {
                 self.buffer = Buffer::from_str(&text, path);
                 self.buffer.set_dirty();
                 self.mode = Mode::Insert;
+                if info.file_changed {
+                    // Saving this version replaces what's on disk, so ask first.
+                    self.disk = None;
+                }
                 match SwapWriter::adopt(&info.swap_path) {
                     Ok(w) => {
                         self.swap = Some(w);
@@ -563,15 +610,48 @@ impl App {
         Ok(())
     }
 
-    /// Ctrl-S: atomic save.
+    /// Ctrl-S: atomic save, asking first if it would lose something.
     pub fn save(&mut self) {
         let Some(path) = self.buffer.path().map(|p| p.to_path_buf()) else {
             self.set_error("No file name; start Kyte with a file path");
             return;
         };
+        self.save_after(path, None, false);
+    }
+
+    /// The next thing to ask about once `passed` has been answered.
+    fn next_risk(&self, path: &std::path::Path, passed: Option<SaveRisk>) -> Option<SaveRisk> {
+        if passed.is_none() {
+            // An unreadable file is left for the write itself to report.
+            let changed = matches!(fileio::disk_state(path), Ok(Some(s)) if Some(s) != self.disk);
+            if changed {
+                return Some(SaveRisk::ChangedOnDisk);
+            }
+        }
+        (passed != Some(SaveRisk::ReadOnly) && fileio::is_read_only(path))
+            .then_some(SaveRisk::ReadOnly)
+    }
+
+    /// Asks the next question after `passed`, or writes the file.
+    fn save_after(&mut self, path: std::path::PathBuf, passed: Option<SaveRisk>, quit_after: bool) {
+        match self.next_risk(&path, passed) {
+            Some(risk) => {
+                self.mode = Mode::Prompt(Prompt::ConfirmSave {
+                    risk,
+                    path,
+                    quit_after,
+                })
+            }
+            None => self.write_file(&path, quit_after),
+        }
+    }
+
+    fn write_file(&mut self, path: &std::path::Path, quit_after: bool) {
         let text = self.buffer.to_string();
-        match fileio::save_atomic(&path, &text) {
+        match fileio::save_atomic(path, &text) {
             Ok(()) => {
+                self.disk = Some(DiskState::of_bytes(text.as_bytes()));
+                self.quit = quit_after;
                 self.buffer.mark_clean();
                 let n = self.buffer.saved_line_count();
                 self.set_message(format!("Saved {n} line{}", if n == 1 { "" } else { "s" }));
@@ -613,6 +693,7 @@ impl App {
             Mode::Prompt(Prompt::Search { .. }) => "SEARCH",
             Mode::Prompt(Prompt::GotoLine { .. }) => "GOTO",
             Mode::Prompt(Prompt::ConfirmQuit) => "QUIT?",
+            Mode::Prompt(Prompt::ConfirmSave { .. }) => "SAVE?",
             Mode::Help => "HELP",
             Mode::Recover(_) => "RECOVER",
         }

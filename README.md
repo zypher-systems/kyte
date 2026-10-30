@@ -61,7 +61,7 @@ kyte [OPTIONS] [FILE]
 | --- | --- |
 | 0 | Normal exit |
 | 1 | Runtime error (the message is printed after the terminal is restored) |
-| 2 | Bad usage, a directory, a non-UTF-8 file, stdin or stdout not a terminal, or another live Kyte has the file open |
+| 2 | Bad usage, a directory, a FIFO or device, a non-UTF-8 file, stdin or stdout not a terminal, or another live Kyte has the file open |
 | 3 | `--print-swap` found no valid swap |
 
 Environment variables: `KYTE_STATE_DIR` (where swap files go; overrides the default), `KYTE_ESC_MS`, and `TERM` as usual.
@@ -129,7 +129,9 @@ Ctrl-F (or Esc `/`) opens `Search:` on the message line. Kyte jumps to the first
 - When you open a file, Kyte creates a swap file under `$XDG_STATE_HOME/kyte/swap/` (default `~/.local/state/kyte/swap/`; `KYTE_STATE_DIR` overrides it). It is never placed next to your file. It has mode 0600 and is named after the escaped absolute path, for example `%2Fhome%2Fme%2Fnotes.txt.kyteswp`. A name that would be too long keeps the end of the path and adds a hash.
 - Each edit is appended to the swap as a small checksummed record before the screen updates. The swap is fsynced at most once per second. Your real file changes only when you save.
 - The first edit also copies the file's content into the swap, so your edits can be recovered even if the file later changes or disappears. Opening a file without editing it copies nothing.
-- Saving is atomic. Kyte writes a temporary file in the same directory, fsyncs it, keeps the file's permissions, renames it over the original and fsyncs the directory. A failed save (for example in a read-only directory) leaves the original untouched, shows the error and keeps your changes and the swap. Saving through a symlink updates the target and keeps the link.
+- Saving is atomic. Kyte writes a temporary file in the same directory, fsyncs it, gives it the file's permissions, owner and extended attributes (which include SELinux labels and ACLs), renames it over the original and fsyncs the directory. A failed save (for example in a read-only directory) leaves the original untouched, shows the error and keeps your changes and the swap. Saving through a symlink updates the target and keeps the link.
+- A file with hard links, or one whose owner or attributes the temporary file can't take on, is rewritten in place so it stays the same file. Kyte keeps a backup beside it during the write and restores the old content if the write fails.
+- If the file changed on disk since you opened or last saved it, Ctrl-S asks before overwriting. The check compares content, so a rewrite of the same bytes doesn't count. A read-only file also needs a `y` before Kyte replaces it. `n` or Esc cancels either question.
 - After a save, the swap starts over empty. After a clean quit, the swap is deleted.
 - If Kyte finds a swap with unsaved changes when you open the file, it shows **Recover unsaved changes**:
   - `r` recovers the changes into the editor, marked unsaved. Ctrl-S writes them.

@@ -14,12 +14,12 @@ Fix every way the current build can lose or damage work. Each fix gets a regress
 - [ ] A buffer with no file name can be saved, and its edits reach a swap. Today Ctrl-S refuses and nothing protects the text.
 - [ ] A failed save leaves a way out: Save As, and quitting keeps the swap unless the user discards it. Today confirming quit deletes the swap.
 - [x] A stale swap can still be recovered. Store the base content in the swap (format v2), so a crash followed by a change on disk doesn't strand the edits.
-- [ ] Ctrl-S warns when the file changed on disk since it was opened or last saved.
-- [ ] A read-only file isn't replaced without an explicit choice.
+- [x] Ctrl-S warns when the file changed on disk since it was opened or last saved.
+- [x] A read-only file isn't replaced without an explicit choice.
 
 ### Files damaged or refused
 
-- [ ] A save keeps owner, SELinux label, xattrs and ACLs, and handles hard links. Today the rename resets the label and drops the rest.
+- [x] A save keeps owner, SELinux label, xattrs and ACLs, and handles hard links. Today the rename resets the label and drops the rest.
 - [ ] CRLF files keep their line endings: End stops before the `\r`, and Enter inserts the file's own line ending.
 - [x] The swap lock checks that the PID really is Kyte, and a stale lock can be overridden.
 - [x] Long paths open with crash recovery working: hash the swap file name.
@@ -30,7 +30,7 @@ Fix every way the current build can lose or damage work. Each fix gets a regress
 - [ ] SIGTERM and SIGHUP restore the terminal and keep the swap.
 - [ ] Paste works in the search and go-to-line prompts.
 - [ ] Super-chorded keys don't type text.
-- [ ] FIFOs and device files are refused at open.
+- [x] FIFOs and device files are refused at open.
 - [ ] A swap write failure stays visible until it's resolved, not only until the next key.
 - [ ] Editing a very long single line stays responsive (about 350 ms per key at 5 MB today).
 - [ ] Skip or adapt the read-only-directory tests when running as root, so they can pass in CI containers.

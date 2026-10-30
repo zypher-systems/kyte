@@ -5,7 +5,7 @@
 mod common;
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -1374,6 +1374,131 @@ fn break_lock_opens_a_file_held_by_another_kyte() {
     b.send_str("r");
     b.wait_for("1 │ held base", TIMEOUT);
     b.kill9();
+}
+
+// ---------------------------------------------------------------- saving safely
+
+#[test]
+fn save_asks_before_overwriting_outside_changes() {
+    let env = Env::new();
+    let f = work_file(&env, "shared.txt", "v1\n");
+    let mut p = env.open(&f);
+    p.send_str("mine ");
+    wait_status(&p, "[+]");
+    fs::write(&f, "theirs\n").unwrap();
+    p.send_keys(&["C-s"]);
+    p.wait_for("File changed on disk!", TIMEOUT);
+    p.send_str("x");
+    std::thread::sleep(Duration::from_millis(50));
+    assert!(p.screen().contains("File changed on disk!"), "x is ignored");
+    p.send_str("n");
+    p.wait_for("Save cancelled", TIMEOUT);
+    assert_eq!(fs::read_to_string(&f).unwrap(), "theirs\n");
+    wait_status(&p, "[+]");
+    p.send_keys(&["C-s"]);
+    p.wait_for("File changed on disk!", TIMEOUT);
+    p.send_str("y");
+    p.wait_for("Saved 1 line", TIMEOUT);
+    assert_eq!(fs::read_to_string(&f).unwrap(), "mine v1\n");
+    // Having answered once, the next save has nothing to ask about.
+    p.send_str("x");
+    wait_status(&p, "[+]");
+    save_and_wait(&mut p);
+    quit_clean(&mut p);
+}
+
+#[test]
+fn rewriting_the_same_content_is_not_an_outside_change() {
+    let env = Env::new();
+    let f = work_file(&env, "same.txt", "same\n");
+    let mut p = env.open(&f);
+    p.send_str("x");
+    wait_status(&p, "[+]");
+    fs::write(&f, "same\n").unwrap();
+    p.send_keys(&["C-s"]);
+    p.wait_for("Saved 1 line", TIMEOUT);
+    quit_clean(&mut p);
+}
+
+#[test]
+fn file_deleted_while_open_is_saved_without_asking() {
+    let env = Env::new();
+    let f = work_file(&env, "gone.txt", "text\n");
+    let mut p = env.open(&f);
+    p.send_str("x");
+    wait_status(&p, "[+]");
+    fs::remove_file(&f).unwrap();
+    p.send_keys(&["C-s"]);
+    p.wait_for("Saved 1 line", TIMEOUT);
+    quit_clean(&mut p);
+    assert_eq!(fs::read_to_string(&f).unwrap(), "xtext\n");
+}
+
+#[test]
+fn read_only_file_is_replaced_only_after_a_yes() {
+    let env = Env::new();
+    if fs::metadata(env.dir.path()).unwrap().uid() == 0 {
+        eprintln!("skipped: root can write to anything");
+        return;
+    }
+    let f = work_file(&env, "ro.txt", "protected\n");
+    fs::set_permissions(&f, fs::Permissions::from_mode(0o444)).unwrap();
+    let mut p = env.open(&f);
+    p.send_str("x");
+    wait_status(&p, "[+]");
+    p.send_keys(&["C-s"]);
+    p.wait_for("File is read-only!", TIMEOUT);
+    p.send_keys(&["Esc"]);
+    p.wait_for("Save cancelled", TIMEOUT);
+    assert_eq!(fs::read_to_string(&f).unwrap(), "protected\n");
+    p.send_keys(&["C-s"]);
+    p.wait_for("File is read-only!", TIMEOUT);
+    p.send_str("y");
+    p.wait_for("Saved 1 line", TIMEOUT);
+    assert_eq!(fs::read_to_string(&f).unwrap(), "xprotected\n");
+    assert_eq!(
+        fs::metadata(&f).unwrap().permissions().mode() & 0o777,
+        0o444
+    );
+    quit_clean(&mut p);
+}
+
+#[test]
+fn recovered_edits_ask_before_replacing_a_changed_file() {
+    let env = Env::new();
+    let f = work_file(&env, "both.txt", "v1\n");
+    edit_and_kill(&env, &f, "mine ");
+    fs::write(&f, "theirs\n").unwrap();
+    let mut p = open_raw(&env, &f);
+    p.wait_for("Recover unsaved changes", TIMEOUT);
+    p.send_str("r");
+    p.wait_for("1 │ mine v1", TIMEOUT);
+    p.send_keys(&["C-s"]);
+    p.wait_for("File changed on disk!", TIMEOUT);
+    p.send_str("n");
+    p.wait_for("Save cancelled", TIMEOUT);
+    assert_eq!(fs::read_to_string(&f).unwrap(), "theirs\n");
+    p.send_keys(&["C-q"]);
+    p.wait_for("Unsaved changes", TIMEOUT);
+    p.send_str("y");
+    assert_eq!(p.wait_exit(TIMEOUT), 0);
+}
+
+#[test]
+fn fifo_is_refused_at_open() {
+    let env = Env::new();
+    let fifo = env.path("pipe");
+    rustix::fs::mknodat(
+        rustix::fs::CWD,
+        &fifo,
+        rustix::fs::FileType::Fifo,
+        rustix::fs::Mode::from_raw_mode(0o600),
+        0,
+    )
+    .unwrap();
+    let mut p = Pty::kyte(&bin(), &env.state, &[fifo.to_str().unwrap()]);
+    assert_eq!(p.wait_exit(TIMEOUT), 2);
+    assert!(p.screen().contains("not a regular file"));
 }
 
 // ---------------------------------------------------------------- AC-24

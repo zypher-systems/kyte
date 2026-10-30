@@ -22,6 +22,16 @@ These replace the swap format and flows in `ARCHITECTURE` sections 6 and 8.
 - A live lock needs both the PID and its start time from `/proc/<pid>/stat` to match. `--break-lock` zeroes the swap's PID and changes nothing else, so recovery still works.
 - A swap name over 255 bytes keeps the end of the escaped path and adds the path's CRC and length. If the swap can't be read at all, the file still opens, with the crash-recovery warning. Before this, both cases stopped Kyte from opening the file, despite what the README said.
 
+## 0.1.1 saving
+
+- Added `rustix` as a direct dependency for xattrs and `access`. crossterm already uses it, so the build has no new crate.
+- The temp file takes the old file's owner and every extended attribute, which covers SELinux labels, ACLs and file capabilities. Listing returning "not supported" counts as nothing to copy.
+- A rename would change a hard-linked file into a separate file, and a failed chown or xattr copy would change its owner or label. Those cases write in place: back up, overwrite without truncating, set the length, fsync, and restore on failure. The temp file is still created first, so a read-only directory fails as AC-24 requires.
+- Outside changes are found by comparing length and CRC at save time, not by mtime. A timestamp can miss a same-tick write, and reading the file costs little next to writing it. A file deleted while open is saved without asking, since there's nothing to lose.
+- After recovering edits over a changed file the last known disk state is unknown, so the first save asks.
+- In the save questions any key other than `y`, `n` or Esc is ignored. They guard a destructive action, so a stray key shouldn't answer one.
+- FIFOs and devices are refused at open (exit 2): reading one could hang forever, and a rename would replace the device node.
+
 ## Hosting and environment
 
 - Toolchain: rustc/cargo 1.99.1 (stable, 2026-10-13), edition 2021.

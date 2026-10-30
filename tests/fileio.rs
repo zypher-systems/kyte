@@ -1,10 +1,11 @@
 //! File IO tests (task T3): AC-03 (library level), AC-05, AC-24.
 
 use std::fs;
-use std::os::unix::fs::{symlink, PermissionsExt};
+use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-use kyte::fileio::{load, save_atomic, state_dir_from, OpenError};
+use kyte::fileio::{disk_state, is_read_only, load, save_atomic, state_dir_from, OpenError};
+use rustix::fs::{mknodat, setxattr, FileType, Mode, XattrFlags, CWD};
 
 fn names(dir: &Path) -> Vec<String> {
     let mut v: Vec<String> = fs::read_dir(dir)
@@ -111,6 +112,102 @@ fn ac24_symlink_target_updated_and_link_intact() {
         names(d.path()),
         vec!["link.txt".to_string(), "real.txt".to_string()]
     );
+}
+
+#[test]
+fn hard_linked_file_stays_one_file_with_no_leftovers() {
+    let d = tempfile::tempdir().unwrap();
+    let p = d.path().join("a.txt");
+    let link = d.path().join("b.txt");
+    fs::write(&p, "old\n").unwrap();
+    fs::set_permissions(&p, fs::Permissions::from_mode(0o640)).unwrap();
+    fs::hard_link(&p, &link).unwrap();
+    let inode = fs::metadata(&p).unwrap().ino();
+    save_atomic(&p, "new and longer\n").unwrap();
+    save_atomic(&p, "short\n").unwrap();
+    assert_eq!(fs::read_to_string(&link).unwrap(), "short\n");
+    assert_eq!(fs::metadata(&p).unwrap().ino(), inode);
+    assert_eq!(
+        fs::metadata(&p).unwrap().permissions().mode() & 0o7777,
+        0o640
+    );
+    assert_eq!(names(d.path()), vec!["a.txt", "b.txt"]);
+}
+
+#[test]
+fn extended_attributes_survive_a_save() {
+    let d = tempfile::tempdir().unwrap();
+    let p = d.path().join("a.txt");
+    fs::write(&p, "old\n").unwrap();
+    if setxattr(&p, "user.kyte", b"kept", XattrFlags::empty()).is_err() {
+        eprintln!("skipped: no user xattrs on this file system");
+        return;
+    }
+    save_atomic(&p, "new\n").unwrap();
+    let mut value = [0u8; 16];
+    let n = rustix::fs::getxattr(&p, "user.kyte", &mut value[..]).unwrap();
+    assert_eq!(&value[..n], b"kept");
+    assert_eq!(fs::read_to_string(&p).unwrap(), "new\n");
+    assert_eq!(names(d.path()), vec!["a.txt"]);
+}
+
+#[test]
+fn large_extended_attribute_survives_a_save() {
+    let d = tempfile::tempdir().unwrap();
+    let p = d.path().join("a.txt");
+    fs::write(&p, "old\n").unwrap();
+    let big = vec![b'x'; 8000];
+    let small = b"y";
+    if setxattr(&p, "user.big", &big, XattrFlags::empty()).is_err()
+        || setxattr(&p, "user.small", small, XattrFlags::empty()).is_err()
+    {
+        eprintln!("skipped: no large user xattrs on this file system");
+        return;
+    }
+    save_atomic(&p, "new\n").unwrap();
+    let mut value = vec![0u8; 16384];
+    let n = rustix::fs::getxattr(&p, "user.big", &mut value[..]).unwrap();
+    assert_eq!(&value[..n], &big[..]);
+}
+
+#[test]
+fn fifos_and_devices_are_refused() {
+    let d = tempfile::tempdir().unwrap();
+    let fifo = d.path().join("pipe");
+    mknodat(CWD, &fifo, FileType::Fifo, Mode::from_raw_mode(0o600), 0).unwrap();
+    assert!(matches!(load(&fifo), Err(OpenError::NotRegular)));
+    assert!(matches!(
+        load(Path::new("/dev/zero")),
+        Err(OpenError::NotRegular)
+    ));
+}
+
+#[test]
+fn disk_state_sees_content_not_timestamps() {
+    let d = tempfile::tempdir().unwrap();
+    let p = d.path().join("a.txt");
+    assert_eq!(disk_state(&p).unwrap(), None);
+    fs::write(&p, "abc").unwrap();
+    let first = disk_state(&p).unwrap();
+    fs::write(&p, "abc").unwrap();
+    assert_eq!(disk_state(&p).unwrap(), first);
+    fs::write(&p, "abd").unwrap();
+    assert_ne!(disk_state(&p).unwrap(), first);
+}
+
+#[test]
+fn read_only_detection() {
+    let d = tempfile::tempdir().unwrap();
+    let p = d.path().join("a.txt");
+    assert!(!is_read_only(&p), "a missing file isn't read-only");
+    fs::write(&p, "x").unwrap();
+    assert!(!is_read_only(&p));
+    fs::set_permissions(&p, fs::Permissions::from_mode(0o444)).unwrap();
+    if fs::metadata(d.path()).unwrap().uid() == 0 {
+        eprintln!("skipped: root can write to anything");
+        return;
+    }
+    assert!(is_read_only(&p));
 }
 
 #[test]
