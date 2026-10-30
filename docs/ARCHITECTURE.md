@@ -70,7 +70,7 @@ stateDiagram-v2
 
 | Piece | Choice | Why |
 | --- | --- | --- |
-| Language | Rust, stable toolchain (current stable, edition 2021 or 2024) | Single static-ish binary, fast start|
+| Language | Rust, stable toolchain (current stable, edition 2021 or 2024) | Single static-ish binary, fast start. |
 | TUI | ratatui 0.30.x (latest 0.30) | Maintained, has TestBackend so rendering is unit-testable. Use the re-exported ratatui::crossterm so versions can never mismatch (research says crossterm 0.29). If the re-export is missing, add crossterm = "0.29" and pin it. |
 | Text buffer | ropey 1.6 | Mature rope with char and line indexing. |
 | Text units | unicode-segmentation, unicode-width | Cursor moves by grapheme; rendering uses display width. |
@@ -592,7 +592,7 @@ docker run --rm -v "$PWD":/src -w /src kyte-dev cargo test
 docker run --rm -it -v "$PWD":/src -w /src kyte-dev cargo run -- /tmp/try.txt
 ```
 
-On SELinux-enforcing systems, bind mounts need the `:Z` suffix: `-v "$PWD":/src:Z`. Do not disable SELinux anywhere.
+On SELinux-enforcing hosts bind mounts need the `:Z` suffix: `-v "$PWD":/src:Z`. Do not disable SELinux anywhere.
 
 ### Why the demo is feasible headlessly
 
@@ -667,5 +667,5 @@ Alternative for environments that have tmux and asciinema: `scripts/demo-tmux.sh
 - Reader-mode idle auto-activation deferred and off by default when it arrives (question 1).
 - `esc+Home` for reader mode is replaced by an overlay letter when reader mode lands (question 5).
 - Which tree-sitter languages ship in v1 stays at three (Rust, Python, Bash) and only if T13 happens (question 9).
-- Default `$EDITOR` is a post-MVP decision (question 10).
+- Use as the default `$EDITOR` is a post-MVP decision (question 10).
 - License is undecided.

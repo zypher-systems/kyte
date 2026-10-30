@@ -1,5 +1,5 @@
 # docker compose run --rm dev cargo test
-# The :Z suffix relabels the bind mount for SELinux (Fedora). Never disable SELinux.
+# The :Z suffix relabels the bind mount for SELinux. Never disable SELinux.
 services:
   dev:
     build:

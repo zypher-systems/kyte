@@ -10,6 +10,7 @@ These replace the matching parts of `ARCHITECTURE`. `docs/ROADMAP.md` holds the 
 - Ctrl-K stays the universal palette.
 - The unsaved-quit prompt follows Nano: `y` saves and quits, `n` discards, Esc cancels. This replaces section 5.4 and changes AC-18.
 - License: MIT. This settles section 16 and the section 4 note.
+- Kyte isn't tied to any one OS. It's meant to be open source for everyone.
 
 ## Hosting and environment
 

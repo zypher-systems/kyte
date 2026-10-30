@@ -1,6 +1,6 @@
 # Kyte
 
-A terminal text editor, written in Rust with Ratatui.
+A terminal text editor written in Rust with Ratatui.
 
 - **Comfort first.** Kyte always starts in insert mode, like Nano: typing types, arrows move, Ctrl-S saves, Ctrl-Q quits.
 - **Power one key away.** Esc opens a one-key operator layer and shows a legend. Pressing Esc twice opens a command palette.
@@ -166,7 +166,7 @@ make docker-test                 # the same test run
 docker compose run --rm dev make demo
 ```
 
-On SELinux-enforcing systems (Fedora) a bind mount needs the `:Z` suffix so the container may read it. The Makefile adds it by default (`MOUNT_SUFFIX ?= :Z`), and `docker-compose.yml` uses `./:/src:Z`. Leave SELinux enforcing; relabel the mount instead. On hosts without SELinux the suffix is harmless, or set `MOUNT_SUFFIX=`.
+On SELinux-enforcing systems such as Fedora, a bind mount needs the `:Z` suffix so the container may read it. The Makefile adds it by default (`MOUNT_SUFFIX ?= :Z`), and `docker-compose.yml` uses `./:/src:Z`. Leave SELinux enforcing; relabel the mount instead. On hosts without SELinux the suffix is harmless, or set `MOUNT_SUFFIX=`.
 
 These Docker files have not been run yet, because the build machine had no Docker (see `docs/DECISIONS.md`).
 

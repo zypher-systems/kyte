@@ -1,7 +1,7 @@
 # Thin wrappers around cargo (section 12). Docker targets use Docker, never Podman.
 CARGO ?= cargo
 DOCKER ?= docker
-# On SELinux-enforcing hosts (Fedora) bind mounts need the :Z suffix.
+# On SELinux-enforcing hosts bind mounts need the :Z suffix.
 # Never disable SELinux; relabel the mount instead.
 MOUNT_SUFFIX ?= :Z
 
