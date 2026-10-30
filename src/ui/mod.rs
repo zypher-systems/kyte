@@ -75,6 +75,7 @@ mod tests {
     fn app(text: &str) -> App {
         App::new(
             Buffer::from_str(text, Some("/tmp/demo.txt".into())),
+            None,
             &Options::default(),
         )
     }
@@ -151,7 +152,7 @@ mod tests {
 
     #[test]
     fn untitled_save_shows_message() {
-        let mut a = App::new(Buffer::from_str("", None), &Options::default());
+        let mut a = App::new(Buffer::from_str("", None), None, &Options::default());
         a.handle_key(Key::Ctrl('s'), Instant::now()).unwrap();
         let t = draw(&mut a, 60, 6);
         assert!(row(&t, 4).contains("Untitled"));

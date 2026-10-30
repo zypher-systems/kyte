@@ -13,6 +13,7 @@ use crate::input::{normalize, Input, Key};
 use crate::ops;
 use crate::palette::PaletteState;
 use crate::search;
+use crate::swap::SwapWriter;
 
 /// Text-area rows when the terminal size is not known yet.
 const DEFAULT_TEXT_HEIGHT: usize = 28;
@@ -55,6 +56,12 @@ pub struct App {
     pub show_line_numbers: bool,
     pub esc_window: Duration,
     pub quit: bool,
+    /// Leave the swap on disk at exit (Recover modal `q`).
+    pub keep_swap: bool,
+    swap: Option<SwapWriter>,
+    /// Canonical path the swap is keyed by.
+    swap_target: Option<std::path::PathBuf>,
+    last_fsync: Option<Instant>,
     scroll_top: usize,
     scroll_left: usize,
     view: (u16, u16),
@@ -77,8 +84,13 @@ pub const CONFIRM_QUIT_TEXT: &str =
     "Unsaved changes! Quit without saving? Ctrl-Q or y quits, any other key cancels";
 
 impl App {
-    pub fn new(buffer: Buffer, opts: &Options) -> App {
+    pub fn new(buffer: Buffer, swap: Option<SwapWriter>, opts: &Options) -> App {
+        let swap_target = buffer.path().and_then(|p| fileio::resolve_target(p).ok());
         App {
+            keep_swap: false,
+            swap,
+            swap_target,
+            last_fsync: None,
             buffer,
             mode: Mode::Insert,
             message: None,
@@ -149,6 +161,7 @@ impl App {
         Ok(())
     }
 
+    /// Handles one key, then appends the resulting edits to the swap.
     pub fn handle_key(&mut self, key: Key, now: Instant) -> Result<()> {
         if let Key::Alt(_) = key {
             if self.mode == Mode::Insert {
@@ -158,6 +171,41 @@ impl App {
                 return Ok(());
             }
         }
+        self.key_inner(key, now);
+        self.flush_edits();
+        Ok(())
+    }
+
+    /// Write-ahead: every edit reaches `write()` before anything else happens.
+    fn flush_edits(&mut self) {
+        let edits = self.buffer.take_pending_edits();
+        if edits.is_empty() {
+            return;
+        }
+        if let Some(w) = self.swap.as_mut() {
+            if let Err(e) = w.append(&edits) {
+                self.set_error(format!("Swap write failed: {e}"));
+            }
+        }
+    }
+
+    /// Whether a swap file is being written.
+    pub fn swap_path(&self) -> Option<&std::path::Path> {
+        self.swap.as_ref().map(|w| w.path())
+    }
+
+    /// Called once after the event loop: removes the swap unless it must be kept.
+    pub fn finish(&mut self) {
+        if let Some(w) = self.swap.take() {
+            if self.keep_swap {
+                let _ = { w }.fsync_if_pending();
+            } else {
+                let _ = w.remove();
+            }
+        }
+    }
+
+    fn key_inner(&mut self, key: Key, now: Instant) {
         self.message = None;
         self.message_is_error = false;
         let mode = self.mode.clone();
@@ -179,7 +227,6 @@ impl App {
                 }
             }
         }
-        Ok(())
     }
 
     fn insert_key(&mut self, key: Key, now: Instant) {
@@ -453,12 +500,24 @@ impl App {
             }
             Mode::Prompt(_) | Mode::Help => {}
         }
+        self.flush_edits();
         Ok(())
     }
 
     /// Called when the poll timeout elapses with no input.
+    /// fsyncs a dirty swap at most once per second.
     pub fn tick(&mut self, now: Instant) -> Result<()> {
-        let _ = now;
+        let due = self
+            .last_fsync
+            .is_none_or(|t| now.saturating_duration_since(t) >= Duration::from_secs(1));
+        if due {
+            if let Some(w) = self.swap.as_mut() {
+                if let Err(e) = w.fsync_if_pending() {
+                    self.set_error(format!("Swap fsync failed: {e}"));
+                }
+            }
+            self.last_fsync = Some(now);
+        }
         Ok(())
     }
 
@@ -474,6 +533,16 @@ impl App {
                 self.buffer.mark_clean();
                 let n = self.buffer.saved_line_count();
                 self.set_message(format!("Saved {n} line{}", if n == 1 { "" } else { "s" }));
+                // The saved file is the new base: replace the swap with an empty one.
+                if let Some(old) = self.swap.take() {
+                    let _ = old.remove();
+                }
+                if let Some(target) = self.swap_target.clone() {
+                    match SwapWriter::create(&target, text.as_bytes()) {
+                        Ok(w) => self.swap = Some(w),
+                        Err(e) => self.set_error(format!("Saved {n} lines, but no swap: {e}")),
+                    }
+                }
             }
             Err(e) => self.set_error(format!("Save failed: {e}")),
         }
@@ -512,7 +581,7 @@ mod tests {
     use super::*;
 
     fn app(text: &str) -> App {
-        App::new(Buffer::from_str(text, None), &Options::default())
+        App::new(Buffer::from_str(text, None), None, &Options::default())
     }
 
     fn ms(t: Instant, n: u64) -> Instant {
@@ -562,7 +631,7 @@ mod tests {
             esc_ms: 800,
             ..Options::default()
         };
-        let mut a = App::new(Buffer::from_str("", None), &opts);
+        let mut a = App::new(Buffer::from_str("", None), None, &opts);
         let t = Instant::now();
         a.handle_key(Key::Esc, t).unwrap();
         a.handle_key(Key::Esc, ms(t, 500)).unwrap();

@@ -978,3 +978,130 @@ fn ac17_quit_without_saving_command() {
     assert_eq!(p.wait_exit(TIMEOUT), 0);
     assert_eq!(fs::read_to_string(&f).unwrap(), "abc\n");
 }
+
+// ---------------------------------------------------------------- swap helpers
+
+/// Runs `kyte --print-swap FILE` without a tty; returns (exit code, stdout).
+fn print_swap(env: &Env, f: &Path) -> (i32, String) {
+    let out = Command::new(bin())
+        .arg("--print-swap")
+        .arg(f)
+        .env("KYTE_STATE_DIR", &env.state)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+    )
+}
+
+fn swap_files(env: &Env) -> Vec<PathBuf> {
+    fs::read_dir(&env.state)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.to_string_lossy().ends_with(".kyteswp"))
+        .collect()
+}
+
+/// A work directory separate from the state directory.
+fn work_file(env: &Env, name: &str, text: &str) -> PathBuf {
+    let dir = env.path("work");
+    fs::create_dir_all(&dir).unwrap();
+    let p = dir.join(name);
+    fs::write(&p, text).unwrap();
+    p
+}
+
+fn dir_names(d: &Path) -> Vec<String> {
+    let mut v: Vec<String> = fs::read_dir(d)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    v.sort();
+    v
+}
+
+// ---------------------------------------------------------------- AC-19
+
+#[test]
+fn ac19_swap_exists_0600_outside_file_dir_and_recreated_after_save() {
+    let env = Env::new();
+    let f = work_file(&env, "doc.txt", "orig\n");
+    let mut p = env.open(&f);
+    p.send_str("abc");
+    wait_status(&p, "[+]");
+    let swaps = swap_files(&env);
+    assert_eq!(swaps.len(), 1, "one swap under KYTE_STATE_DIR");
+    let mode = fs::metadata(&swaps[0]).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600);
+    assert_eq!(
+        dir_names(f.parent().unwrap()),
+        vec!["doc.txt".to_string()],
+        "nothing next to the file"
+    );
+    assert_eq!(
+        fs::read_to_string(&f).unwrap(),
+        "orig\n",
+        "real file untouched before Ctrl-S"
+    );
+    assert_eq!(print_swap(&env, &f), (0, "abcorig\n".to_string()));
+    save_and_wait(&mut p);
+    assert_eq!(fs::read_to_string(&f).unwrap(), "abcorig\n");
+    let swaps = swap_files(&env);
+    assert_eq!(swaps.len(), 1, "swap recreated after save");
+    assert_eq!(
+        kyte::swap::record_count(&swaps[0]).unwrap(),
+        0,
+        "fresh swap has no edits"
+    );
+    assert_eq!(print_swap(&env, &f), (0, "abcorig\n".to_string()));
+    quit_clean(&mut p);
+    assert!(swap_files(&env).is_empty(), "clean quit removes the swap");
+    assert_eq!(print_swap(&env, &f).0, 3);
+}
+
+#[test]
+fn ac19_discard_quit_removes_swap_and_print_swap_exits_3() {
+    let env = Env::new();
+    let f = work_file(&env, "doc.txt", "orig\n");
+    let mut p = env.open(&f);
+    p.send_str("zzz");
+    wait_status(&p, "[+]");
+    p.send_keys(&["C-q"]);
+    p.wait_for("Unsaved changes", TIMEOUT);
+    p.send_keys(&["C-q"]);
+    assert_eq!(p.wait_exit(TIMEOUT), 0);
+    assert!(swap_files(&env).is_empty());
+    assert_eq!(print_swap(&env, &f).0, 3);
+    assert_eq!(fs::read_to_string(&f).unwrap(), "orig\n");
+}
+
+// ---------------------------------------------------------------- AC-23
+
+#[test]
+fn ac23_second_instance_exits_2_naming_pid_and_leaves_swap() {
+    let env = Env::new();
+    let f = work_file(&env, "lock.txt", "shared\n");
+    let mut a = env.open(&f);
+    a.send_str("edit ");
+    wait_status(&a, "[+]");
+    let swap = swap_files(&env).pop().unwrap();
+    let before = fs::read(&swap).unwrap();
+    let pid = a.pid();
+    let mut b = Pty::kyte(&bin(), &env.state, &[f.to_str().unwrap()]);
+    assert_eq!(b.wait_exit(TIMEOUT), 2);
+    let msg = b.screen();
+    assert!(
+        msg.contains(&format!("PID {pid}")),
+        "message must name PID {pid}: {msg}"
+    );
+    assert_eq!(fs::read(&swap).unwrap(), before, "swap untouched");
+    // the first instance still works
+    a.send_str("more");
+    a.wait_for("edit more", TIMEOUT);
+    a.send_keys(&["C-q"]);
+    a.wait_for("Unsaved changes", TIMEOUT);
+    a.send_keys(&["y"]);
+    assert_eq!(a.wait_exit(TIMEOUT), 0);
+}

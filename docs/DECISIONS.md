@@ -56,3 +56,14 @@ Every deviation from `ARCHITECTURE` (Mnemo page_e336285940d54098ada133cc08df814b
 - Added `Mode::Help` for the "Show key help" modal (Esc, Enter or q close it). The section 5.3 `Mode` enum had no slot for a modal other than Recover.
 - Go to line: `0` counts as line 1; huge numbers clamp to the last line; anything that is not digits shows "Not a line number" next to the prompt and keeps it open.
 - Status bar mode labels besides INSERT and ESC: PALETTE, SEARCH, GOTO, QUIT?, HELP, RECOVER.
+
+## T9 swap log
+
+- The swap is created when a file is opened (not on the first edit), so the PID lock holds for the whole session; it has no records until the first edit. A swap whose replay equals the file (no unsaved edits, e.g. after a kill of an unmodified session) counts as "no swap" and is silently replaced.
+- A swap with an unreadable header (bad magic, wrong version, truncated header) is treated as stale: the user may discard it or quit.
+- The swap key is the canonical target path: symlinks resolved for existing files; for a new file, its canonicalized directory plus the name. `--print-swap` uses the same key.
+- Liveness is `/proc/<pid>` existing and the PID not being Kyte's own; a recycled PID owned by an unrelated process would be reported as a live lock (the safe direction).
+- If the swap cannot be created for a reason other than a live lock (for example an unwritable state directory) Kyte still opens the file and shows a warning on the message line that crash recovery is off.
+- Replay also stops at a record whose edit falls outside the text (bounds check), in addition to short and CRC-bad records. Unknown record kinds are skipped by length (section 13 hook).
+- Very long paths can exceed the 255-byte file-name limit once escaped; this is not handled in the MVP (swap creation fails with a warning and the file still opens).
+- Added `SwapWriter::create_in` and `swap::inspect_in` taking an explicit directory so tests do not mutate process-wide environment variables, plus `record_count`, `parse_header`, `encode_record`, `stale_info`, `live_lock_pid`.
