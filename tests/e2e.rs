@@ -797,3 +797,184 @@ fn ac16_empty_query_does_nothing() {
     assert!(!status(&p).contains("[+]"));
     quit_clean(&mut p);
 }
+
+// ---------------------------------------------------------------- AC-17
+
+const COMMANDS: [&str; 9] = [
+    "Save",
+    "Quit",
+    "Quit without saving",
+    "Undo",
+    "Redo",
+    "Find",
+    "Go to line",
+    "Toggle line numbers",
+    "Show key help",
+];
+
+fn open_palette(p: &mut Pty) {
+    open_overlay(p);
+    p.send_keys(&["Esc"]);
+    p.wait_for("Command palette", TIMEOUT);
+}
+
+/// Row text of the first palette result (the row after the `> ` input line).
+fn first_result(p: &Pty) -> String {
+    let rows = p.rows();
+    let i = rows
+        .iter()
+        .position(|r| r.contains("│> "))
+        .expect("palette input row");
+    rows[i + 1].clone()
+}
+
+#[test]
+fn ac17_palette_lists_all_nine_commands() {
+    let env = Env::new();
+    let f = env.write("p.txt", "abc\n");
+    let mut p = env.open(&f);
+    open_palette(&mut p);
+    let mut seen: Vec<&str> = COMMANDS
+        .iter()
+        .copied()
+        .filter(|c| p.screen().contains(c))
+        .collect();
+    assert!(first_result(&p).contains("▸ Save"), "{}", p.dump());
+    // 8 rows are visible at once; scrolling down reveals the ninth
+    for _ in 0..8 {
+        p.send_keys(&["Down"]);
+    }
+    p.wait_for("▸ Show key help", TIMEOUT);
+    for c in COMMANDS {
+        if p.screen().contains(c) && !seen.contains(&c) {
+            seen.push(c);
+        }
+    }
+    assert_eq!(seen.len(), 9, "saw {seen:?}");
+    p.send_keys(&["Esc"]);
+    p.wait_gone("Command palette", TIMEOUT);
+    quit_clean(&mut p);
+}
+
+#[test]
+fn ac17_sav_puts_save_first_and_enter_saves() {
+    let env = Env::new();
+    let f = env.write("p.txt", "abc\n");
+    let mut p = env.open(&f);
+    p.send_str("X");
+    wait_status(&p, "[+]");
+    open_palette(&mut p);
+    p.send_str("sav");
+    p.wait_for("> sav", TIMEOUT);
+    assert!(first_result(&p).contains("▸ Save"), "{}", p.dump());
+    p.send_keys(&["Enter"]);
+    p.wait_for("Saved 1 line", TIMEOUT);
+    assert!(!status(&p).contains("[+]"));
+    quit_clean(&mut p);
+    assert_eq!(fs::read_to_string(&f).unwrap(), "Xabc\n");
+}
+
+#[test]
+fn ac17_go_to_line_prompt() {
+    let env = Env::new();
+    let text: String = (1..=12).map(|i| format!("line {i}\n")).collect();
+    let f = env.write("g.txt", &text);
+    let mut p = env.open(&f);
+    for query in ["goto", "go to"] {
+        open_palette(&mut p);
+        p.send_str(query);
+        p.wait_for(&format!("> {query}"), TIMEOUT);
+        assert!(first_result(&p).contains("▸ Go to line"), "{}", p.dump());
+        p.send_keys(&["Enter"]);
+        p.wait_for("Go to line:", TIMEOUT);
+        p.send_str("9");
+        p.send_keys(&["Enter"]);
+        p.wait_gone("Go to line:", TIMEOUT);
+        wait_status(&p, "Ln 9, Col 1");
+        p.send_keys(&["C-Home"]);
+        wait_status(&p, "Ln 1, Col 1");
+    }
+    // out of range clamps to the last line
+    open_palette(&mut p);
+    p.send_str("goto");
+    p.send_keys(&["Enter"]);
+    p.wait_for("Go to line:", TIMEOUT);
+    p.send_str("999");
+    p.send_keys(&["Enter"]);
+    p.wait_gone("Go to line:", TIMEOUT);
+    wait_status(&p, "Ln 13, Col 1");
+    // non-numeric input shows an error and stays open
+    open_palette(&mut p);
+    p.send_str("goto");
+    p.send_keys(&["Enter"]);
+    p.wait_for("Go to line:", TIMEOUT);
+    p.send_str("abc");
+    p.send_keys(&["Enter"]);
+    p.wait_for("Not a line number", TIMEOUT);
+    assert!(p.screen().contains("Go to line: abc"));
+    p.send_keys(&["Esc"]);
+    p.wait_gone("Go to line:", TIMEOUT);
+    wait_status(&p, "Ln 13, Col 1");
+    assert!(!status(&p).contains("[+]"));
+    quit_clean(&mut p);
+}
+
+#[test]
+fn ac17_esc_closes_without_running() {
+    let env = Env::new();
+    let f = env.write("p.txt", "abc\n");
+    let mut p = env.open(&f);
+    p.send_str("X");
+    wait_status(&p, "[+]");
+    open_palette(&mut p);
+    p.send_str("sav");
+    p.wait_for("> sav", TIMEOUT);
+    p.send_keys(&["Esc"]);
+    p.wait_gone("Command palette", TIMEOUT);
+    std::thread::sleep(Duration::from_millis(50));
+    assert!(status(&p).contains("[+]"), "Save must not have run");
+    assert!(!p.screen().contains("Saved"));
+    assert_eq!(fs::read_to_string(&f).unwrap(), "abc\n");
+    p.send_keys(&["C-q"]);
+    p.wait_for("Unsaved changes", TIMEOUT);
+    p.send_keys(&["C-q"]);
+    p.wait_exit(TIMEOUT);
+}
+
+#[test]
+fn ac17_toggle_line_numbers_and_key_help() {
+    let env = Env::new();
+    let f = env.write("p.txt", "abc\n");
+    let mut p = env.open(&f);
+    assert_eq!(p.row(0), "  1 │ abc");
+    open_palette(&mut p);
+    p.send_str("toggle");
+    p.send_keys(&["Enter"]);
+    p.wait_until("gutter hidden", TIMEOUT, |_| p.row(0) == "abc");
+    open_palette(&mut p);
+    p.send_str("toggle");
+    p.send_keys(&["Enter"]);
+    p.wait_until("gutter shown", TIMEOUT, |_| p.row(0) == "  1 │ abc");
+    open_palette(&mut p);
+    p.send_str("help");
+    p.send_keys(&["Enter"]);
+    p.wait_for("Kyte keys", TIMEOUT);
+    assert!(p.screen().contains("del word, del line, del to end"));
+    p.send_keys(&["Esc"]);
+    p.wait_gone("Kyte keys", TIMEOUT);
+    quit_clean(&mut p);
+}
+
+#[test]
+fn ac17_quit_without_saving_command() {
+    let env = Env::new();
+    let f = env.write("p.txt", "abc\n");
+    let mut p = env.open(&f);
+    p.send_str("junk");
+    wait_status(&p, "[+]");
+    open_palette(&mut p);
+    p.send_str("without");
+    p.send_keys(&["Enter"]);
+    assert_eq!(p.wait_exit(TIMEOUT), 0);
+    assert_eq!(fs::read_to_string(&f).unwrap(), "abc\n");
+}

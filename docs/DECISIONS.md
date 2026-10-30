@@ -48,3 +48,11 @@ Every deviation from `ARCHITECTURE` (Mnemo page_e336285940d54098ada133cc08df814b
 
 - While the search prompt is open the terminal cursor stays on the current match in the text (so the jump is visible); the query is shown on the message line as `Search: <query>`. "No match" is appended there when nothing matches.
 - Keys other than typing, Backspace, Enter and Esc are ignored while the search prompt is open.
+
+## T8 palette and prompts
+
+- The popup shows up to 8 result rows (section 9), so with an empty query 8 of the 9 commands are visible at once and the ninth ("Show key help") scrolls into view with Down. AC-17's "lists all nine commands" is verified as: all nine are in the result list (unit test) and all nine are seen on screen while scrolling (e2e).
+- The selected row is marked with `▸` as well as the selected colors, so text frames and screen dumps show the selection.
+- Added `Mode::Help` for the "Show key help" modal (Esc, Enter or q close it). The section 5.3 `Mode` enum had no slot for a modal other than Recover.
+- Go to line: `0` counts as line 1; huge numbers clamp to the last line; anything that is not digits shows "Not a line number" next to the prompt and keeps it open.
+- Status bar mode labels besides INSERT and ESC: PALETTE, SEARCH, GOTO, QUIT?, HELP, RECOVER.

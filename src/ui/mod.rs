@@ -38,6 +38,7 @@ pub fn render(app: &App, frame: &mut Frame) {
     chrome::status_bar(app, status_area, cells, theme);
     let prompt_cursor = chrome::message_line(app, msg_area, cells, theme);
     let popup_cursor = chrome::palette(app, text_area, cells, theme);
+    chrome::help(app, text_area, cells, theme);
     if let Some((x, y)) = popup_cursor.or(prompt_cursor).or(text_cursor) {
         frame.set_cursor_position((x, y));
     }

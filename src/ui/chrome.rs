@@ -8,6 +8,8 @@ use ratatui::layout::Rect as R;
 use ratatui::widgets::{Block, Borders, Clear, Widget};
 
 use crate::app::{App, Mode, Prompt, CONFIRM_QUIT_TEXT, LEGEND};
+use crate::command::KEY_HELP;
+use crate::palette::VISIBLE_ROWS;
 
 /// Status bar: mode, file name, dirty marker, position (one full row).
 pub fn status_bar(app: &App, area: Rect, cells: &mut Cells, theme: &Theme) {
@@ -44,6 +46,25 @@ pub fn message_line(app: &App, area: Rect, cells: &mut Cells, theme: &Theme) -> 
     }
     let text = match &app.mode {
         Mode::Prompt(Prompt::ConfirmQuit) => CONFIRM_QUIT_TEXT.to_string(),
+        Mode::Prompt(Prompt::GotoLine { text }) => {
+            let shown = format!(" Go to line: {text}");
+            let n = shown.chars().count();
+            match &app.message {
+                Some(m) => {
+                    cells.set_stringn(area.x, area.y, &shown, w, theme.message);
+                    if n + 3 < w {
+                        cells.set_stringn(area.x + n as u16 + 3, area.y, m, w - n - 3, theme.error);
+                    }
+                }
+                None => {
+                    cells.set_stringn(area.x, area.y, &shown, w, theme.message);
+                }
+            }
+            return Some((
+                area.x + (n as u16).min(area.width.saturating_sub(1)),
+                area.y,
+            ));
+        }
         Mode::Prompt(Prompt::Search { query, .. }) => match &app.message {
             Some(m) => format!("Search: {query}   ({m})"),
             None => format!("Search: {query}"),
@@ -117,7 +138,7 @@ pub fn palette(app: &App, text_area: Rect, cells: &mut Cells, theme: &Theme) -> 
     let Mode::Palette(state) = &app.mode else {
         return None;
     };
-    let rows = 1u16;
+    let rows = state.results.len().clamp(1, VISIBLE_ROWS) as u16;
     let w = 54.min(text_area.width.saturating_sub(2)).max(10);
     let area = centered(text_area, w, rows + 3);
     let inner = modal_box(
@@ -128,13 +149,67 @@ pub fn palette(app: &App, text_area: Rect, cells: &mut Cells, theme: &Theme) -> 
         theme.palette_border,
     );
     let input = format!("> {}", state.query);
-    cells.set_stringn(
-        inner.x,
-        inner.y,
-        &input,
-        inner.width as usize,
-        theme.palette,
-    );
+    let iw = inner.width as usize;
+    cells.set_stringn(inner.x, inner.y, &input, iw, theme.palette);
+    if state.results.is_empty() {
+        if inner.height > 1 {
+            cells.set_stringn(
+                inner.x,
+                inner.y + 1,
+                "  No matching command",
+                iw,
+                theme.palette,
+            );
+        }
+    } else {
+        let off = state.scroll_offset();
+        for (i, cmd) in state
+            .results
+            .iter()
+            .enumerate()
+            .skip(off)
+            .take(VISIBLE_ROWS)
+        {
+            let y = inner.y + 1 + (i - off) as u16;
+            if y >= inner.y + inner.height {
+                break;
+            }
+            let sel = i == state.selected;
+            let style = if sel { theme.selected } else { theme.palette };
+            let marker = if sel { "▸ " } else { "  " };
+            let label = format!("{marker}{}", cmd.label());
+            let hint = cmd.hint();
+            let pad = iw.saturating_sub(label.chars().count() + hint.len() + 1);
+            let line = format!("{label}{}{hint} ", " ".repeat(pad));
+            cells.set_style(Rect::new(inner.x, y, inner.width, 1), style);
+            cells.set_stringn(inner.x, y, line, iw, style);
+        }
+    }
     let cx = inner.x + (input.chars().count() as u16).min(inner.width.saturating_sub(1));
     Some((cx, inner.y))
+}
+
+/// The "Show key help" modal.
+pub fn help(app: &App, text_area: Rect, cells: &mut Cells, theme: &Theme) {
+    if app.mode != Mode::Help {
+        return;
+    }
+    let w = 64.min(text_area.width.saturating_sub(2)).max(10);
+    let h = (KEY_HELP.len() as u16 + 4).min(text_area.height);
+    let area = centered(text_area, w, h);
+    let inner = modal_box(
+        area,
+        cells,
+        "Kyte keys (Esc closes)",
+        theme.modal,
+        theme.palette_border,
+    );
+    for (i, (k, v)) in KEY_HELP.iter().enumerate() {
+        let y = inner.y + 1 + i as u16;
+        if y >= inner.y + inner.height {
+            break;
+        }
+        let line = format!(" {k:<26}{v}");
+        cells.set_stringn(inner.x, y, line, inner.width as usize, theme.modal);
+    }
 }

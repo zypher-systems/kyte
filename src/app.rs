@@ -7,6 +7,7 @@ use anyhow::Result;
 
 use crate::buffer::{Buffer, GroupKind};
 use crate::cli::Options;
+use crate::command::{self, Command};
 use crate::fileio;
 use crate::input::{normalize, Input, Key};
 use crate::ops;
@@ -26,6 +27,8 @@ pub enum Mode {
     },
     Palette(PaletteState),
     Prompt(Prompt),
+    /// The "Show key help" modal; Esc closes it.
+    Help,
 }
 
 /// One-line prompts on the message line.
@@ -35,6 +38,9 @@ pub enum Prompt {
     Search {
         query: String,
         origin: usize,
+    },
+    GotoLine {
+        text: String,
     },
     ConfirmQuit,
 }
@@ -160,10 +166,16 @@ impl App {
             Mode::Overlay { opened_at } => self.overlay_key(key, opened_at, now),
             Mode::Palette(state) => self.palette_key(key, state),
             Mode::Prompt(Prompt::Search { query, origin }) => self.search_key(key, query, origin),
+            Mode::Prompt(Prompt::GotoLine { text }) => self.goto_key(key, text),
+            Mode::Help => {
+                if matches!(key, Key::Esc | Key::Enter | Key::Char('q')) {
+                    self.mode = Mode::Insert;
+                }
+            }
             Mode::Prompt(Prompt::ConfirmQuit) => {
                 self.mode = Mode::Insert;
                 if matches!(key, Key::Ctrl('q') | Key::Char('y')) {
-                    self.quit = true;
+                    self.discard_and_quit();
                 }
             }
         }
@@ -290,17 +302,69 @@ impl App {
 
     fn palette_key(&mut self, key: Key, mut state: PaletteState) {
         match key {
-            Key::Esc => self.mode = Mode::Insert,
-            Key::Char(c) => {
-                state.query.push(c);
-                self.mode = Mode::Palette(state);
+            Key::Esc => {
+                self.mode = Mode::Insert;
+                return;
             }
-            Key::Backspace => {
-                state.query.pop();
-                self.mode = Mode::Palette(state);
+            Key::Enter => {
+                if let Some(cmd) = state.selected_command() {
+                    self.mode = Mode::Insert;
+                    self.run_command(cmd);
+                    return;
+                }
             }
-            _ => self.mode = Mode::Palette(state),
+            Key::Char(c) => state.push(c),
+            Key::Backspace => state.pop(),
+            Key::Up => state.up(),
+            Key::Down => state.down(),
+            _ => {}
         }
+        self.mode = Mode::Palette(state);
+    }
+
+    /// Runs a palette command (the palette is already closed).
+    pub fn run_command(&mut self, cmd: Command) {
+        match cmd {
+            Command::Save => self.save(),
+            Command::Quit => self.request_quit(),
+            Command::QuitWithoutSaving => self.discard_and_quit(),
+            Command::Undo => self.undo(),
+            Command::Redo => self.redo(),
+            Command::Find => self.open_search(),
+            Command::GotoLine => {
+                self.mode = Mode::Prompt(Prompt::GotoLine {
+                    text: String::new(),
+                })
+            }
+            Command::ToggleLineNumbers => self.show_line_numbers = !self.show_line_numbers,
+            Command::ShowKeyHelp => self.mode = Mode::Help,
+        }
+    }
+
+    fn goto_key(&mut self, key: Key, mut text: String) {
+        match key {
+            Key::Esc => {
+                self.mode = Mode::Insert;
+                return;
+            }
+            Key::Enter => match command::parse_line_number(&text) {
+                Ok(n) => {
+                    let last = self.buffer.line_count();
+                    let line = n.min(last) - 1;
+                    let start = self.buffer.line_start(line);
+                    self.buffer.move_to(start);
+                    self.mode = Mode::Insert;
+                    return;
+                }
+                Err(e) => self.set_error(e),
+            },
+            Key::Char(c) => text.push(c),
+            Key::Backspace => {
+                text.pop();
+            }
+            _ => {}
+        }
+        self.mode = Mode::Prompt(Prompt::GotoLine { text });
     }
 
     fn delete_range(&mut self, r: std::ops::Range<usize>, cursor_after: usize) {
@@ -384,9 +448,10 @@ impl App {
                 self.buffer.insert_str(&text, GroupKind::Paste);
             }
             Mode::Palette(state) => {
-                state.query.push_str(&text.replace('\n', " "));
+                let q = format!("{}{}", state.query, text.replace('\n', " "));
+                state.set_query(q);
             }
-            Mode::Prompt(_) => {}
+            Mode::Prompt(_) | Mode::Help => {}
         }
         Ok(())
     }
@@ -423,6 +488,11 @@ impl App {
         }
     }
 
+    /// Quits discarding changes (ConfirmQuit `y`, "Quit without saving").
+    pub fn discard_and_quit(&mut self) {
+        self.quit = true;
+    }
+
     /// Label for the status bar mode field.
     pub fn mode_label(&self) -> &'static str {
         match &self.mode {
@@ -430,7 +500,9 @@ impl App {
             Mode::Overlay { .. } => "ESC",
             Mode::Palette(_) => "PALETTE",
             Mode::Prompt(Prompt::Search { .. }) => "SEARCH",
-            Mode::Prompt(_) => "PROMPT",
+            Mode::Prompt(Prompt::GotoLine { .. }) => "GOTO",
+            Mode::Prompt(Prompt::ConfirmQuit) => "QUIT?",
+            Mode::Help => "HELP",
         }
     }
 }
@@ -673,6 +745,71 @@ mod tests {
         a.handle_key(Key::Esc, t).unwrap();
         assert_eq!(a.buffer.cursor(), 0);
         assert!(!a.buffer.is_dirty());
+    }
+
+    #[test]
+    fn palette_filter_and_run_save_untitled() {
+        let t = Instant::now();
+        let mut a = app("x");
+        a.handle_key(Key::Ctrl('p'), t).unwrap();
+        typ(&mut a, "sav");
+        match &a.mode {
+            Mode::Palette(s) => assert_eq!(s.selected_command(), Some(Command::Save)),
+            m => panic!("{m:?}"),
+        }
+        a.handle_key(Key::Enter, t).unwrap();
+        assert_eq!(a.mode, Mode::Insert);
+        assert_eq!(
+            a.message.as_deref(),
+            Some("No file name; start Kyte with a file path")
+        );
+    }
+
+    #[test]
+    fn palette_goto_line_prompt() {
+        let t = Instant::now();
+        let mut a = app("1\n2\n3\n4\n5");
+        a.handle_key(Key::Ctrl('p'), t).unwrap();
+        typ(&mut a, "goto");
+        a.handle_key(Key::Enter, t).unwrap();
+        assert!(matches!(a.mode, Mode::Prompt(Prompt::GotoLine { .. })));
+        typ(&mut a, "3");
+        a.handle_key(Key::Enter, t).unwrap();
+        assert_eq!(a.buffer.line_col(), (3, 1));
+        assert_eq!(a.mode, Mode::Insert);
+        a.run_command(Command::GotoLine);
+        typ(&mut a, "999");
+        a.handle_key(Key::Enter, t).unwrap();
+        assert_eq!(a.buffer.line_col(), (5, 1));
+        a.run_command(Command::GotoLine);
+        typ(&mut a, "abc");
+        a.handle_key(Key::Enter, t).unwrap();
+        assert!(matches!(a.mode, Mode::Prompt(Prompt::GotoLine { .. })));
+        assert!(a.message_is_error);
+        a.handle_key(Key::Esc, t).unwrap();
+        assert_eq!(a.mode, Mode::Insert);
+        assert_eq!(a.buffer.line_col(), (5, 1));
+    }
+
+    #[test]
+    fn palette_toggle_numbers_help_and_esc() {
+        let t = Instant::now();
+        let mut a = app("x");
+        a.run_command(Command::ToggleLineNumbers);
+        assert!(!a.show_line_numbers);
+        a.run_command(Command::ToggleLineNumbers);
+        assert!(a.show_line_numbers);
+        a.run_command(Command::ShowKeyHelp);
+        assert_eq!(a.mode, Mode::Help);
+        a.handle_key(Key::Char('z'), t).unwrap();
+        assert_eq!(a.mode, Mode::Help);
+        a.handle_key(Key::Esc, t).unwrap();
+        assert_eq!(a.mode, Mode::Insert);
+        a.handle_key(Key::Ctrl('p'), t).unwrap();
+        typ(&mut a, "und");
+        a.handle_key(Key::Esc, t).unwrap();
+        assert_eq!(a.mode, Mode::Insert);
+        assert_eq!(a.buffer.to_string(), "x");
     }
 
     #[test]
