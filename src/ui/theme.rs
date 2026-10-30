@@ -12,10 +12,9 @@ pub struct Theme {
     pub status_mode: Style,
     pub status_mode_overlay: Style,
     pub message: Style,
-    pub legend: Style,
-    pub legend_key: Style,
     pub palette: Style,
     pub palette_border: Style,
+    pub menu_key: Style,
     pub selected: Style,
     pub selection: Style,
     pub search_match: Style,
@@ -42,13 +41,12 @@ pub const DARK: Theme = Theme {
         .bg(ix(214))
         .add_modifier(Modifier::BOLD),
     message: Style::new().fg(ix(250)).bg(ix(234)),
-    legend: Style::new().fg(ix(252)).bg(ix(236)),
-    legend_key: Style::new()
-        .fg(ix(214))
-        .bg(ix(236))
-        .add_modifier(Modifier::BOLD),
     palette: Style::new().fg(ix(252)).bg(ix(237)),
     palette_border: Style::new().fg(ix(110)).bg(ix(237)),
+    menu_key: Style::new()
+        .fg(ix(214))
+        .bg(ix(237))
+        .add_modifier(Modifier::BOLD),
     selected: Style::new()
         .fg(ix(235))
         .bg(ix(110))

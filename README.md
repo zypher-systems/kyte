@@ -103,13 +103,7 @@ Copy and cut also reach the system clipboard, through the terminal's OSC 52 sequ
 
 ### The Esc layer
 
-Esc never waits. The layer opens at once, the status bar shows `ESC`, and the message line shows the legend:
-
-```
-w del word d del line k del to end % match / search u undo r redo s save h history Esc Esc palette
-```
-
-On a terminal narrower than 100 columns the legend uses shorter words, and leaves out `u` and `r`, so it still fits in 80: `w word d line k to end ...`.
+Esc never waits. The layer opens at once, the status bar shows `ESC`, and a floating menu lists the keys. It sits in a corner, clear of the cursor.
 
 The next key runs one operator and closes the layer:
 
@@ -141,7 +135,7 @@ Kyte works out whether a file indents with tabs or spaces, and how many, from it
 
 **Save as** asks for a file name, starting from the current one; `~/` means your home directory, and Tab completes the path. It asks before overwriting a file, and refuses a file another Kyte has open. The buffer then belongs to the new file, and the old file stays as it was.
 
-**Open file** (Ctrl-O) asks for a path, starting in the current file's directory. Tab completes it. A path that doesn't exist yet opens as a new file. Kyte holds one file at a time, so opening another replaces the current one, and if you have unsaved changes it asks first: `y` saves them, `n` discards them, Esc cancels. If the new file left a crashed session behind, Kyte offers to recover it; quitting that offer closes Kyte.
+**Open file** (Ctrl-O) asks for a path, starting in the current file's directory. Tab completes it, and lists the matches in a floating box when there's more than one. A path that doesn't exist yet opens as a new file. Kyte holds one file at a time, so opening another replaces the current one, and if you have unsaved changes it asks first: `y` saves them, `n` discards them, Esc cancels. If the new file left a crashed session behind, Kyte offers to recover it; quitting that offer closes Kyte.
 
 **Go to line** asks for a 1-based line number. Numbers past the end go to the last line, and anything that is not a number shows an error. **Show key help** shows the key table; Up and Down scroll it, and Esc closes it.
 
@@ -159,7 +153,7 @@ Files are listed from the directory you started Kyte in, nearest first. Hidden f
 
 ### File history
 
-Kyte keeps every edit to a file, across sessions, including edits you later undo or discard. A version that a save replaced from outside Kyte is kept too. Esc `h` (or **File history** in the palette) opens a read-only view of the file's past, starting at the newest version. What each step added is selected.
+Kyte keeps every edit to a file, across sessions, including edits you later undo or discard. A version that a save replaced from outside Kyte is kept too. Esc `h` (or **File history** in the palette) opens a read-only view of the file's past, starting at the newest version. What each step added is selected, and a floating menu lists the keys.
 
 | Key | Action |
 | --- | --- |

@@ -12,6 +12,13 @@ These replace the matching parts of `ARCHITECTURE`. `docs/ROADMAP.md` holds the 
 - License: MIT. This settles section 16 and the section 4 note.
 - Kyte isn't tied to any one OS. It's meant to be open source for everyone.
 
+## Floating menus
+
+- Anything the user picks from goes in a floating box, by the user's direction: the Esc layer, the unsaved, overwrite and delete questions, replace's choices, the history keys and Tab completions. The footer keeps status and passing messages.
+- Typed input for search, replace, go to line, Open and Save As stays on the message line, because there's nothing to pick from, and search needs the text in view.
+- A question takes the middle of the screen. The Esc layer, replace and history sit in a corner clear of the cursor, because what's under the cursor matters there.
+- Rows that don't fit the height flow into more columns, so every key stays visible on a short terminal. This replaces the short legend wording.
+
 ## File history
 
 - Every edit is kept, by decision: not only saves and crashes. So a file's log grows with every keystroke, and nothing prunes it yet. Measured with a million single-character edits on a 30 KB file: the log is 34 MB (34 bytes per edit), the timeline opens in 105 ms, any version shows in about 8 µs, and a session's first edit takes 31 ms, because it reads the log. Later edits take under a microsecond.
@@ -26,7 +33,6 @@ These replace the matching parts of `ARCHITECTURE`. `docs/ROADMAP.md` holds the 
 - History is keyed by path. Following renames would need file identity that survives across tools, which is out of scope for now.
 - A failed history write stops history for the session and shows `no history`, and never stops editing.
 - The logs are off in unit tests unless `enable_history` is called, because `App::new` alone must not touch the real state directory.
-- The legend went to single spaces to fit `h history` in 100 columns, with `% bracket` shortened to `% match`. Its narrow form drops `u` and `r`, which Ctrl-Z and Ctrl-Y cover.
 
 ## Highlighting on by default
 
@@ -38,7 +44,7 @@ These replace the matching parts of `ARCHITECTURE`. `docs/ROADMAP.md` holds the 
 ## 0.2.0 small terminals
 
 - Everything had been tested at 100x30. At 80x24 the key help lost its last rows, the legend lost `Esc Esc palette`, and the save error lost its advice. The e2e tests now run those at 80x24 too.
-- The legend has short labels for terminals under 100 columns. This narrows section 5.4's rule that each label must stay, because a legend that hides the palette key is worse than a shorter word. At 100 columns and up it reads as specified.
+- The legend had short labels for terminals under 100 columns until it became a floating menu.
 - The key help scrolls with Up and Down when it doesn't fit.
 
 ## 0.2.0 universal palette

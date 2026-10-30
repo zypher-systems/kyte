@@ -48,6 +48,8 @@ pub fn render(app: &App, frame: &mut Frame) {
     let prompt_cursor = chrome::message_line(app, msg_area, cells, theme);
     let popup_cursor = chrome::palette(app, text_area, cells, theme);
     chrome::help(app, text_area, cells, theme);
+    chrome::menu(app, text_area, text_cursor, cells, theme);
+    chrome::completions(app, text_area, cells, theme);
     chrome::recover(app, text_area, cells, theme);
     if let Some((x, y)) = popup_cursor.or(prompt_cursor).or(text_cursor) {
         frame.set_cursor_position((x, y));
@@ -158,16 +160,48 @@ mod tests {
     }
 
     #[test]
-    fn standard_terminal_shows_the_whole_legend() {
+    fn esc_layer_is_a_floating_menu_not_a_footer() {
         let mut a = app("abc");
         a.handle_key(Key::Esc, Instant::now()).unwrap();
         let t = draw(&mut a, 80, 24);
-        assert!(row(&t, 23).contains("Esc Esc palette"), "{}", row(&t, 23));
-        assert!(row(&t, 23).contains("w word"));
-        let t = draw(&mut a, 100, 30);
-        assert!(row(&t, 29).contains("w del word"), "{}", row(&t, 29));
-        assert!(row(&t, 29).contains("h history"));
-        assert!(row(&t, 29).contains("Esc Esc palette"));
+        assert!(!row(&t, 23).contains("del word"), "the footer stays clear");
+        let all = screen(&t, 22);
+        for (k, label) in crate::app::LEGEND {
+            assert!(all.contains(&format!("{k} {label}")), "{k} missing\n{all}");
+        }
+    }
+
+    #[test]
+    fn every_menu_key_stays_visible_on_a_short_terminal() {
+        let mut a = app("abc");
+        a.handle_key(Key::Esc, Instant::now()).unwrap();
+        let t = draw(&mut a, 80, 8);
+        let all = screen(&t, 6);
+        for (k, _) in crate::app::LEGEND {
+            assert!(all.contains(k), "{k} missing\n{all}");
+        }
+    }
+
+    #[test]
+    fn beside_text_menus_stay_off_the_cursor() {
+        let text: String = (1..=40).map(|i| format!("line {i}\n")).collect();
+        let now = Instant::now();
+        for lines in [0, 18, 40] {
+            let mut a = app(&text);
+            for _ in 0..lines {
+                a.handle_key(Key::Down, now).unwrap();
+            }
+            a.handle_key(Key::End, now).unwrap();
+            a.handle_key(Key::Esc, now).unwrap();
+            let mut t = draw(&mut a, 30, 16);
+            let pos = t.get_cursor_position().unwrap();
+            let b = t.backend().buffer();
+            assert_ne!(
+                b[(pos.x, pos.y)].bg,
+                super::theme::DARK.palette.bg.unwrap(),
+                "the menu covers the cursor at line {lines}"
+            );
+        }
     }
 
     #[test]

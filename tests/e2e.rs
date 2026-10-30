@@ -707,7 +707,7 @@ fn ac12_legend_appears_instantly_and_only_in_overlay() {
         "w del word",
         "d del line",
         "k del to end",
-        "% match",
+        "% bracket",
         "/ search",
         "u undo",
         "r redo",
@@ -715,9 +715,9 @@ fn ac12_legend_appears_instantly_and_only_in_overlay() {
         "Esc Esc palette",
     ] {
         assert!(
-            p.row(29).contains(part),
+            p.screen().contains(part),
             "legend misses {part:?}: {}",
-            p.row(29)
+            p.dump()
         );
     }
     assert!(status_has_esc(&p));
@@ -1614,6 +1614,87 @@ fn break_lock_opens_a_file_held_by_another_kyte() {
     b.send_str("r");
     b.wait_for("1 │ held base", TIMEOUT);
     b.kill9();
+}
+
+// ---------------------------------------------------------------- floating menus
+
+/// The last row, where the message line is.
+fn footer(p: &Pty) -> String {
+    p.row(29)
+}
+
+#[test]
+fn choices_float_and_the_footer_stays_clear() {
+    let env = Env::new();
+    let f = env.write("m.txt", "one two\n");
+    let mut p = env.open(&f);
+    p.send_keys(&["Esc"]);
+    p.wait_for("w del word", TIMEOUT);
+    assert!(!footer(&p).contains("del word"), "{}", p.dump());
+    p.send_str("z");
+    wait_insert(&p);
+    p.send_str("x");
+    wait_status(&p, "[+]");
+    p.send_keys(&["C-q"]);
+    p.wait_for("Unsaved changes", TIMEOUT);
+    p.wait_for("Save and quit", TIMEOUT);
+    assert!(!footer(&p).contains("Save and quit"), "{}", p.dump());
+    p.send_keys(&["Esc"]);
+    p.wait_gone("Unsaved changes", TIMEOUT);
+    p.send_keys(&["C-r"]);
+    p.wait_for("Replace:", TIMEOUT);
+    p.send_str("two");
+    p.send_keys(&["Enter"]);
+    p.wait_for("With:", TIMEOUT);
+    p.send_str("2");
+    p.send_keys(&["Enter"]);
+    p.wait_for("Replace all the rest", TIMEOUT);
+    assert!(!footer(&p).contains("Replace"), "{}", p.dump());
+    p.send_keys(&["Esc"]);
+    p.wait_for("No matches replaced", TIMEOUT);
+    open_overlay(&mut p);
+    p.send_str("h");
+    p.wait_for("restore this", TIMEOUT);
+    assert!(!footer(&p).contains("restore"), "{}", p.dump());
+    p.send_keys(&["Esc"]);
+    p.wait_gone("restore this", TIMEOUT);
+    p.send_keys(&["C-q"]);
+    p.wait_for("Unsaved changes", TIMEOUT);
+    p.send_str("n");
+    assert_eq!(p.wait_exit(TIMEOUT), 0);
+}
+
+#[test]
+fn tab_shows_completions_in_a_floating_list() {
+    let env = Env::new();
+    let f = env.write("a.txt", "x\n");
+    let one = env.write("note-one.txt", "");
+    env.write("note-two.txt", "");
+    let stem = one
+        .to_str()
+        .unwrap()
+        .strip_suffix("-one.txt")
+        .unwrap()
+        .to_string();
+    let mut p = env.open(&f);
+    p.send_keys(&["C-o"]);
+    p.wait_for("Open:", TIMEOUT);
+    for _ in 0..500 {
+        p.send_keys(&["Backspace"]);
+    }
+    p.wait_until("the prompt to empty", TIMEOUT, |s| {
+        s.lines().any(|l| l.trim_end() == " Open:")
+    });
+    p.send_str(&stem);
+    p.send_keys(&["Tab"]);
+    p.wait_for("note-two.txt", TIMEOUT);
+    assert!(p.screen().contains("Matches"));
+    assert!(!footer(&p).contains("note-two"), "{}", p.dump());
+    p.send_str("t");
+    p.wait_gone("Matches", TIMEOUT);
+    p.send_keys(&["Esc"]);
+    wait_status(&p, "INSERT");
+    quit_clean(&mut p);
 }
 
 // ---------------------------------------------------------------- 80x24

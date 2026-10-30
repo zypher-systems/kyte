@@ -125,13 +125,12 @@ pub enum SaveRisk {
 }
 
 impl SaveRisk {
-    pub fn question(self) -> &'static str {
+    /// The question's title and what `y` does.
+    pub fn question(self) -> (&'static str, &'static str) {
         match self {
-            SaveRisk::ChangedOnDisk => {
-                "File changed on disk! y overwrites those changes, n or Esc cancels"
-            }
-            SaveRisk::Exists => "File exists! y overwrites it, n or Esc cancels",
-            SaveRisk::ReadOnly => "File is read-only! y replaces it anyway, n or Esc cancels",
+            SaveRisk::ChangedOnDisk => ("File changed on disk!", "Overwrite those changes"),
+            SaveRisk::Exists => ("File exists!", "Overwrite it"),
+            SaveRisk::ReadOnly => ("File is read-only!", "Replace it anyway"),
         }
     }
 }
@@ -171,6 +170,8 @@ pub struct App {
     clipboard_whole_line: bool,
     /// Bytes for the terminal itself, written after the next key.
     terminal_output: Option<String>,
+    /// Names Tab found in a file prompt, shown until the next key.
+    pub completions: Vec<String>,
     /// File history is wanted this session.
     history_on: bool,
     history: Option<FileHistory>,
@@ -185,27 +186,18 @@ pub struct App {
 }
 
 /// Shown on the message line only while the overlay is open (section 5.4).
-pub const LEGEND: &[(&str, &str, &str)] = &[
-    ("w", "del word", "word"),
-    ("d", "del line", "line"),
-    ("k", "del to end", "to end"),
-    ("%", "match", "match"),
-    ("/", "search", "search"),
-    ("u", "undo", ""),
-    ("r", "redo", ""),
-    ("s", "save", "save"),
-    ("h", "history", "history"),
-    ("Esc Esc", "palette", "palette"),
+pub const LEGEND: &[(&str, &str)] = &[
+    ("w", "del word"),
+    ("d", "del line"),
+    ("k", "del to end"),
+    ("%", "bracket"),
+    ("/", "search"),
+    ("u", "undo"),
+    ("r", "redo"),
+    ("s", "save"),
+    ("h", "history"),
+    ("Esc Esc", "palette"),
 ];
-
-pub const CONFIRM_DELETE_HISTORY_TEXT: &str =
-    "Delete all history for this file? y deletes it, n or Esc cancels";
-pub const HISTORY_KEYS: &str =
-    "Left/Right edit  Up/Down burst  PgUp/PgDn save  Enter restore  Esc close";
-pub const REPLACE_CONFIRM_TEXT: &str = "Replace this one? y yes, n skip, a all, Esc stop";
-
-pub const CONFIRM_QUIT_TEXT: &str = "Unsaved changes! y saves and quits, n discards, Esc cancels";
-pub const CONFIRM_OPEN_TEXT: &str = "Unsaved changes! y saves first, n discards, Esc cancels";
 
 impl App {
     pub fn new(buffer: Buffer, swap: Option<SwapWriter>, opts: &Options) -> App {
@@ -221,6 +213,7 @@ impl App {
             clipboard: String::new(),
             clipboard_whole_line: false,
             terminal_output: None,
+            completions: Vec::new(),
             history_on: false,
             history: None,
             history_failed: false,
@@ -425,6 +418,7 @@ impl App {
     fn key_inner(&mut self, key: Key, now: Instant) {
         self.message = None;
         self.message_is_error = false;
+        self.completions.clear();
         let mode = self.mode.clone();
         match mode {
             Mode::Insert => self.insert_key(key, now),
@@ -1231,7 +1225,7 @@ impl App {
             Some(c) => {
                 *text = c.text;
                 if c.choices.len() > 1 {
-                    self.set_message(c.choices.join("  "));
+                    self.completions = c.choices;
                 }
             }
             None => self.set_error("No match"),

@@ -7,10 +7,7 @@ use super::theme::Theme;
 use ratatui::layout::Rect as R;
 use ratatui::widgets::{Block, Borders, Clear, Widget};
 
-use crate::app::{
-    After, App, Mode, Prompt, CONFIRM_DELETE_HISTORY_TEXT, CONFIRM_OPEN_TEXT, CONFIRM_QUIT_TEXT,
-    HISTORY_KEYS, LEGEND, REPLACE_CONFIRM_TEXT,
-};
+use crate::app::{After, App, Mode, Prompt, LEGEND};
 use crate::buffer::Indent;
 use crate::command::{help_max_top, KEY_HELP};
 use crate::history;
@@ -74,20 +71,10 @@ pub fn status_bar(app: &App, area: Rect, cells: &mut Cells, theme: &Theme) {
 pub fn message_line(app: &App, area: Rect, cells: &mut Cells, theme: &Theme) -> Option<(u16, u16)> {
     cells.set_style(area, theme.message);
     let w = area.width as usize;
-    if let Mode::Overlay { .. } = app.mode {
-        legend(area, cells, theme);
-        return None;
-    }
     let text = match &app.mode {
-        Mode::Prompt(Prompt::ConfirmLeave { then: After::Quit }) => CONFIRM_QUIT_TEXT.to_string(),
-        Mode::Prompt(Prompt::ConfirmLeave { .. }) => CONFIRM_OPEN_TEXT.to_string(),
         Mode::Prompt(Prompt::Open { text }) => {
             return input_prompt(app, "Open", text, area, cells, theme)
         }
-        Mode::Prompt(Prompt::ConfirmSave { risk, .. }) => risk.question().to_string(),
-        Mode::Prompt(Prompt::ReplaceConfirm(_)) => REPLACE_CONFIRM_TEXT.to_string(),
-        Mode::Prompt(Prompt::ConfirmDeleteHistory) => CONFIRM_DELETE_HISTORY_TEXT.to_string(),
-        Mode::History { .. } => HISTORY_KEYS.to_string(),
         Mode::Prompt(Prompt::ReplaceFind { query }) => {
             return input_prompt(app, "Replace", query, area, cells, theme)
         }
@@ -140,31 +127,160 @@ fn input_prompt(
     Some((area.x + n as u16, area.y))
 }
 
-/// The overlay legend: each key letter and its label.
-fn legend(area: Rect, cells: &mut Cells, theme: &Theme) {
-    cells.set_style(area, theme.legend);
-    let mut x = area.x + 1;
-    let right = area.x + area.width;
-    // The full wording takes about 100 cells. The short one fits in 80 by
-    // leaving out what Ctrl-Z and Ctrl-Y already do. Coloured key letters keep
-    // the entries apart.
-    let full = area.width >= 100;
-    for (key, long, short) in LEGEND {
-        let label = if full { long } else { short };
-        if label.is_empty() {
+/// A floating list of keys and what they do.
+struct Menu {
+    title: &'static str,
+    rows: Vec<(&'static str, &'static str)>,
+    /// Keep clear of the cursor, because what's under it matters. Otherwise
+    /// the menu is a question and takes the middle of the screen.
+    beside_text: bool,
+}
+
+/// The menu the current mode wants, if any.
+fn menu_for(app: &App) -> Option<Menu> {
+    let question = |title, rows| Menu {
+        title,
+        rows,
+        beside_text: false,
+    };
+    let beside = |title, rows| Menu {
+        title,
+        rows,
+        beside_text: true,
+    };
+    Some(match &app.mode {
+        Mode::Overlay { .. } => beside("Esc", LEGEND.to_vec()),
+        Mode::Prompt(Prompt::ReplaceConfirm(_)) => beside(
+            "Replace this one?",
+            vec![
+                ("y", "Replace"),
+                ("n", "Skip"),
+                ("a", "Replace all the rest"),
+                ("Esc", "Stop"),
+            ],
+        ),
+        Mode::History { .. } => beside(
+            "History",
+            vec![
+                ("Left Right", "one edit"),
+                ("Up Down", "one burst"),
+                ("PgUp PgDn", "saved versions"),
+                ("Home End", "first, newest"),
+                ("Enter", "restore this"),
+                ("Esc", "close"),
+            ],
+        ),
+        Mode::Prompt(Prompt::ConfirmLeave { then: After::Quit }) => question(
+            "Unsaved changes",
+            vec![
+                ("y", "Save and quit"),
+                ("n", "Discard them and quit"),
+                ("Esc", "Keep editing"),
+            ],
+        ),
+        Mode::Prompt(Prompt::ConfirmLeave { .. }) => question(
+            "Unsaved changes",
+            vec![
+                ("y", "Save, then open the file"),
+                ("n", "Discard them and open it"),
+                ("Esc", "Keep editing"),
+            ],
+        ),
+        Mode::Prompt(Prompt::ConfirmSave { risk, .. }) => {
+            let (title, yes) = risk.question();
+            question(
+                title,
+                vec![("y", yes), ("n", "Don't save"), ("Esc", "Don't save")],
+            )
+        }
+        Mode::Prompt(Prompt::ConfirmDeleteHistory) => question(
+            "Delete all history for this file?",
+            vec![("y", "Delete it"), ("n", "Keep it"), ("Esc", "Keep it")],
+        ),
+        _ => return None,
+    })
+}
+
+/// Bottom right of `area`, moved out of the way if `cursor` is there.
+fn clear_of_cursor(area: Rect, w: u16, h: u16, cursor: Option<(u16, u16)>) -> Rect {
+    let (w, h) = (w.min(area.width), h.min(area.height));
+    let right = area.x + area.width - w;
+    let bottom = area.y + area.height - h;
+    let hits =
+        |r: Rect| cursor.is_some_and(|(x, y)| x >= r.x && x < r.x + w && y >= r.y && y < r.y + h);
+    [
+        R::new(right, bottom, w, h),
+        R::new(right, area.y, w, h),
+        R::new(area.x, bottom, w, h),
+        R::new(area.x, area.y, w, h),
+    ]
+    .into_iter()
+    .find(|r| !hits(*r))
+    .unwrap_or(R::new(right, bottom, w, h))
+}
+
+/// Draws the current mode's menu. Rows that don't fit the height flow into
+/// more columns, so every key stays visible on a short terminal.
+pub fn menu(
+    app: &App,
+    text_area: Rect,
+    cursor: Option<(u16, u16)>,
+    cells: &mut Cells,
+    theme: &Theme,
+) {
+    let Some(menu) = menu_for(app) else {
+        return;
+    };
+    let key_w = menu.rows.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
+    let label_w = menu.rows.iter().map(|(_, l)| l.len()).max().unwrap_or(0);
+    let cell_w = key_w + 1 + label_w + 2;
+    let room = (text_area.height as usize).saturating_sub(2).max(1);
+    let per_col = menu.rows.len().min(room);
+    let cols = menu.rows.len().div_ceil(per_col);
+    let w = (cell_w * cols + 3).max(menu.title.len() + 6) as u16;
+    let h = per_col as u16 + 2;
+    let area = if menu.beside_text {
+        clear_of_cursor(text_area, w, h, cursor)
+    } else {
+        centered(text_area, w, h)
+    };
+    let inner = modal_box(area, cells, menu.title, theme.palette, theme.palette_border);
+    for (i, (key, label)) in menu.rows.iter().enumerate() {
+        let x = inner.x + 1 + (i / per_col * cell_w) as u16;
+        let y = inner.y + (i % per_col) as u16;
+        if x >= inner.x + inner.width || y >= inner.y + inner.height {
             continue;
         }
-        for (text, style) in [
-            (*key, theme.legend_key),
-            (" ", theme.legend),
-            (*label, theme.legend),
-            (" ", theme.legend),
-        ] {
-            if x >= right {
-                return;
-            }
-            let (nx, _) = cells.set_stringn(x, area.y, text, (right - x) as usize, style);
-            x = nx;
+        let room = (inner.x + inner.width - x) as usize;
+        let shown = format!("{key:>key_w$}");
+        let (next, _) = cells.set_stringn(x, y, &shown, room, theme.menu_key);
+        let room = (inner.x + inner.width).saturating_sub(next + 1) as usize;
+        cells.set_stringn(next + 1, y, label, room, theme.palette);
+    }
+}
+
+/// Names Tab found in a file prompt, floating above the message line.
+pub fn completions(app: &App, text_area: Rect, cells: &mut Cells, theme: &Theme) {
+    const MAX_ROWS: usize = 10;
+    if app.completions.is_empty() {
+        return;
+    }
+    let more = app.completions.len().saturating_sub(MAX_ROWS);
+    let mut rows: Vec<String> = app.completions.iter().take(MAX_ROWS).cloned().collect();
+    if more > 0 {
+        rows.push(format!("and {more} more"));
+    }
+    let widest = rows.iter().map(|r| r.chars().count()).max().unwrap_or(0) as u16;
+    let w = (widest + 4).max(16).min(text_area.width);
+    let h = (rows.len() as u16 + 2).min(text_area.height);
+    let bottom = text_area.y + text_area.height - h;
+    let area = R::new(text_area.x, bottom, w, h);
+    let inner = modal_box(area, cells, "Matches", theme.palette, theme.palette_border);
+    for (i, row) in rows.iter().enumerate() {
+        let y = inner.y + i as u16;
+        if y < inner.y + inner.height {
+            let room = inner.width.saturating_sub(1) as usize;
+            cells.set_stringn(inner.x + 1, y, row, room, theme.palette);
         }
     }
 }
