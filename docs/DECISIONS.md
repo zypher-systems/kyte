@@ -2,6 +2,15 @@
 
 Every deviation from `ARCHITECTURE` (Mnemo page_e336285940d54098ada133cc08df814b) with a reason, plus resolved crate versions.
 
+## Product decisions (Oct 30, 2026)
+
+These replace the matching parts of `ARCHITECTURE`. `docs/ROADMAP.md` holds the plan.
+
+- Kyte shares one idea with Nano: it starts ready to type. It isn't a Nano clone, so its shortcuts don't have to match Nano's.
+- Ctrl-K stays the universal palette.
+- The unsaved-quit prompt follows Nano: `y` saves and quits, `n` discards, Esc cancels. This replaces section 5.4 and changes AC-18.
+- License: MIT. This settles section 16 and the section 4 note.
+
 ## Hosting and environment
 
 - Toolchain: rustc/cargo 1.99.1 (stable, 2026-10-13), edition 2021.
