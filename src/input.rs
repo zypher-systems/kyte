@@ -22,6 +22,14 @@ pub enum Key {
     PageDown,
     CtrlHome,
     CtrlEnd,
+    /// Ctrl-Left or Alt-Left.
+    WordLeft,
+    /// Ctrl-Right or Alt-Right.
+    WordRight,
+    /// Ctrl-Backspace or Alt-Backspace.
+    WordBackspace,
+    /// Ctrl-Delete or Alt-Delete.
+    WordDelete,
     /// Lowercase letter; Ctrl-Space is `Ctrl(' ')`.
     Ctrl(char),
     Alt(char),
@@ -60,14 +68,20 @@ fn map_key(k: KeyEvent) -> Option<Key> {
     let alt = k.modifiers.contains(KeyModifiers::ALT);
     let key = match k.code {
         KeyCode::Char(_) if ctrl && alt => return None,
+        // Most legacy terminals send Ctrl-Backspace as ^H.
+        KeyCode::Char('h') if ctrl => Key::WordBackspace,
         KeyCode::Char(c) if ctrl => Key::Ctrl(c.to_ascii_lowercase()),
         KeyCode::Char(c) if alt => Key::Alt(c),
         KeyCode::Char(c) => Key::Char(c),
         KeyCode::Enter => Key::Enter,
         KeyCode::Tab => Key::Tab,
+        KeyCode::Backspace if ctrl || alt => Key::WordBackspace,
+        KeyCode::Delete if ctrl || alt => Key::WordDelete,
         KeyCode::Backspace => Key::Backspace,
         KeyCode::Delete => Key::Delete,
         KeyCode::Esc => Key::Esc,
+        KeyCode::Left if ctrl || alt => Key::WordLeft,
+        KeyCode::Right if ctrl || alt => Key::WordRight,
         KeyCode::Left => Key::Left,
         KeyCode::Right => Key::Right,
         KeyCode::Up => Key::Up,
@@ -121,6 +135,18 @@ mod tests {
     const N: KeyModifiers = KeyModifiers::NONE;
     const C: KeyModifiers = KeyModifiers::CONTROL;
     const A: KeyModifiers = KeyModifiers::ALT;
+
+    #[test]
+    fn word_keys() {
+        let k = |c, m| key(c, m).unwrap();
+        for m in [C, A] {
+            assert_eq!(k(KeyCode::Left, m), Input::Key(Key::WordLeft));
+            assert_eq!(k(KeyCode::Right, m), Input::Key(Key::WordRight));
+            assert_eq!(k(KeyCode::Backspace, m), Input::Key(Key::WordBackspace));
+            assert_eq!(k(KeyCode::Delete, m), Input::Key(Key::WordDelete));
+        }
+        assert_eq!(k(KeyCode::Char('h'), C), Input::Key(Key::WordBackspace));
+    }
 
     #[test]
     fn plain_keys() {

@@ -79,6 +79,31 @@ pub fn word_end(rope: &Rope, from: usize) -> usize {
     end
 }
 
+/// Start of the word before `from`, for moving and deleting backward: skip
+/// any whitespace, then the rest of the class run before it. Crosses lines.
+pub fn word_start(rope: &Rope, from: usize) -> usize {
+    let mut end = from.min(rope.len_chars());
+    while end > 0 && rope.char(end - 1).is_whitespace() {
+        end -= 1;
+    }
+    if end == 0 {
+        return 0;
+    }
+    let start = rope.line_to_char(rope.char_to_line(end - 1));
+    let text = rope.line(rope.char_to_line(end - 1)).to_string();
+    let mut run = (start, None);
+    for (off, g) in graphemes_with_char_offsets(&text) {
+        if start + off >= end {
+            break;
+        }
+        let c = class_of(g);
+        if run.1 != Some(c) {
+            run = (start + off, Some(c));
+        }
+    }
+    run.0
+}
+
 /// Range deleted by `d`: the whole line at `at` including its newline. On a
 /// last line without a trailing newline the preceding newline goes too
 /// (unless it is the only line, which just becomes empty).
@@ -199,6 +224,26 @@ mod tests {
 
     fn r(s: &str) -> Rope {
         Rope::from_str(s)
+    }
+
+    #[test]
+    fn word_start_steps_back_by_class_runs() {
+        let x = r("foo bar.baz  qux");
+        assert_eq!(word_start(&x, 16), 13);
+        assert_eq!(word_start(&x, 13), 8);
+        assert_eq!(word_start(&x, 8), 7);
+        assert_eq!(word_start(&x, 7), 4);
+        assert_eq!(word_start(&x, 4), 0);
+        assert_eq!(word_start(&x, 0), 0);
+    }
+
+    #[test]
+    fn word_start_crosses_lines_and_keeps_graphemes_whole() {
+        let x = r("one\n\n  two");
+        assert_eq!(word_start(&x, 7), 0);
+        let y = r("ae\u{301}b c");
+        assert_eq!(word_start(&y, 5), 0, "a mark stays in its word");
+        assert_eq!(word_start(&r("   "), 3), 0);
     }
 
     #[test]

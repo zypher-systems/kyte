@@ -76,6 +76,8 @@ Environment variables: `KYTE_STATE_DIR` (where swap files go; overrides the defa
 | Printable characters, Enter, Tab | Insert at the cursor (Tab inserts a real tab) |
 | Backspace, Delete | Delete the previous or next character (joins lines at line edges) |
 | Arrows, Home, End, PageUp, PageDown, Ctrl-Home, Ctrl-End | Move |
+| Ctrl-Left, Ctrl-Right (also Alt) | Move by word |
+| Ctrl-Backspace, Ctrl-Delete (also Alt) | Delete the word before or after the cursor |
 | Ctrl-S (also Ctrl-O) | Save. With no file name, Kyte asks for one |
 | Ctrl-Q (also Ctrl-X) | Quit. With unsaved changes, Kyte asks first: `y` saves and quits, `n` discards, Esc cancels |
 | Ctrl-Z, Ctrl-Y | Undo, redo |

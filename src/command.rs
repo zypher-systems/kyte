@@ -77,6 +77,8 @@ pub const KEY_HELP: &[(&str, &str)] = &[
     ("Typing, Enter, Tab", "insert at the cursor"),
     ("Backspace, Delete", "delete previous / next character"),
     ("Arrows, Home, End", "move"),
+    ("Ctrl-Left, Ctrl-Right", "move by word"),
+    ("Ctrl-Bksp, Ctrl-Del", "delete word before / after"),
     ("PgUp, PgDn", "move by a screen"),
     ("Ctrl-Home, Ctrl-End", "start / end of file"),
     ("Ctrl-S (Ctrl-O)", "save"),

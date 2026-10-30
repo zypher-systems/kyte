@@ -1615,6 +1615,30 @@ fn break_lock_opens_a_file_held_by_another_kyte() {
     b.kill9();
 }
 
+// ---------------------------------------------------------------- words
+
+#[test]
+fn word_motion_and_delete_through_terminal_bytes() {
+    let env = Env::new();
+    let f = env.write("w.txt", "foo bar baz\n");
+    let mut p = env.open(&f);
+    p.send(b"\x1b[1;5C"); // Ctrl-Right
+    wait_status(&p, "Col 5");
+    p.send(b"\x1b[1;3C"); // Alt-Right
+    wait_status(&p, "Col 9");
+    p.send(b"\x1b[1;5D"); // Ctrl-Left
+    wait_status(&p, "Col 5");
+    p.send(b"\x1b[3;5~"); // Ctrl-Delete
+    p.wait_for("foo baz", TIMEOUT);
+    p.send(b"\x08"); // Ctrl-Backspace on most legacy terminals
+    p.wait_for("1 │ baz", TIMEOUT);
+    p.send_keys(&["C-z"]);
+    p.wait_for("foo baz", TIMEOUT);
+    save_and_wait(&mut p);
+    quit_clean(&mut p);
+    assert_eq!(fs::read_to_string(&f).unwrap(), "foo baz\n");
+}
+
 // ---------------------------------------------------------------- signals and keys
 
 #[test]

@@ -396,6 +396,20 @@ impl App {
             Key::Delete => b.delete_forward(),
             Key::Left => b.move_left(),
             Key::Right => b.move_right(),
+            Key::WordLeft => {
+                let t = ops::word_start(b.rope(), b.cursor());
+                b.move_to(t);
+            }
+            Key::WordRight => {
+                let t = ops::word_end(b.rope(), b.cursor());
+                b.move_to(t);
+            }
+            Key::WordBackspace => {
+                let at = b.cursor();
+                let start = ops::word_start(b.rope(), at);
+                self.delete_range(start..at, start);
+            }
+            Key::WordDelete => self.op_word(),
             Key::Up => b.move_up(),
             Key::Down => b.move_down(),
             Key::Home => b.move_home(),
@@ -958,6 +972,33 @@ mod tests {
                 text: "1".to_string()
             })
         );
+    }
+
+    #[test]
+    fn word_keys_move_and_delete() {
+        let t = Instant::now();
+        let mut a = app("foo bar baz");
+        a.handle_key(Key::WordRight, t).unwrap();
+        assert_eq!(a.buffer.cursor(), 4);
+        a.handle_key(Key::WordRight, t).unwrap();
+        assert_eq!(a.buffer.cursor(), 8);
+        a.handle_key(Key::WordLeft, t).unwrap();
+        assert_eq!(a.buffer.cursor(), 4);
+        a.handle_key(Key::WordDelete, t).unwrap();
+        assert_eq!(a.buffer.to_string(), "foo baz");
+        a.handle_key(Key::WordBackspace, t).unwrap();
+        assert_eq!(a.buffer.to_string(), "baz");
+        assert_eq!(a.buffer.cursor(), 0);
+        a.handle_key(Key::Ctrl('z'), t).unwrap();
+        assert_eq!(a.buffer.to_string(), "foo baz", "one undo step");
+        assert_eq!(a.buffer.cursor(), 4);
+    }
+
+    #[test]
+    fn word_backspace_at_the_start_does_nothing() {
+        let mut a = app("abc");
+        a.handle_key(Key::WordBackspace, Instant::now()).unwrap();
+        assert!(!a.buffer.is_dirty());
     }
 
     #[test]
