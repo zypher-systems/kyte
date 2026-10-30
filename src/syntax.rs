@@ -11,8 +11,9 @@ pub const MAX_LIVE_PARSE_BYTES: usize = 512 * 1024;
 /// The line comment for a file, by extension.
 pub fn comment_prefix(path: &Path) -> Option<&'static str> {
     match path.extension()?.to_str()? {
-        "rs" | "c" | "h" | "cc" | "cpp" | "hpp" | "go" | "java" | "js" | "jsx" | "ts" | "tsx"
-        | "swift" | "kt" | "scala" | "cs" | "zig" => Some("//"),
+        "rs" | "c" | "h" | "cc" | "cpp" | "cxx" | "hh" | "hpp" | "hxx" | "go" | "java" | "js"
+        | "mjs" | "cjs" | "jsx" | "ts" | "mts" | "cts" | "tsx" | "jsonc" | "swift" | "kt"
+        | "scala" | "cs" | "zig" => Some("//"),
         "py" | "pyi" | "sh" | "bash" | "zsh" | "fish" | "rb" | "pl" | "toml" | "yaml" | "yml"
         | "conf" | "ini" | "mk" | "r" | "ex" | "exs" => Some("#"),
         "lua" | "sql" | "hs" => Some("--"),
@@ -34,15 +35,45 @@ mod code {
     }
 
     fn is_function(lang: Lang, node: &Node) -> bool {
+        let kind = node.kind();
         match lang {
-            Lang::Rust => node.kind() == "function_item",
-            Lang::Python | Lang::Bash => node.kind() == "function_definition",
+            Lang::Rust => kind == "function_item",
+            Lang::Python | Lang::Bash | Lang::C | Lang::Cpp => kind == "function_definition",
+            Lang::JavaScript | Lang::TypeScript | Lang::Tsx => matches!(
+                kind,
+                "function_declaration"
+                    | "generator_function_declaration"
+                    | "method_definition"
+                    | "function_expression"
+                    | "arrow_function"
+            ),
+            Lang::Go => matches!(kind, "function_declaration" | "method_declaration"),
+            _ => false,
         }
     }
 
-    /// Whether this file's language has code actions.
+    /// Whether this file's language can be parsed.
     pub fn supported(path: &Path) -> bool {
         Lang::from_path(path).is_some()
+    }
+
+    /// Whether this file's language has functions to move between. Data and
+    /// markup formats don't.
+    pub fn has_functions(path: &Path) -> bool {
+        matches!(
+            Lang::from_path(path),
+            Some(
+                Lang::Rust
+                    | Lang::Python
+                    | Lang::Bash
+                    | Lang::JavaScript
+                    | Lang::TypeScript
+                    | Lang::Tsx
+                    | Lang::C
+                    | Lang::Cpp
+                    | Lang::Go
+            )
+        )
     }
 
     /// The function around `at`. A cursor just past its end still counts.
@@ -68,6 +99,11 @@ mod code {
             node.child_by_field_name(field)
                 .and_then(|n| n.utf8_text(text.as_bytes()).ok())
         };
+        if matches!(lang, Lang::C | Lang::Cpp) && node.kind() == "function_definition" {
+            let declarator = node.child_by_field_name("declarator")?;
+            let text = declarator.utf8_text(text.as_bytes()).ok()?;
+            return Some(text.split('(').next()?.trim().to_string());
+        }
         let (word, field) = match (lang, node.kind()) {
             (Lang::Rust, "function_item") => ("fn", "name"),
             (Lang::Rust, "impl_item") => ("impl", "type"),
@@ -76,6 +112,21 @@ mod code {
             (Lang::Python, "class_definition") => ("class", "name"),
             (Lang::Python, "function_definition") => ("def", "name"),
             (Lang::Bash, "function_definition") => ("function", "name"),
+            (
+                Lang::JavaScript | Lang::TypeScript | Lang::Tsx,
+                "function_declaration" | "generator_function_declaration",
+            ) => ("function", "name"),
+            (Lang::JavaScript | Lang::TypeScript | Lang::Tsx, "class_declaration") => {
+                ("class", "name")
+            }
+            (Lang::JavaScript | Lang::TypeScript | Lang::Tsx, "method_definition") => {
+                ("method", "name")
+            }
+            (Lang::TypeScript | Lang::Tsx, "interface_declaration") => ("interface", "name"),
+            (Lang::Cpp, "class_specifier") => ("class", "name"),
+            (Lang::Cpp, "namespace_definition") => ("namespace", "name"),
+            (Lang::Go, "function_declaration") => ("func", "name"),
+            (Lang::Go, "method_declaration") => ("func", "name"),
             _ => return None,
         };
         Some(format!("{word} {}", name(field)?))
@@ -166,6 +217,10 @@ mod code {
         false
     }
 
+    pub fn has_functions(_: &Path) -> bool {
+        false
+    }
+
     pub fn function_at(_: &Path, _: &str, _: usize) -> Option<Range<usize>> {
         None
     }
@@ -187,7 +242,9 @@ mod code {
     }
 }
 
-pub use code::{breadcrumb, expand, function_at, next_function, prev_function, supported};
+pub use code::{
+    breadcrumb, expand, function_at, has_functions, next_function, prev_function, supported,
+};
 
 #[cfg(all(test, feature = "highlight"))]
 mod tests {
@@ -256,6 +313,71 @@ mod tests {
         assert_eq!(next_function(path, src, 0), Some(inner));
         let r = function_at(path, src, inner + 3).unwrap();
         assert_eq!(&src[r], "fn inner() {}");
+    }
+
+    #[test]
+    fn functions_are_found_in_the_new_languages() {
+        let cases = [
+            (
+                "a.js",
+                "function one() {\n  x();\n}\n",
+                "x()",
+                "function one",
+            ),
+            (
+                "a.ts",
+                "class A {\n  run(): void {\n    x();\n  }\n}\n",
+                "x()",
+                "method run",
+            ),
+            (
+                "a.tsx",
+                "function App() {\n  return x();\n}\n",
+                "x()",
+                "function App",
+            ),
+            ("a.go", "func main() {\n\tx()\n}\n", "x()", "func main"),
+            ("a.c", "int main(void) {\n  x();\n}\n", "x()", "main"),
+            (
+                "a.cpp",
+                "namespace n {\nint f() {\n  x();\n}\n}\n",
+                "x()",
+                "f",
+            ),
+        ];
+        for (name, src, token, crumb) in cases {
+            let path = Path::new(name);
+            let at = src.find(token).unwrap();
+            assert!(function_at(path, src, at).is_some(), "{name}");
+            let crumbs = breadcrumb(path, src, at);
+            assert_eq!(
+                crumbs.last().map(String::as_str),
+                Some(crumb),
+                "{name}: {crumbs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn arrow_functions_count_in_javascript() {
+        let src = "const f = (a) => {\n  return a;\n};\n";
+        let at = src.find("return").unwrap();
+        let r = function_at(Path::new("a.js"), src, at).unwrap();
+        assert!(src[r].starts_with("(a) =>"));
+    }
+
+    #[test]
+    fn data_formats_can_expand_but_have_no_functions() {
+        let path = Path::new("a.json");
+        assert!(supported(path));
+        assert!(!has_functions(path));
+        assert!(has_functions(Path::new("a.go")));
+        let src = "{\"a\": [1, 2]}\n";
+        let at = src.find('1').unwrap();
+        let r = expand(path, src, at..at).unwrap();
+        assert_eq!(&src[r.clone()], "1");
+        let r = expand(path, src, r).unwrap();
+        assert_eq!(&src[r], "[1, 2]");
     }
 
     #[test]

@@ -72,7 +72,7 @@ Looks are still open too, with details to be decided. Keep using Kyte for real w
 - Config file
 - File tree
 - Multiple buffers and splits
-- Syntax highlighting for more languages, with incremental parsing
+- Incremental parsing, and languages embedded in others
 - Packaging, and use as `$EDITOR`
 
 ## What 1.0 means

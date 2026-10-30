@@ -772,9 +772,14 @@ impl App {
         }
     }
 
-    /// The file's path, when its language has code actions.
+    /// The file's path, when Kyte can parse its language.
     fn code_path(&self) -> Option<&std::path::Path> {
         self.buffer.path().filter(|p| syntax::supported(p))
+    }
+
+    /// Whether the file's language has functions to work with.
+    fn has_functions(&self) -> bool {
+        self.buffer.path().is_some_and(syntax::has_functions)
     }
 
     fn comment_prefix(&self) -> Option<&'static str> {
@@ -821,9 +826,11 @@ impl App {
             rows.push(("#", "comment line"));
         }
         if code {
+            rows.push(("e", "select syntax"));
+        }
+        if self.has_functions() {
             rows.extend([
                 ("f", "select function"),
-                ("e", "select syntax"),
                 ("n", "next function"),
                 ("p", "prev function"),
             ]);
@@ -847,10 +854,10 @@ impl App {
             'c' if self.outside_change => self.open_review(),
             'i' if self.on_bracket() => self.select_inside_brackets(),
             '#' => self.toggle_comment(),
-            'f' if self.code_path().is_some() => self.select_function(),
             'e' if self.code_path().is_some() => self.expand_selection(),
-            'n' if self.code_path().is_some() => self.go_to_function(true),
-            'p' if self.code_path().is_some() => self.go_to_function(false),
+            'f' if self.has_functions() => self.select_function(),
+            'n' if self.has_functions() => self.go_to_function(true),
+            'p' if self.has_functions() => self.go_to_function(false),
             _ => {}
         }
     }
@@ -2946,6 +2953,17 @@ mod tests {
         assert_eq!(a.buffer.selection(), None);
         a.handle_key(Key::Esc, t).unwrap();
         assert_eq!(a.mode, Mode::Insert);
+    }
+
+    #[cfg(feature = "highlight")]
+    #[test]
+    fn data_files_offer_select_syntax_without_function_keys() {
+        let json = code_app("/x/a.json", "{\"a\": 1}\n");
+        let rows: Vec<&str> = json.layer_rows().into_iter().map(|r| r.0).collect();
+        assert!(rows.contains(&"e"));
+        assert!(!rows.contains(&"f") && !rows.contains(&"n"), "{rows:?}");
+        let go = code_app("/x/a.go", "func f() {}\n");
+        assert!(go.layer_rows().contains(&("f", "select function")));
     }
 
     #[test]

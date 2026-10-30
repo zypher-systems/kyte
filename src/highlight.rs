@@ -1,7 +1,7 @@
 //! Syntax highlighting (cargo feature `highlight`, on by default).
 //!
-//! tree-sitter with the Rust, Python and Bash grammars and their bundled
-//! `highlights.scm` queries. `highlight` returns byte ranges of the whole text
+//! tree-sitter with a grammar per language and each grammar's bundled
+//! `highlights.scm` query. `highlight` returns byte ranges of the whole text
 //! that overlap the requested line range, each with a [`HighlightKind`]; the
 //! text view maps the kinds to theme colors.
 
@@ -20,17 +20,67 @@ pub enum Lang {
     Rust,
     Python,
     Bash,
+    JavaScript,
+    TypeScript,
+    Tsx,
+    Json,
+    C,
+    Cpp,
+    Go,
+    Html,
+    Css,
+    Toml,
+    Yaml,
+    Markdown,
 }
 
 impl Lang {
-    /// Picks the grammar from the file extension.
+    /// Every language, in the order of the `CONFIGS` table.
+    pub const ALL: [Lang; 15] = [
+        Lang::Rust,
+        Lang::Python,
+        Lang::Bash,
+        Lang::JavaScript,
+        Lang::TypeScript,
+        Lang::Tsx,
+        Lang::Json,
+        Lang::C,
+        Lang::Cpp,
+        Lang::Go,
+        Lang::Html,
+        Lang::Css,
+        Lang::Toml,
+        Lang::Yaml,
+        Lang::Markdown,
+    ];
+
+    /// Picks the grammar from the file name, then its extension.
     pub fn from_path(path: &Path) -> Option<Lang> {
-        match path.extension()?.to_str()? {
-            "rs" => Some(Lang::Rust),
-            "py" | "pyi" => Some(Lang::Python),
-            "sh" | "bash" => Some(Lang::Bash),
-            _ => None,
+        match path.file_name()?.to_str()? {
+            ".bashrc" | ".bash_profile" | ".profile" | ".zshrc" | "PKGBUILD" => {
+                return Some(Lang::Bash)
+            }
+            "Cargo.lock" | "uv.lock" | "poetry.lock" => return Some(Lang::Toml),
+            _ => {}
         }
+        Some(match path.extension()?.to_str()? {
+            "rs" => Lang::Rust,
+            "py" | "pyi" => Lang::Python,
+            "sh" | "bash" | "zsh" => Lang::Bash,
+            "js" | "mjs" | "cjs" | "jsx" => Lang::JavaScript,
+            "ts" | "mts" | "cts" => Lang::TypeScript,
+            "tsx" => Lang::Tsx,
+            "json" | "jsonc" => Lang::Json,
+            "c" | "h" => Lang::C,
+            "cc" | "cpp" | "cxx" | "hh" | "hpp" | "hxx" => Lang::Cpp,
+            "go" => Lang::Go,
+            "html" | "htm" => Lang::Html,
+            "css" => Lang::Css,
+            "toml" => Lang::Toml,
+            "yaml" | "yml" => Lang::Yaml,
+            "md" | "markdown" => Lang::Markdown,
+            _ => return None,
+        })
     }
 
     /// The tree-sitter grammar.
@@ -39,6 +89,46 @@ impl Lang {
             Lang::Rust => tree_sitter_rust::LANGUAGE.into(),
             Lang::Python => tree_sitter_python::LANGUAGE.into(),
             Lang::Bash => tree_sitter_bash::LANGUAGE.into(),
+            Lang::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
+            Lang::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+            Lang::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
+            Lang::Json => tree_sitter_json::LANGUAGE.into(),
+            Lang::C => tree_sitter_c::LANGUAGE.into(),
+            Lang::Cpp => tree_sitter_cpp::LANGUAGE.into(),
+            Lang::Go => tree_sitter_go::LANGUAGE.into(),
+            Lang::Html => tree_sitter_html::LANGUAGE.into(),
+            Lang::Css => tree_sitter_css::LANGUAGE.into(),
+            Lang::Toml => tree_sitter_toml_ng::LANGUAGE.into(),
+            Lang::Yaml => tree_sitter_yaml::LANGUAGE.into(),
+            Lang::Markdown => tree_sitter_md::LANGUAGE.into(),
+        }
+    }
+
+    /// The highlight query. TypeScript builds on JavaScript's, and C++ on C's.
+    fn highlights(self) -> String {
+        let js = tree_sitter_javascript::HIGHLIGHT_QUERY;
+        let jsx = tree_sitter_javascript::JSX_HIGHLIGHT_QUERY;
+        let ts = tree_sitter_typescript::HIGHLIGHTS_QUERY;
+        match self {
+            Lang::Rust => tree_sitter_rust::HIGHLIGHTS_QUERY.to_string(),
+            Lang::Python => tree_sitter_python::HIGHLIGHTS_QUERY.to_string(),
+            Lang::Bash => tree_sitter_bash::HIGHLIGHT_QUERY.to_string(),
+            Lang::JavaScript => format!("{js}\n{jsx}"),
+            Lang::TypeScript => format!("{ts}\n{js}"),
+            Lang::Tsx => format!("{ts}\n{js}\n{jsx}"),
+            Lang::Json => tree_sitter_json::HIGHLIGHTS_QUERY.to_string(),
+            Lang::C => tree_sitter_c::HIGHLIGHT_QUERY.to_string(),
+            Lang::Cpp => format!(
+                "{}\n{}",
+                tree_sitter_cpp::HIGHLIGHT_QUERY,
+                tree_sitter_c::HIGHLIGHT_QUERY
+            ),
+            Lang::Go => tree_sitter_go::HIGHLIGHTS_QUERY.to_string(),
+            Lang::Html => tree_sitter_html::HIGHLIGHTS_QUERY.to_string(),
+            Lang::Css => tree_sitter_css::HIGHLIGHTS_QUERY.to_string(),
+            Lang::Toml => tree_sitter_toml_ng::HIGHLIGHTS_QUERY.to_string(),
+            Lang::Yaml => tree_sitter_yaml::HIGHLIGHTS_QUERY.to_string(),
+            Lang::Markdown => tree_sitter_md::HIGHLIGHT_QUERY_BLOCK.to_string(),
         }
     }
 }
@@ -55,10 +145,23 @@ pub enum HighlightKind {
 }
 
 /// Capture names Kyte colors, in the order of [`HighlightKind`].
-const NAMES: [&str; 7] = [
-    "keyword", "string", "comment", "function", "type", "constant", "number",
+const NAMES: [&str; 13] = [
+    "keyword",
+    "string",
+    "comment",
+    "function",
+    "type",
+    "constant",
+    "number",
+    // Names the markup and data grammars use, mapped onto the same colors.
+    "tag",
+    "attribute",
+    "property",
+    "text.title",
+    "text.literal",
+    "text.uri",
 ];
-const KINDS: [HighlightKind; 7] = [
+const KINDS: [HighlightKind; 13] = [
     HighlightKind::Keyword,
     HighlightKind::String,
     HighlightKind::Comment,
@@ -66,6 +169,12 @@ const KINDS: [HighlightKind; 7] = [
     HighlightKind::Type,
     HighlightKind::Constant,
     HighlightKind::Number,
+    HighlightKind::Keyword,
+    HighlightKind::Type,
+    HighlightKind::Function,
+    HighlightKind::Keyword,
+    HighlightKind::String,
+    HighlightKind::Constant,
 ];
 
 impl HighlightKind {
@@ -84,34 +193,18 @@ impl HighlightKind {
 }
 
 fn config(lang: Lang) -> Option<&'static HighlightConfiguration> {
-    static RUST: OnceLock<Option<HighlightConfiguration>> = OnceLock::new();
-    static PYTHON: OnceLock<Option<HighlightConfiguration>> = OnceLock::new();
-    static BASH: OnceLock<Option<HighlightConfiguration>> = OnceLock::new();
-    let (cell, language, query) = match lang {
-        Lang::Rust => (
-            &RUST,
-            tree_sitter_rust::LANGUAGE,
-            tree_sitter_rust::HIGHLIGHTS_QUERY,
-        ),
-        Lang::Python => (
-            &PYTHON,
-            tree_sitter_python::LANGUAGE,
-            tree_sitter_python::HIGHLIGHTS_QUERY,
-        ),
-        Lang::Bash => (
-            &BASH,
-            tree_sitter_bash::LANGUAGE,
-            tree_sitter_bash::HIGHLIGHT_QUERY,
-        ),
-    };
-    cell.get_or_init(|| {
-        let mut c =
-            HighlightConfiguration::new(language.into(), format!("{lang:?}"), query, "", "")
-                .ok()?;
-        c.configure(&NAMES);
-        Some(c)
-    })
-    .as_ref()
+    static CONFIGS: [OnceLock<Option<HighlightConfiguration>>; Lang::ALL.len()] =
+        [const { OnceLock::new() }; Lang::ALL.len()];
+    CONFIGS[lang as usize]
+        .get_or_init(|| {
+            let name = format!("{lang:?}");
+            let mut c =
+                HighlightConfiguration::new(lang.language(), name, &lang.highlights(), "", "")
+                    .ok()?;
+            c.configure(&NAMES);
+            Some(c)
+        })
+        .as_ref()
 }
 
 /// Highlighted byte ranges of `text` that overlap lines `lines` (0-based,
@@ -215,11 +308,79 @@ mod tests {
     }
 
     #[test]
+    fn every_grammar_loads_and_its_query_compiles() {
+        for (i, lang) in Lang::ALL.iter().enumerate() {
+            assert_eq!(*lang as usize, i, "CONFIGS is indexed by this order");
+            assert!(config(*lang).is_some(), "{lang:?}");
+        }
+    }
+
+    #[test]
+    fn each_language_colors_something_real() {
+        use HighlightKind as K;
+        let cases: &[(Lang, &str, &str, HighlightKind)] = &[
+            (Lang::JavaScript, "const a = 'hi';\n", "const", K::Keyword),
+            (
+                Lang::JavaScript,
+                "const b = <div a=\"1\"></div>;\n",
+                "div",
+                K::Keyword,
+            ),
+            (
+                Lang::TypeScript,
+                "interface A { b: string }\n",
+                "interface",
+                K::Keyword,
+            ),
+            (Lang::Tsx, "const a: number = 1;\n", "const", K::Keyword),
+            (Lang::Json, "{\"a\": 1}\n", "1", K::Number),
+            (
+                Lang::C,
+                "int main(void) { return 0; }\n",
+                "return",
+                K::Keyword,
+            ),
+            (
+                Lang::Cpp,
+                "class A { public: int b; };\n",
+                "class",
+                K::Keyword,
+            ),
+            (Lang::Go, "func main() {}\n", "func", K::Keyword),
+            (Lang::Html, "<div class=\"a\"></div>\n", "div", K::Keyword),
+            (Lang::Css, "a { color: red; }\n", "color", K::Function),
+            (Lang::Toml, "name = \"kyte\"\n", "name", K::Function),
+            (Lang::Yaml, "name: kyte\n", "name", K::Function),
+            (Lang::Markdown, "# Title\n\ntext\n", "Title", K::Keyword),
+        ];
+        for (lang, src, token, kind) in cases {
+            let spans = highlight(*lang, src, 0..2);
+            let k = kinds_of(src, &spans);
+            assert!(
+                k.iter().any(|(t, x)| t.contains(token) && x == kind),
+                "{lang:?}: {k:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn names_with_no_extension_are_recognized() {
+        assert_eq!(
+            Lang::from_path(Path::new("/home/a/.bashrc")),
+            Some(Lang::Bash)
+        );
+        assert_eq!(Lang::from_path(Path::new("Cargo.lock")), Some(Lang::Toml));
+    }
+
+    #[test]
     fn languages_from_extension() {
         assert_eq!(Lang::from_path(Path::new("a/b.rs")), Some(Lang::Rust));
         assert_eq!(Lang::from_path(Path::new("x.py")), Some(Lang::Python));
         assert_eq!(Lang::from_path(Path::new("run.sh")), Some(Lang::Bash));
         assert_eq!(Lang::from_path(Path::new("notes.txt")), None);
+        assert_eq!(Lang::from_path(Path::new("a.tsx")), Some(Lang::Tsx));
+        assert_eq!(Lang::from_path(Path::new("a.hpp")), Some(Lang::Cpp));
+        assert_eq!(Lang::from_path(Path::new("a.yml")), Some(Lang::Yaml));
         assert_eq!(Lang::from_path(Path::new("Makefile")), None);
     }
 }

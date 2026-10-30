@@ -12,6 +12,18 @@ These replace the matching parts of `ARCHITECTURE`. `docs/ROADMAP.md` holds the 
 - License: MIT. This settles section 16 and the section 4 note.
 - Kyte isn't tied to any one OS. It's meant to be open source for everyone.
 
+## More languages
+
+- Added JavaScript, TypeScript, TSX, JSON, C, C++, Go, HTML, CSS, TOML, YAML and Markdown, which replaces the "three languages" default from the design. Every grammar is a default dependency, because a plain-looking file is the first thing a new user sees.
+- A language with functions gets `f`, `n`, `p` and the reader's function focus. Data and markup formats get highlighting and `e`, and `has_functions` keeps the other keys off their menu.
+- TypeScript's query builds on JavaScript's, and C++'s on C's, as those grammars expect.
+- Each grammar's capture names map onto Kyte's existing colors. Adding `tag`, `attribute` and `property` also colors those in the first three languages, such as Rust fields and attributes.
+- Markdown uses the block grammar only: headings and code blocks show, but inline emphasis doesn't, because that needs a second parser per line.
+- Embedded languages aren't colored, such as JavaScript inside HTML or code in a Markdown fence.
+- Language comes from the file name or extension. A script with only a `#!` line stays plain.
+- The cost is size: the binary goes from about 7 MB to about 15 MB, nearly all of it grammar tables, and the release profile now strips symbols. `--no-default-features` gives about 1.3 MB.
+- Typing at the end of a file, per key on a release build: 12 to 22 ms at 100 KB across languages, and 64 ms (Go) to 113 ms (C++) at 500 KB. That's usable, so the 512 KiB cap stays, and incremental parsing is still the way to improve it.
+
 ## CI
 
 - That image has no Node, which `actions/checkout` needs, so the job checks out with git.

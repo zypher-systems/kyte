@@ -34,7 +34,7 @@ The Makefile targets are thin wrappers:
 | `make demo` | `scripts/demo.sh` (see [Demo](#demo)) |
 | `make docker-test` | `cargo test` inside the Docker dev image (see [Docker](#docker)) |
 
-Kyte highlights Rust, Python and Bash files, picked by file extension, using tree-sitter. Building needs a C compiler for the grammars. To leave highlighting out, which also shrinks the binary from about 7 MB to about 1.5 MB:
+Kyte highlights Rust, Python, Bash, JavaScript, TypeScript, TSX, C, C++, Go, JSON, HTML, CSS, TOML, YAML and Markdown, picked by file name or extension, using tree-sitter. Building needs a C compiler for the grammars. To leave highlighting and the code actions out, which shrinks the binary from about 15 MB to about 1.3 MB:
 
 ```
 cargo build --release --no-default-features
@@ -127,7 +127,8 @@ The menu changes with where you are, and only lists what works there:
 | --- | --- |
 | On a bracket with a partner | `i` select inside |
 | In a file with a line comment syntax | `#` comment or uncomment the line |
-| In Rust, Python or Bash | `f` select function, `e` select the syntax under the cursor, `n` and `p` next and previous function |
+| In any language Kyte highlights | `e` select the syntax under the cursor |
+| In Rust, Python, Bash, JavaScript, TypeScript, C, C++ or Go | `f` select function, `n` and `p` next and previous function |
 
 With text selected, Esc shows the selection's menu instead. Actions leave the result selected where that makes sense, so they chain:
 
@@ -192,7 +193,7 @@ A million typed characters take about 34 MB, and a pasted block adds its own siz
 
 ### Reader mode
 
-Esc `v` (or **Reader mode** in the palette) is for reading code rather than changing it. The text is read-only, and everything outside the current section is dimmed. A section is the function under the cursor, with its doc comments and attributes, in Rust, Python and Bash; elsewhere it's the paragraph. In code, the status bar shows where you are, such as `impl Foo › fn bar`.
+Esc `v` (or **Reader mode** in the palette) is for reading code rather than changing it. The text is read-only, and everything outside the current section is dimmed. A section is the function under the cursor, with its doc comments and attributes, in the languages that have functions; elsewhere it's the paragraph. In code, the status bar shows where you are, such as `impl Foo › fn bar`.
 
 | Key | Action |
 | --- | --- |
@@ -288,7 +289,7 @@ These Docker files have not been run yet, because the build machine had no Docke
 - UTF-8 files only (others are refused and left untouched).
 - Kyte keeps each line's ending as it is. New lines use the ending most of the file uses, and the status bar shows `CRLF` for those files. It doesn't convert a file from one to the other. A `\r` that isn't part of a line ending shows as a control picture.
 - Linux only (the swap lock checks `/proc`).
-- Files over 512 KiB aren't syntax highlighted, because each keystroke re-parses the file. Typing near that size takes up to about 55 ms per key.
+- Files over 512 KiB aren't syntax highlighted, because each keystroke re-parses the file. Typing takes under about 25 ms per key at 100 KB, and 60 to 115 ms near the limit, depending on the language.
 - Search takes under about 30 ms per key on a 38 MB ASCII file. On a file that size with non-ASCII text, ignoring case takes about 240 ms per key.
 - A very long single line costs more per keystroke, depending on what's in it. At the end of a 5 MB line on the build machine, plain ASCII takes about 8 ms, a line full of tabs about 45 ms, and CJK text about 170 ms.
 - Not in this version: file tree, light and high-contrast themes, mouse, multiple buffers or splits, LSP, plugins, a config file, soft wrap, CRLF conversion, non-UTF-8 files, RPM/COPR packaging, and use as the default `$EDITOR`.

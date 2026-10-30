@@ -17,10 +17,15 @@ fn col_of(p: &Pty, r: usize, pat: &str) -> u16 {
 
 /// Kyte on a Rust file holding `text`.
 fn open_rust(text: &str) -> (tempfile::TempDir, Pty) {
+    open_named("main.rs", text)
+}
+
+/// Kyte on a file called `name` holding `text`.
+fn open_named(name: &str, text: &str) -> (tempfile::TempDir, Pty) {
     let dir = tempfile::tempdir().unwrap();
     let state = dir.path().join("state");
     std::fs::create_dir(&state).unwrap();
-    let file = dir.path().join("main.rs");
+    let file = dir.path().join(name);
     std::fs::write(&file, text).unwrap();
     let p = Pty::kyte(
         Path::new(env!("CARGO_BIN_EXE_kyte")),
@@ -119,6 +124,58 @@ fn reader_focuses_on_a_function_and_shows_where_you_are() {
     p.wait_for("fn other", TIMEOUT);
     p.send_keys(&["Esc"]);
     p.wait_gone(" READER ", TIMEOUT);
+    p.send_keys(&["C-q"]);
+    p.wait_exit(TIMEOUT);
+}
+
+#[test]
+fn new_languages_are_colored_in_the_terminal() {
+    for (name, text, token) in [
+        ("main.go", "func main() {}\n", "func"),
+        ("app.ts", "const a = 1;\n", "const"),
+        ("page.html", "<div></div>\n", "div"),
+    ] {
+        let (_dir, mut p) = open_named(name, text);
+        p.wait_for(token, TIMEOUT);
+        let col = col_of(&p, 0, token);
+        assert_ne!(
+            p.fg(0, col),
+            Some(vt100::Color::Idx(252)),
+            "{name} should be colored"
+        );
+        p.send_keys(&["C-q"]);
+        p.wait_exit(TIMEOUT);
+    }
+}
+
+#[test]
+fn a_go_function_can_be_selected_from_the_esc_menu() {
+    let (_dir, mut p) = open_named("main.go", "package main\n\nfunc f() {\n\tx()\n}\n");
+    p.wait_for("func f", TIMEOUT);
+    p.send_keys(&["Down", "Down", "Down"]);
+    p.wait_for("Ln 4", TIMEOUT);
+    p.send_keys(&["Esc"]);
+    p.wait_for("select function", TIMEOUT);
+    p.send_str("f");
+    p.wait_for("17 selected", TIMEOUT);
+    p.send_keys(&["Esc"]);
+    p.wait_for("x cut", TIMEOUT);
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    p.send_keys(&["Esc"]);
+    p.wait_gone("17 selected", TIMEOUT);
+    p.send_keys(&["C-q"]);
+    p.wait_exit(TIMEOUT);
+}
+
+#[test]
+fn json_offers_syntax_selection_but_no_function_keys() {
+    let (_dir, mut p) = open_named("a.json", "{\"a\": 1}\n");
+    p.wait_for("Ln 1", TIMEOUT);
+    p.send_keys(&["Esc"]);
+    p.wait_for("select syntax", TIMEOUT);
+    assert!(!p.screen().contains("select function"), "{}", p.dump());
+    p.send_str("z");
+    p.wait_gone("select syntax", TIMEOUT);
     p.send_keys(&["C-q"]);
     p.wait_exit(TIMEOUT);
 }
