@@ -59,11 +59,16 @@ Kyte's pitch is an editor you can't lose work in and don't have to learn.
 
 - [x] Review changes made by other tools, built on file history
 
+## Released: 0.5.0, a working everyday editor
+
+- [x] Highlighting and code actions for twelve more languages
+- [x] Scripts recognised by their `#!` line
+- [x] Retention for file history, so logs can't grow without limit
+- [x] A settings file
+- [x] Soft wrap
+
 ## Next
 
-- [x] Retention for file history, so logs can't grow without limit
-- [x] Soft wrap
-- [x] A settings file
 - [ ] Re-record the demo, which still shows the footer legend (needs `agg`)
 
 Looks are still open too, with details to be decided. Keep using Kyte for real work along the way, on actual terminals with the kitty keyboard protocol, and over SSH and tmux.
