@@ -45,15 +45,21 @@ Fixed every known way the build could lose or damage work. Each fix has a regres
 - [x] Ctrl-K universal palette
 - [x] Replace the Nano-derived aliases: Ctrl-X, Ctrl-C and Ctrl-V for cut, copy and paste, and Ctrl-O to open a file.
 
-## Next: what makes Kyte stand out
+## Released: 0.3.0, standing out
 
 Kyte's pitch is an editor you can't lose work in and don't have to learn.
 
+- [x] Syntax highlighting on by default
 - [x] File history: every edit kept across sessions, browsable and restorable
-- [ ] Retention for file history, so logs can't grow without limit
+- [x] Floating menus for everything the user picks from
 - [x] Smart Esc layer: a menu that changes with context, using tree-sitter
 - [x] Reader mode
+
+## Next
+
 - [ ] Review changes made by other tools, built on file history
+- [ ] Retention for file history, so logs can't grow without limit
+- [ ] Re-record the demo, which still shows the footer legend (needs `agg`)
 
 Looks are still open too, with details to be decided. Keep using Kyte for real work along the way, on actual terminals with the kitty keyboard protocol, and over SSH and tmux.
 
