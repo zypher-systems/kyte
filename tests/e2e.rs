@@ -59,6 +59,26 @@ fn status(p: &Pty) -> String {
     p.row(28)
 }
 
+/// Types `text` (one line of plain ASCII) and waits until all of it has
+/// landed. `[+]` shows after the first character, so it says nothing about the
+/// rest, and a check of the swap or a signal could beat them.
+fn type_text(p: &mut Pty, text: &str) {
+    let col_now = |s: &str| {
+        let line = s.lines().rev().nth(1).unwrap_or("").to_string();
+        let digits: String = line
+            .split("Col ")
+            .nth(1)
+            .unwrap_or("")
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect();
+        digits.parse::<usize>().unwrap_or(0)
+    };
+    let want = col_now(&p.screen()) + text.len();
+    p.send_str(text);
+    p.wait_until("typing to land", TIMEOUT, |s| col_now(s) == want);
+}
+
 fn wait_status(p: &Pty, text: &str) {
     let what = format!("status bar to contain {text:?}");
     p.wait_until(&what, TIMEOUT, |_| status(p).contains(text));
@@ -354,8 +374,7 @@ fn ac18_quit_dirty_asks_then_discards() {
     let env = Env::new();
     let f = env.write("q.txt", "keep me\n");
     let mut p = env.open(&f);
-    p.send_str("junk");
-    wait_status(&p, "[+]");
+    type_text(&mut p, "junk");
     p.send_keys(&["C-q"]);
     p.wait_for("Unsaved changes", TIMEOUT);
     std::thread::sleep(Duration::from_millis(100));
@@ -381,8 +400,7 @@ fn ac18_quit_dirty_y_saves_and_quits() {
     let env = Env::new();
     let f = env.write("q.txt", "keep me\n");
     let mut p = env.open(&f);
-    p.send_str("more ");
-    wait_status(&p, "[+]");
+    type_text(&mut p, "more ");
     p.send_keys(&["C-q"]);
     p.wait_for("Unsaved changes", TIMEOUT);
     p.send_str("y");
@@ -403,8 +421,7 @@ fn y_with_a_failed_save_stays_open_and_keeps_the_swap() {
     let f = dir.join("f.txt");
     fs::write(&f, "x\n").unwrap();
     let mut p = env.open(&f);
-    p.send_str("work");
-    wait_status(&p, "[+]");
+    type_text(&mut p, "work");
     fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
     p.send_keys(&["C-q"]);
     p.wait_for("Unsaved changes", TIMEOUT);
@@ -446,8 +463,7 @@ fn save_as_moves_the_buffer_and_its_swap_to_the_new_file() {
     let f = work_file(&env, "old.txt", "text\n");
     let new = f.with_file_name("new.txt");
     let mut p = env.open(&f);
-    p.send_str("edit ");
-    wait_status(&p, "[+]");
+    type_text(&mut p, "edit ");
     save_as(&mut p, new.to_str().unwrap());
     p.wait_for("Saved 1 line", TIMEOUT);
     wait_status(&p, "new.txt");
@@ -456,8 +472,7 @@ fn save_as_moves_the_buffer_and_its_swap_to_the_new_file() {
     let swaps = swap_files(&env);
     assert_eq!(swaps.len(), 1);
     assert!(swaps[0].to_string_lossy().contains("new.txt"));
-    p.send_str("more ");
-    wait_status(&p, "[+]");
+    type_text(&mut p, "more ");
     save_and_wait(&mut p);
     quit_clean(&mut p);
     assert_eq!(fs::read_to_string(&new).unwrap(), "edit more text\n");
@@ -534,8 +549,7 @@ fn quitting_an_untitled_buffer_with_y_saves_then_quits() {
     let env = Env::new();
     let f = env.path("named.txt");
     let mut p = open_untitled(&env);
-    p.send_str("draft");
-    wait_status(&p, "[+]");
+    type_text(&mut p, "draft");
     p.send_keys(&["C-q"]);
     p.wait_for("Unsaved changes", TIMEOUT);
     p.send_str("y");
@@ -551,8 +565,7 @@ fn quitting_an_untitled_buffer_with_y_saves_then_quits() {
 fn untitled_buffer_survives_a_crash() {
     let env = Env::new();
     let mut p = open_untitled(&env);
-    p.send_str("unnamed work");
-    wait_status(&p, "[+]");
+    type_text(&mut p, "unnamed work");
     std::thread::sleep(Duration::from_millis(100));
     p.kill9();
     let mut p = Pty::kyte(&bin(), &env.state, &[]);
@@ -1103,8 +1116,7 @@ fn ac17_sav_puts_save_first_and_enter_saves() {
     let env = Env::new();
     let f = env.write("p.txt", "abc\n");
     let mut p = env.open(&f);
-    p.send_str("X");
-    wait_status(&p, "[+]");
+    type_text(&mut p, "X");
     open_palette(&mut p);
     p.send_str("sav");
     p.wait_for("> sav", TIMEOUT);
@@ -1166,8 +1178,7 @@ fn ac17_esc_closes_without_running() {
     let env = Env::new();
     let f = env.write("p.txt", "abc\n");
     let mut p = env.open(&f);
-    p.send_str("X");
-    wait_status(&p, "[+]");
+    type_text(&mut p, "X");
     open_palette(&mut p);
     p.send_str("sav");
     p.wait_for("> sav", TIMEOUT);
@@ -1212,8 +1223,7 @@ fn ac17_quit_without_saving_command() {
     let env = Env::new();
     let f = env.write("p.txt", "abc\n");
     let mut p = env.open(&f);
-    p.send_str("junk");
-    wait_status(&p, "[+]");
+    type_text(&mut p, "junk");
     open_palette(&mut p);
     p.send_str("without");
     p.send_keys(&["Enter"]);
@@ -1271,8 +1281,7 @@ fn ac19_swap_exists_0600_outside_file_dir_and_recreated_after_save() {
     let env = Env::new();
     let f = work_file(&env, "doc.txt", "orig\n");
     let mut p = env.open(&f);
-    p.send_str("abc");
-    wait_status(&p, "[+]");
+    type_text(&mut p, "abc");
     let swaps = swap_files(&env);
     assert_eq!(swaps.len(), 1, "one swap under KYTE_STATE_DIR");
     let mode = fs::metadata(&swaps[0]).unwrap().permissions().mode() & 0o777;
@@ -1308,8 +1317,7 @@ fn ac19_discard_quit_removes_swap_and_print_swap_exits_3() {
     let env = Env::new();
     let f = work_file(&env, "doc.txt", "orig\n");
     let mut p = env.open(&f);
-    p.send_str("zzz");
-    wait_status(&p, "[+]");
+    type_text(&mut p, "zzz");
     p.send_keys(&["C-q"]);
     p.wait_for("Unsaved changes", TIMEOUT);
     p.send_str("n");
@@ -1604,8 +1612,7 @@ fn break_lock_opens_a_file_held_by_another_kyte() {
     let env = Env::new();
     let f = work_file(&env, "held.txt", "base\n");
     let mut a = env.open(&f);
-    a.send_str("held ");
-    wait_status(&a, "[+]");
+    type_text(&mut a, "held ");
     let path = f.to_str().unwrap();
     let mut refused = Pty::kyte(&bin(), &env.state, &[path]);
     assert_eq!(refused.wait_exit(TIMEOUT), 2);
@@ -1670,8 +1677,7 @@ fn your_unsaved_edits_and_their_changes_both_survive() {
     let env = Env::new();
     let f = work_file(&env, "o.txt", "a\nb\nc\nd\ne\nf\n");
     let mut p = env.open(&f);
-    p.send_str("mine ");
-    wait_status(&p, "[+]");
+    type_text(&mut p, "mine ");
     fs::write(&f, "a\nb\nc\nd\ne\nTHEIRS\n").unwrap();
     start_review(&mut p);
     wait_status(&p, "change 1 of 1");
@@ -1697,8 +1703,7 @@ fn keeping_yours_saves_without_asking_again_and_history_has_theirs() {
     p.send_str("n");
     p.wait_for("Took 0 of 1 changes", TIMEOUT);
     p.wait_for("1 │ one", TIMEOUT);
-    p.send_str("x");
-    wait_status(&p, "[+]");
+    type_text(&mut p, "x");
     p.send_keys(&["C-s"]);
     p.wait_for("Saved 1 line", TIMEOUT);
     assert_eq!(fs::read_to_string(&f).unwrap(), "xone\n");
@@ -1718,8 +1723,7 @@ fn the_same_lines_changed_on_both_sides_is_flagged() {
     let env = Env::new();
     let f = work_file(&env, "o.txt", "one\n");
     let mut p = env.open(&f);
-    p.send_str("mine ");
-    wait_status(&p, "[+]");
+    type_text(&mut p, "mine ");
     fs::write(&f, "theirs\n").unwrap();
     start_review(&mut p);
     p.wait_for("you edited this too", TIMEOUT);
@@ -1756,8 +1760,7 @@ fn the_save_question_can_open_the_review() {
     let env = Env::new();
     let f = work_file(&env, "o.txt", "one\n");
     let mut p = env.open(&f);
-    p.send_str("x");
-    wait_status(&p, "[+]");
+    type_text(&mut p, "x");
     fs::write(&f, "theirs\n").unwrap();
     p.send_keys(&["C-s"]);
     p.wait_for("Review the changes", TIMEOUT);
@@ -1776,8 +1779,7 @@ fn saving_your_own_changes_raises_no_marker() {
     let env = Env::new();
     let f = work_file(&env, "o.txt", "one\n");
     let mut p = env.open(&f);
-    p.send_str("x");
-    wait_status(&p, "[+]");
+    type_text(&mut p, "x");
     save_and_wait(&mut p);
     std::thread::sleep(Duration::from_millis(2300));
     assert!(!status(&p).contains(MARKER), "{}", p.dump());
@@ -1856,8 +1858,7 @@ fn choices_float_and_the_footer_stays_clear() {
     assert!(!footer(&p).contains("del word"), "{}", p.dump());
     p.send_str("z");
     wait_insert(&p);
-    p.send_str("x");
-    wait_status(&p, "[+]");
+    type_text(&mut p, "x");
     p.send_keys(&["C-q"]);
     p.wait_for("Unsaved changes", TIMEOUT);
     p.wait_for("Save and quit", TIMEOUT);
@@ -2028,8 +2029,7 @@ fn history_browsing_is_read_only_and_esc_returns_to_your_text() {
     let env = Env::new();
     let f = work_file(&env, "h.txt", "base\n");
     let mut p = env.open(&f);
-    p.send_str("x");
-    wait_status(&p, "[+]");
+    type_text(&mut p, "x");
     open_history(&mut p);
     p.send_keys(&["Home"]);
     p.wait_for("1 │ base", TIMEOUT);
@@ -2050,8 +2050,7 @@ fn history_survives_quitting_and_keeps_discarded_edits() {
     let env = Env::new();
     let f = work_file(&env, "h.txt", "base\n");
     let mut p = env.open(&f);
-    p.send_str("kept ");
-    wait_status(&p, "[+]");
+    type_text(&mut p, "kept ");
     save_and_wait(&mut p);
     p.send_str("thrown away ");
     p.wait_for("kept thrown away", TIMEOUT);
@@ -2075,8 +2074,7 @@ fn history_keeps_a_version_a_save_overwrote() {
     let env = Env::new();
     let f = work_file(&env, "h.txt", "v1\n");
     let mut p = env.open(&f);
-    p.send_str("mine ");
-    wait_status(&p, "[+]");
+    type_text(&mut p, "mine ");
     fs::write(&f, "theirs\n").unwrap();
     p.send_keys(&["C-s"]);
     p.wait_for("File changed on disk!", TIMEOUT);
@@ -2099,8 +2097,7 @@ fn history_of_a_deleted_file_still_opens() {
     let env = Env::new();
     let f = work_file(&env, "h.txt", "precious\n");
     let mut p = env.open(&f);
-    p.send_str("x");
-    wait_status(&p, "[+]");
+    type_text(&mut p, "x");
     save_and_wait(&mut p);
     quit_clean(&mut p);
     fs::remove_file(&f).unwrap();
@@ -2152,8 +2149,7 @@ fn no_history_flag_keeps_nothing() {
     let env = Env::new();
     let f = work_file(&env, "h.txt", "base\n");
     let mut p = env.open_args(&f, &["--no-history"]);
-    p.send_str("secret");
-    wait_status(&p, "[+]");
+    type_text(&mut p, "secret");
     save_and_wait(&mut p);
     open_overlay(&mut p);
     p.send_str("h");
@@ -2167,8 +2163,7 @@ fn delete_file_history_asks_then_clears_it() {
     let env = Env::new();
     let f = work_file(&env, "h.txt", "base\n");
     let mut p = env.open(&f);
-    p.send_str("x");
-    wait_status(&p, "[+]");
+    type_text(&mut p, "x");
     save_and_wait(&mut p);
     open_palette(&mut p);
     p.send_str("delete file");
@@ -2193,8 +2188,7 @@ fn save_as_gives_the_new_file_its_own_history() {
     let mut p = env.open(&f);
     save_as(&mut p, new.to_str().unwrap());
     p.wait_for("Saved 1 line", TIMEOUT);
-    p.send_str("x");
-    wait_status(&p, "[+]");
+    type_text(&mut p, "x");
     open_history(&mut p);
     wait_status(&p, "2 of 2");
     p.send_keys(&["Esc"]);
@@ -2246,8 +2240,7 @@ fn ctrl_k_with_unsaved_changes_asks_before_it_opens_a_file() {
     fs::write(&a, "first\n").unwrap();
     fs::write(project.join("other.txt"), "second\n").unwrap();
     let mut p = open_in(&env, &project, &a);
-    p.send_str("edit ");
-    wait_status(&p, "[+]");
+    type_text(&mut p, "edit ");
     p.send_keys(&["C-k"]);
     p.wait_for("Commands, files", TIMEOUT);
     p.send_str("other");
@@ -2370,8 +2363,7 @@ fn ctrl_o_switches_files_and_moves_the_swap() {
     let swaps = swap_files(&env);
     assert_eq!(swaps.len(), 1);
     assert!(swaps[0].to_string_lossy().contains("b.txt"));
-    p.send_str("more ");
-    wait_status(&p, "[+]");
+    type_text(&mut p, "more ");
     save_and_wait(&mut p);
     quit_clean(&mut p);
     assert_eq!(fs::read_to_string(&b).unwrap(), "more second\n");
@@ -2384,8 +2376,7 @@ fn ctrl_o_with_unsaved_changes_asks_first() {
     let a = work_file(&env, "a.txt", "first\n");
     let b = work_file(&env, "b.txt", "second\n");
     let mut p = env.open(&a);
-    p.send_str("edit ");
-    wait_status(&p, "[+]");
+    type_text(&mut p, "edit ");
     open_from_prompt(&mut p, b.to_str().unwrap());
     p.wait_for("Unsaved changes", TIMEOUT);
     p.send_keys(&["Esc"]);
@@ -2396,8 +2387,7 @@ fn ctrl_o_with_unsaved_changes_asks_first() {
     p.send_str("y");
     p.wait_for("1 │ second", TIMEOUT);
     assert_eq!(fs::read_to_string(&a).unwrap(), "edit first\n");
-    p.send_str("gone ");
-    wait_status(&p, "[+]");
+    type_text(&mut p, "gone ");
     open_from_prompt(&mut p, a.to_str().unwrap());
     p.wait_for("Unsaved changes", TIMEOUT);
     p.send_str("n");
@@ -2412,8 +2402,7 @@ fn ctrl_o_reopening_the_same_file_after_discarding_starts_clean() {
     let env = Env::new();
     let a = work_file(&env, "a.txt", "first\n");
     let mut p = env.open(&a);
-    p.send_str("junk ");
-    wait_status(&p, "[+]");
+    type_text(&mut p, "junk ");
     open_from_prompt(&mut p, a.to_str().unwrap());
     p.wait_for("Unsaved changes", TIMEOUT);
     p.send_str("n");
@@ -2433,8 +2422,7 @@ fn ctrl_o_refuses_what_it_cannot_open_and_keeps_your_buffer() {
     let held = work_file(&env, "held.txt", "held\n");
     let mut other = env.open(&held);
     let mut p = env.open(&a);
-    p.send_str("edit ");
-    wait_status(&p, "[+]");
+    type_text(&mut p, "edit ");
     open_from_prompt(&mut p, binary.to_str().unwrap());
     p.wait_for("not valid UTF-8", TIMEOUT);
     p.send_keys(&["Esc"]);
@@ -2446,7 +2434,7 @@ fn ctrl_o_refuses_what_it_cannot_open_and_keeps_your_buffer() {
     open_from_prompt(&mut p, held.to_str().unwrap());
     p.wait_for("Open in another kyte", TIMEOUT);
     p.send_keys(&["Esc"]);
-    wait_status(&p, "a.txt [+]");
+    wait_status(&p, "INSERT");
     p.send_keys(&["C-q"]);
     p.wait_for("Unsaved changes", TIMEOUT);
     p.send_str("n");
@@ -2496,8 +2484,7 @@ fn ctrl_o_opens_a_new_file_that_does_not_exist_yet() {
     let mut p = env.open(&a);
     open_from_prompt(&mut p, new.to_str().unwrap());
     p.wait_for("Opened new.txt", TIMEOUT);
-    p.send_str("hello");
-    wait_status(&p, "[+]");
+    type_text(&mut p, "hello");
     save_and_wait(&mut p);
     quit_clean(&mut p);
     assert_eq!(fs::read_to_string(&new).unwrap(), "hello");
@@ -2751,8 +2738,7 @@ fn sigterm_restores_the_terminal_and_keeps_the_swap() {
     let env = Env::new();
     let f = work_file(&env, "term.txt", "base\n");
     let mut p = env.open(&f);
-    p.send_str("unsaved ");
-    wait_status(&p, "[+]");
+    type_text(&mut p, "unsaved ");
     assert!(p.alternate_screen());
     let st = Command::new("kill")
         .args(["-TERM", &p.pid().to_string()])
@@ -2896,8 +2882,7 @@ fn save_asks_before_overwriting_outside_changes() {
     let env = Env::new();
     let f = work_file(&env, "shared.txt", "v1\n");
     let mut p = env.open(&f);
-    p.send_str("mine ");
-    wait_status(&p, "[+]");
+    type_text(&mut p, "mine ");
     fs::write(&f, "theirs\n").unwrap();
     p.send_keys(&["C-s"]);
     p.wait_for("File changed on disk!", TIMEOUT);
@@ -2914,8 +2899,7 @@ fn save_asks_before_overwriting_outside_changes() {
     p.wait_for("Saved 1 line", TIMEOUT);
     assert_eq!(fs::read_to_string(&f).unwrap(), "mine v1\n");
     // Having answered once, the next save has nothing to ask about.
-    p.send_str("x");
-    wait_status(&p, "[+]");
+    type_text(&mut p, "x");
     save_and_wait(&mut p);
     quit_clean(&mut p);
 }
@@ -2925,8 +2909,7 @@ fn rewriting_the_same_content_is_not_an_outside_change() {
     let env = Env::new();
     let f = work_file(&env, "same.txt", "same\n");
     let mut p = env.open(&f);
-    p.send_str("x");
-    wait_status(&p, "[+]");
+    type_text(&mut p, "x");
     fs::write(&f, "same\n").unwrap();
     p.send_keys(&["C-s"]);
     p.wait_for("Saved 1 line", TIMEOUT);
@@ -2938,8 +2921,7 @@ fn file_deleted_while_open_is_saved_without_asking() {
     let env = Env::new();
     let f = work_file(&env, "gone.txt", "text\n");
     let mut p = env.open(&f);
-    p.send_str("x");
-    wait_status(&p, "[+]");
+    type_text(&mut p, "x");
     fs::remove_file(&f).unwrap();
     p.send_keys(&["C-s"]);
     p.wait_for("Saved 1 line", TIMEOUT);
@@ -2957,8 +2939,7 @@ fn read_only_file_is_replaced_only_after_a_yes() {
     let f = work_file(&env, "ro.txt", "protected\n");
     fs::set_permissions(&f, fs::Permissions::from_mode(0o444)).unwrap();
     let mut p = env.open(&f);
-    p.send_str("x");
-    wait_status(&p, "[+]");
+    type_text(&mut p, "x");
     p.send_keys(&["C-s"]);
     p.wait_for("File is read-only!", TIMEOUT);
     p.send_keys(&["Esc"]);
@@ -3026,8 +3007,7 @@ fn ac24_save_into_read_only_dir_fails_visibly_and_keeps_everything() {
     let f = work_file(&env, "ro.txt", "untouched\n");
     let dir = f.parent().unwrap().to_path_buf();
     let mut p = env.open(&f);
-    p.send_str("edit ");
-    wait_status(&p, "[+]");
+    type_text(&mut p, "edit ");
     fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
     p.send_keys(&["C-s"]);
     p.wait_for("Save failed", TIMEOUT);
@@ -3053,8 +3033,7 @@ fn ac24_save_through_symlink_updates_target_keeps_link() {
     let link = real.parent().unwrap().join("link.txt");
     std::os::unix::fs::symlink(&real, &link).unwrap();
     let mut p = env.open(&link);
-    p.send_str("via link ");
-    wait_status(&p, "[+]");
+    type_text(&mut p, "via link ");
     save_and_wait(&mut p);
     quit_clean(&mut p);
     assert_eq!(fs::read_to_string(&real).unwrap(), "via link real\n");
