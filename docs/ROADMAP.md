@@ -69,7 +69,6 @@ Looks are still open too, with details to be decided. Keep using Kyte for real w
 ## Later
 
 - Light and high-contrast themes
-- Config file
 - File tree
 - Multiple buffers and splits
 - Incremental parsing, and languages embedded in others
@@ -86,7 +85,7 @@ Proposed, not yet confirmed.
 - [ ] Selection, clipboard, find and replace, Save As, and opening files
 - [ ] Ctrl-K universal palette, and the Esc layer finalized
 - [x] Syntax highlighting on by default
-- [ ] A documented configuration file
+- [x] A documented configuration file
 - [ ] Tested on real terminals, including over SSH and tmux
 - [ ] Installable as a signed package
 

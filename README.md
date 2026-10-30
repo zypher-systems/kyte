@@ -41,7 +41,7 @@ cargo build --release --no-default-features
 cargo test --no-default-features
 ```
 
-Kyte makes no network connections and sends no telemetry. It reads no config file.
+Kyte makes no network connections and sends no telemetry.
 
 ## Usage
 
@@ -67,7 +67,7 @@ kyte [OPTIONS] [FILE]
 | 2 | Bad usage, a directory, a FIFO or device, a non-UTF-8 file, stdin or stdout not a terminal, or another live Kyte has the file open |
 | 3 | `--print-swap` found no valid swap |
 
-Environment variables: `KYTE_STATE_DIR` (where swap files go; overrides the default), `KYTE_ESC_MS`, and `TERM` as usual.
+Environment variables: `KYTE_STATE_DIR` (where swap files go; overrides the default), `KYTE_CONFIG` (the settings file), `KYTE_ESC_MS`, and `TERM` as usual.
 
 ## Keys
 
@@ -189,7 +189,7 @@ Kyte keeps every edit to a file, across sessions, including edits you later undo
 
 History is stored under `$XDG_STATE_HOME/kyte/history/` (default `~/.local/state/kyte/history/`), one log per file, with mode 0600 in a 0700 directory. It's kept by path, so a renamed file starts a new history; Save as does too. A buffer with no file name has no history until it's saved. Nothing is written until your first edit, so reading a file leaves no trace.
 
-A million typed characters take about 34 MB, and a pasted block adds its own size. When you close a file whose log has passed 100 MB, Kyte trims it towards 75 MB, oldest first: the single edits between old saves collapse into one step per changed area, and recent edits stay as they were. Every saved version and every version a save overwrote is kept, so a log can stay over the limit if those alone are that large. **It keeps what you type in plain text**, and trimming removes old keystrokes from the log but isn't a way to erase something. That includes a password you typed and then deleted. **Delete file history** in the palette removes one file's log, and `--no-history` keeps none for a session. Use `--no-history` for files holding secrets.
+A million typed characters take about 34 MB, and a pasted block adds its own size. When you close a file whose log has passed 100 MB (the `history_limit_mb` setting), Kyte trims it towards 75 MB, oldest first: the single edits between old saves collapse into one step per changed area, and recent edits stay as they were. Every saved version and every version a save overwrote is kept, so a log can stay over the limit if those alone are that large. **It keeps what you type in plain text**, and trimming removes old keystrokes from the log but isn't a way to erase something. That includes a password you typed and then deleted. **Delete file history** in the palette removes one file's log, and `--no-history` keeps none for a session. Use `--no-history` for files holding secrets.
 
 ### Reader mode
 
@@ -228,6 +228,23 @@ Search ignores case until your text has a capital letter, then it matches exactl
 ### Replace
 
 Ctrl-R asks what to replace and what to replace it with. Kyte then starts at the cursor, goes to the end of the file, wraps to the top, and stops where it started. At each match, `y` replaces it, `n` skips it, `a` replaces all the rest as one undo step, and Esc or `q` stops. Replace matches case the same way search does.
+
+## Settings
+
+**Open settings** in the palette opens `~/.config/kyte/config.toml` (or `$XDG_CONFIG_HOME/kyte/config.toml`), and creates it the first time with every setting commented out. `KYTE_CONFIG` points somewhere else. Changes apply the next time Kyte starts.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `tab_width` | `4` | Columns a tab takes up on screen |
+| `indent` | `"tabs"` | What Tab inserts in a file with no indent to go by: `"tabs"` or `"spaces"` |
+| `indent_width` | `4` | How many spaces, when `indent` is `"spaces"` |
+| `line_numbers` | `true` | Show line numbers |
+| `soft_wrap` | `false` | Wrap long lines at the edge of the screen |
+| `esc_ms` | `300` | Milliseconds to press Esc again for the palette |
+| `history` | `true` | Keep a history of every edit to each file |
+| `history_limit_mb` | `100` | Trim a file's history when it passes this size |
+
+Environment variables and command-line options override the file. A line Kyte can't use is skipped and reported on the first screen, and never stops Kyte from opening.
 
 ## Swap files and recovery
 
@@ -292,7 +309,7 @@ These Docker files have not been run yet, because the build machine had no Docke
 - Files over 512 KiB aren't syntax highlighted, because each keystroke re-parses the file. Typing takes under about 25 ms per key at 100 KB, and 60 to 115 ms near the limit, depending on the language.
 - Search takes under about 30 ms per key on a 38 MB ASCII file. On a file that size with non-ASCII text, ignoring case takes about 240 ms per key.
 - A very long single line costs more per keystroke, depending on what's in it. At the end of a 5 MB line on the build machine, plain ASCII takes about 8 ms, a line full of tabs about 45 ms, and CJK text about 170 ms.
-- Not in this version: file tree, light and high-contrast themes, mouse, multiple buffers or splits, LSP, plugins, a config file, soft wrap, CRLF conversion, non-UTF-8 files, RPM/COPR packaging, and use as the default `$EDITOR`.
+- Not in this version: file tree, light and high-contrast themes, mouse, multiple buffers or splits, LSP, plugins, soft wrap, CRLF conversion, non-UTF-8 files, RPM/COPR packaging, and use as the default `$EDITOR`.
 
 ## Documentation
 

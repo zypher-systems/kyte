@@ -37,10 +37,10 @@ const MARK_CLOSED: u8 = 2;
 const SNAP_CHUNK: usize = 1 << 20;
 /// A rope is kept for every this many versions, so any one is a short replay away.
 const CHECKPOINT_EVERY: usize = 256;
-/// A log over this size is compacted, down to `COMPACT_TO`.
+/// A log over this size is compacted when it closes, unless settings say
+/// otherwise. Compacting aims for three quarters of the limit, so it doesn't
+/// run again straight away.
 pub const LOG_LIMIT: u64 = 100_000_000;
-/// Compacting stops short of the limit, so it doesn't run again straight away.
-const COMPACT_TO: u64 = 75_000_000;
 /// How long compacting may look for savings. What it hasn't reached by then
 /// stays as it was, so the worst case is a short pause, not a long one.
 const COMPACT_BUDGET: Duration = Duration::from_secs(3);
@@ -264,6 +264,7 @@ pub struct FileHistory {
     /// The log ends at the buffer's current text.
     synced: bool,
     pending_fsync: bool,
+    limit: u64,
 }
 
 impl FileHistory {
@@ -279,7 +280,14 @@ impl FileHistory {
             file: None,
             synced: false,
             pending_fsync: false,
+            limit: LOG_LIMIT,
         }
+    }
+
+    /// Sets the size that trims the log.
+    pub fn with_limit(mut self, limit: u64) -> FileHistory {
+        self.limit = limit;
+        self
     }
 
     fn write(&mut self, bytes: &[u8]) -> io::Result<()> {
@@ -387,7 +395,7 @@ impl FileHistory {
         self.write(&mark_bytes(MARK_CLOSED, state, now_ms()))?;
         self.fsync_if_pending()?;
         self.file = None;
-        compact(&self.path, LOG_LIMIT, COMPACT_TO)
+        compact(&self.path, self.limit, self.limit / 4 * 3)
     }
 
     pub fn fsync_if_pending(&mut self) -> io::Result<()> {

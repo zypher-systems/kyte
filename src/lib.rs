@@ -7,6 +7,7 @@ pub mod buffer;
 pub mod cli;
 pub mod clipboard;
 pub mod command;
+pub mod config;
 pub mod diff;
 pub mod fileio;
 #[cfg(feature = "highlight")]
@@ -48,6 +49,7 @@ pub fn run(opts: Options) -> anyhow::Result<ExitCode> {
     if let Some(p) = &opts.print_swap {
         return Ok(print_swap(p));
     }
+    buffer::set_tab_width(opts.tab_width);
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
         eprintln!("kyte: stdin and stdout must be a terminal");
         return Ok(ExitCode::from(2));
@@ -61,6 +63,10 @@ pub fn run(opts: Options) -> anyhow::Result<ExitCode> {
     };
     if !opts.no_history {
         app.enable_history();
+    }
+    if app.message.is_none() {
+        app.message = opts.config_warning.clone();
+        app.message_is_error = app.message.is_some();
     }
     let result = event_loop(&mut app, opts.no_kitty);
     if result.is_ok() {

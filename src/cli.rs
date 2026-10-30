@@ -3,6 +3,9 @@
 use std::fmt;
 use std::path::PathBuf;
 
+use crate::buffer::Indent;
+use crate::config;
+
 /// Default double-tap Esc window in milliseconds.
 pub const DEFAULT_ESC_MS: u64 = 300;
 
@@ -15,6 +18,17 @@ pub struct Options {
     pub print_swap: Option<PathBuf>,
     pub break_lock: bool,
     pub no_history: bool,
+    /// Columns a tab takes up on screen.
+    pub tab_width: usize,
+    /// What Tab inserts in a file with no indent to go by.
+    pub default_indent: Indent,
+    /// How many spaces, once `default_indent` is spaces.
+    pub indent_width: usize,
+    pub line_numbers: bool,
+    pub soft_wrap: bool,
+    pub history_limit_mb: u64,
+    /// What was wrong with the settings file, for the first screen.
+    pub config_warning: Option<String>,
 }
 
 impl Default for Options {
@@ -26,6 +40,13 @@ impl Default for Options {
             print_swap: None,
             break_lock: false,
             no_history: false,
+            tab_width: 4,
+            default_indent: Indent::Tabs,
+            indent_width: 4,
+            line_numbers: true,
+            soft_wrap: false,
+            history_limit_mb: 100,
+            config_warning: None,
         }
     }
 }
@@ -71,6 +92,7 @@ Options:\n\
       --print-swap FILE  Print the content recovered from FILE's swap and exit (exit 3 if none)\n\n\
 Environment:\n\
   KYTE_STATE_DIR         Swap directory override\n\
+  KYTE_CONFIG            Settings file (default ~/.config/kyte/config.toml)\n\
   KYTE_ESC_MS            Default for --esc-ms\n\n\
 Exit codes: 0 ok, 1 runtime error, 2 bad usage or refused file, 3 no swap for --print-swap\n",
         version()
@@ -79,7 +101,7 @@ Exit codes: 0 ok, 1 runtime error, 2 bad usage or refused file, 3 no swap for --
 
 /// Parses `args` (without the program name), reading `KYTE_ESC_MS` from the environment.
 pub fn parse(args: impl Iterator<Item = String>) -> Result<Options, CliError> {
-    parse_with_env(args, std::env::var("KYTE_ESC_MS").ok())
+    parse_onto(config::load(), args, std::env::var("KYTE_ESC_MS").ok())
 }
 
 /// Like [`parse`] but with the `KYTE_ESC_MS` value injected (for tests).
@@ -87,7 +109,17 @@ pub fn parse_with_env(
     args: impl Iterator<Item = String>,
     env_esc_ms: Option<String>,
 ) -> Result<Options, CliError> {
-    let mut opts = Options::default();
+    parse_onto(Options::default(), args, env_esc_ms)
+}
+
+/// Layers the environment and then `args` over `base`, the settings file's
+/// values, so each later source wins.
+pub fn parse_onto(
+    base: Options,
+    args: impl Iterator<Item = String>,
+    env_esc_ms: Option<String>,
+) -> Result<Options, CliError> {
+    let mut opts = base;
     if let Some(v) = env_esc_ms {
         if !v.is_empty() {
             opts.esc_ms = parse_ms(&v, "KYTE_ESC_MS")?;

@@ -1060,7 +1060,7 @@ fn ac16_empty_query_does_nothing() {
 
 // ---------------------------------------------------------------- AC-17
 
-const COMMANDS: [&str; 20] = [
+const COMMANDS: [&str; 21] = [
     "Save",
     "Save as",
     "Open file",
@@ -1080,6 +1080,7 @@ const COMMANDS: [&str; 20] = [
     "File history",
     "Delete file history",
     "Reader mode",
+    "Open settings",
     "Show key help",
 ];
 
@@ -1112,7 +1113,7 @@ fn ac17_palette_lists_every_command() {
         .collect();
     assert!(first_result(&p).contains("▸ Save"), "{}", p.dump());
     // 8 rows are visible at once; scrolling down reveals the rest
-    for _ in 0..19 {
+    for _ in 0..20 {
         p.send_keys(&["Down"]);
         std::thread::sleep(Duration::from_millis(5));
         for c in COMMANDS {
@@ -1941,6 +1942,116 @@ fn tab_shows_completions_in_a_floating_list() {
     p.send_keys(&["Esc"]);
     wait_status(&p, "INSERT");
     quit_clean(&mut p);
+}
+
+// ---------------------------------------------------------------- settings
+
+/// Kyte on `file` with a settings file holding `settings`.
+fn open_with_settings(env: &Env, file: &Path, settings: &str, extra: &[&str]) -> Pty {
+    let config = env.path("config.toml");
+    fs::write(&config, settings).unwrap();
+    let mut spawn = Spawn::new(bin())
+        .env("KYTE_STATE_DIR", env.state.to_string_lossy())
+        .env("KYTE_CONFIG", config.to_string_lossy())
+        .arg("--no-kitty");
+    for a in extra {
+        spawn = spawn.arg(a);
+    }
+    let pty = Pty::spawn(spawn.arg(file.to_str().unwrap()));
+    pty.wait_for("Ln 1, Col 1", TIMEOUT);
+    pty
+}
+
+#[test]
+fn settings_change_how_kyte_behaves() {
+    let env = Env::new();
+    let f = env.write("s.txt", "a\tb\n");
+    let settings = "tab_width = 8\nline_numbers = false\n";
+    let mut p = open_with_settings(&env, &f, settings, &[]);
+    p.wait_for("a       b", TIMEOUT);
+    assert!(!p.screen().contains("1 │"), "{}", p.dump());
+    quit_clean(&mut p);
+}
+
+#[test]
+fn default_indent_applies_only_to_files_with_no_indent_of_their_own() {
+    let env = Env::new();
+    let settings = "indent = \"spaces\"\nindent_width = 2\n";
+    let plain = env.write("plain.txt", "x\n");
+    let mut p = open_with_settings(&env, &plain, settings, &[]);
+    wait_status(&p, "Spaces 2");
+    p.send_keys(&["Tab"]);
+    wait_status(&p, "[+]");
+    save_and_wait(&mut p);
+    quit_clean(&mut p);
+    assert_eq!(fs::read_to_string(&plain).unwrap(), "  x\n");
+    let tabbed = env.write("tabbed.txt", "a\n\tb\n");
+    let mut p = open_with_settings(&env, &tabbed, settings, &[]);
+    assert!(!status(&p).contains("Spaces"), "{}", p.dump());
+    quit_clean(&mut p);
+}
+
+#[test]
+fn a_bad_settings_file_warns_and_still_opens() {
+    let env = Env::new();
+    let f = env.write("s.txt", "text\n");
+    let mut p = open_with_settings(&env, &f, "tabwidth = 2\nesc_ms = nope\n", &[]);
+    p.wait_for(
+        "Settings: line 1: unknown setting tabwidth (and 1 more)",
+        TIMEOUT,
+    );
+    p.wait_for("1 │ text", TIMEOUT);
+    quit_clean(&mut p);
+}
+
+#[test]
+fn the_command_line_beats_the_settings_file() {
+    let env = Env::new();
+    let f = env.write("s.txt", "x\n");
+    let mut p = open_with_settings(&env, &f, "esc_ms = 0\n", &["--esc-ms", "800"]);
+    p.send_keys(&["Esc"]);
+    p.wait_for(LEGEND_PART, TIMEOUT);
+    std::thread::sleep(Duration::from_millis(400));
+    p.send_keys(&["Esc"]);
+    p.wait_for("Command palette", TIMEOUT);
+    p.send_keys(&["Esc"]);
+    p.wait_gone("Command palette", TIMEOUT);
+    quit_clean(&mut p);
+}
+
+#[test]
+fn history_can_be_turned_off_in_settings() {
+    let env = Env::new();
+    let f = env.write("s.txt", "x\n");
+    let mut p = open_with_settings(&env, &f, "history = false\n", &[]);
+    type_text(&mut p, "secret");
+    save_and_wait(&mut p);
+    quit_clean(&mut p);
+    assert!(!env.state.join("history").exists());
+}
+
+#[test]
+fn open_settings_creates_a_commented_template() {
+    let env = Env::new();
+    let f = env.write("s.txt", "x\n");
+    let config = env.path("cfg/config.toml");
+    let mut p = Pty::spawn(
+        Spawn::new(bin())
+            .env("KYTE_STATE_DIR", env.state.to_string_lossy())
+            .env("KYTE_CONFIG", config.to_string_lossy())
+            .arg("--no-kitty")
+            .arg(f.to_str().unwrap()),
+    );
+    p.wait_for("Ln 1, Col 1", TIMEOUT);
+    open_palette(&mut p);
+    p.send_str("open settings");
+    p.wait_for("▸ Open settings", TIMEOUT);
+    p.send_keys(&["Enter"]);
+    p.wait_for("Settings apply the next time", TIMEOUT);
+    p.wait_for("Kyte settings", TIMEOUT);
+    quit_clean(&mut p);
+    let text = fs::read_to_string(&config).unwrap();
+    assert!(text.contains("# tab_width = 4"));
 }
 
 // ---------------------------------------------------------------- 80x24

@@ -4,13 +4,24 @@
 
 use std::ops::Range;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ropey::Rope;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+static TAB_WIDTH: AtomicUsize = AtomicUsize::new(4);
+
 /// Tabs render to the next multiple of this many columns.
-pub const TAB_WIDTH: usize = 4;
+pub fn tab_width() -> usize {
+    TAB_WIDTH.load(Ordering::Relaxed)
+}
+
+/// Sets the tab width. It's one setting for the whole process, read while
+/// measuring text, so it lives here rather than being passed everywhere.
+pub fn set_tab_width(width: usize) {
+    TAB_WIDTH.store(width.max(1), Ordering::Relaxed);
+}
 
 /// A single replace operation in char indices. The inverse swaps `removed` and `inserted`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,7 +71,7 @@ struct Group {
 /// Display width of one grapheme starting at display column `col`.
 pub fn grapheme_width(g: &str, col: usize) -> usize {
     if g == "\t" {
-        TAB_WIDTH - col % TAB_WIDTH
+        tab_width() - col % tab_width()
     } else if g.chars().any(|c| c.is_control()) {
         1
     } else {
@@ -167,7 +178,7 @@ const INDENT_SAMPLE_LINES: usize = 10_000;
 /// The indent `text` uses, by counting its indented lines. A file with none
 /// uses tabs. Steps of one space are usually comment alignment, so they don't
 /// count towards the width.
-fn detect_indent(text: &str) -> Indent {
+fn detect_indent(text: &str) -> Option<Indent> {
     let (mut tabs, mut spaces, mut previous) = (0usize, 0usize, 0usize);
     let mut steps = [0usize; 9];
     for line in text.lines().take(INDENT_SAMPLE_LINES) {
@@ -188,12 +199,15 @@ fn detect_indent(text: &str) -> Indent {
         }
         previous = width;
     }
+    if tabs == 0 && spaces == 0 {
+        return None;
+    }
     if tabs >= spaces {
-        return Indent::Tabs;
+        return Some(Indent::Tabs);
     }
     // Ties go to the smaller step, which a mix of depths also implies.
     let width = (2..=8).rev().max_by_key(|n| steps[*n]).unwrap_or(4);
-    Indent::Spaces(if steps[width] == 0 { 4 } else { width })
+    Some(Indent::Spaces(if steps[width] == 0 { 4 } else { width }))
 }
 
 /// One open UTF-8 document.
@@ -209,6 +223,8 @@ pub struct Buffer {
     /// What Enter inserts: the line ending most of the file uses.
     eol: &'static str,
     indent: Indent,
+    /// The file showed its indent, so a default doesn't apply.
+    indent_detected: bool,
     /// The other end of the selection. Every motion and edit clears it, so
     /// only code that means to extend a selection has to think about it.
     anchor: Option<usize>,
@@ -238,7 +254,8 @@ impl Buffer {
             redo: Vec::new(),
             pending_edits: Vec::new(),
             eol: dominant_eol(text),
-            indent: detect_indent(text),
+            indent: detect_indent(text).unwrap_or(Indent::Tabs),
+            indent_detected: detect_indent(text).is_some(),
             anchor: None,
         }
     }
@@ -261,6 +278,7 @@ impl Buffer {
             pending_edits: Vec::new(),
             eol: self.eol,
             indent: self.indent,
+            indent_detected: self.indent_detected,
             anchor: None,
         }
     }
@@ -355,6 +373,13 @@ impl Buffer {
         self.indent = indent;
     }
 
+    /// Uses `indent` unless the file showed its own.
+    pub fn default_indent_to(&mut self, indent: Indent) {
+        if !self.indent_detected {
+            self.indent = indent;
+        }
+    }
+
     /// Enter: inserts the file's line ending and carries the indent over. On
     /// a line that's only indent, that indent moves down, so nothing is left
     /// behind as trailing whitespace.
@@ -432,7 +457,7 @@ impl Buffer {
             Some(' ') => {
                 let n = match self.indent {
                     Indent::Spaces(n) => n,
-                    Indent::Tabs => crate::buffer::TAB_WIDTH,
+                    Indent::Tabs => tab_width(),
                 };
                 text.chars().take(n).take_while(|c| *c == ' ').count()
             }

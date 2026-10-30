@@ -209,6 +209,9 @@ pub struct App {
     pub completions: Vec<String>,
     /// File history is wanted this session.
     history_on: bool,
+    history_limit: u64,
+    /// What Tab inserts in a file with no indent to go by.
+    default_indent: Indent,
     history: Option<FileHistory>,
     /// A history write failed, so no more are being kept.
     history_failed: bool,
@@ -251,7 +254,8 @@ pub const LEGEND: &[(&str, &str)] = &[
 const PALETTE_KEY: (&str, &str) = ("Esc Esc", "palette");
 
 impl App {
-    pub fn new(buffer: Buffer, swap: Option<SwapWriter>, opts: &Options) -> App {
+    pub fn new(mut buffer: Buffer, swap: Option<SwapWriter>, opts: &Options) -> App {
+        buffer.default_indent_to(opts.default_indent);
         let swap_target = buffer.path().and_then(|p| fileio::resolve_target(p).ok());
         let disk = Some(DiskState::of_rope(buffer.rope()));
         let disk_text = Some(buffer.rope().clone());
@@ -267,6 +271,8 @@ impl App {
             terminal_output: None,
             completions: Vec::new(),
             history_on: false,
+            history_limit: opts.history_limit_mb.saturating_mul(1_000_000),
+            default_indent: opts.default_indent,
             history: None,
             history_failed: false,
             version_view: None,
@@ -281,7 +287,7 @@ impl App {
             mode: Mode::Insert,
             message: None,
             message_is_error: false,
-            show_line_numbers: true,
+            show_line_numbers: opts.line_numbers,
             esc_window: Duration::from_millis(opts.esc_ms),
             quit: false,
             scroll_top: 0,
@@ -309,7 +315,7 @@ impl App {
             self.history = self
                 .swap_target
                 .as_ref()
-                .map(|t| FileHistory::new(t, self.buffer.rope()));
+                .map(|t| FileHistory::new(t, self.buffer.rope()).with_limit(self.history_limit));
         }
     }
 
@@ -1255,6 +1261,7 @@ impl App {
             Command::ToggleIndent => self.toggle_indent(),
             Command::History => self.open_history(),
             Command::Reader => self.open_reader(),
+            Command::Settings => self.open_settings(),
             Command::DeleteHistory => {
                 self.mode = Mode::Prompt(Prompt::ConfirmDeleteHistory);
             }
@@ -1560,6 +1567,8 @@ impl App {
         self.disk_text = Some(buffer.rope().clone());
         self.disk_stamp = None;
         self.outside_change = false;
+        let mut buffer = buffer;
+        buffer.default_indent_to(self.default_indent);
         let closing = self.buffer.rope().clone();
         self.with_history(|h| h.close(&closing));
         self.buffer = buffer;
@@ -1574,6 +1583,20 @@ impl App {
         } else if self.mode == Mode::Insert {
             let name = path.file_name().unwrap_or_default().to_string_lossy();
             self.set_message(format!("Opened {name}"));
+        }
+    }
+
+    /// Opens the settings file, making it from the template the first time.
+    fn open_settings(&mut self) {
+        match crate::config::ensure_exists() {
+            Ok(path) => {
+                if let Err(e) = self.submit_open(&path.display().to_string()) {
+                    self.set_error(e);
+                } else if self.mode == Mode::Insert {
+                    self.set_message("Settings apply the next time Kyte starts");
+                }
+            }
+            Err(e) => self.set_error(format!("Can't create the settings file: {e}")),
         }
     }
 

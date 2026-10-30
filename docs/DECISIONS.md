@@ -12,14 +12,24 @@ These replace the matching parts of `ARCHITECTURE`. `docs/ROADMAP.md` holds the 
 - License: MIT. This settles section 16 and the section 4 note.
 - Kyte isn't tied to any one OS. It's meant to be open source for everyone.
 
+## Settings
+
+- `~/.config/kyte/config.toml`, flat `key = value` lines. It's a small subset of TOML, parsed by hand in `config.rs` rather than adding a crate, because Kyte has no sections or lists to read.
+- Layers, each overriding the last: defaults, the file, the environment, the command line.
+- A bad line is skipped and reported on the first screen. Nothing in a settings file can stop Kyte from opening.
+- Settings are read at startup, which keeps every setting in `Options`, as the design intended. Live reload isn't worth the state it would add yet.
+- `tab_width` is one process-wide atomic in `buffer.rs`, because it's read deep inside text measuring and passing it through every call would touch all of them.
+- `indent` is a default for files that don't show their own, so a file's own style always wins.
+- Tests set `KYTE_CONFIG` to `/dev/null` in the harness, so they never read the settings of whoever runs them.
+
 ## History retention
 
 - A log over 100 MB is compacted to about 75 MB, by decision. That's far past what typing reaches, about 3 million characters, so in practice it catches repeated large pastes.
 - Compacting keeps saved versions and outside versions always, and the newest edits as they were, as far as the budget goes. Older runs of edits between kept versions become one edit per changed region, found with the line diff. This honours "keep every edit" for recent work and every version the user ever saved, without file copies of each.
 - A first version used one edit spanning each run. On a real 112 MB log with scattered edits it grew the log to 525 MB, because that edit holds most of the file every time. Small test logs couldn't show this. So a run keeps its original edits when they're smaller, a result that isn't smaller is thrown away, and `tests/history.rs` covers scattered edits.
-- Measured on 112 MB logs with 1,000 saves: edits in runs, like typing, shrink to 71 MB in about 1.2 seconds with every saved version identical. Edits scattered evenly across the file can't shrink, so that log stays as it is, after at most about 3 seconds of looking.
+- Measured on 112 MB logs with 1,000 saves: edits in runs, like typing, shrink to 71 MB in about 1.2 seconds with every saved version identical. Edits scattered evenly across the file can't shrink, so that log stays as it is, after about 4.5 seconds at exit.
 - It can leave a log over the limit if the kept versions alone are that large, because the rule is to keep them. A kept version loses its "outside" label in the timeline, since it's stored as an edit.
-- It runs when a file is closed, because a pause there goes unnoticed and one at the first keystroke wouldn't, and it stops looking for savings after 3 seconds. So a long session can run past the limit until it ends. Nothing else is paid unless a log is over the limit.
+- It runs when a file is closed, because a pause there goes unnoticed and one at the first keystroke wouldn't, and it stops looking for savings after 3 seconds, on top of reading and rewriting the log. So a long session can run past the limit until it ends. Nothing else is paid unless a log is over the limit.
 - A log that can't get under the limit gets a small `.compact-tried` note with its size, and isn't tried again until it has grown by a quarter, so a hopeless log doesn't pause every exit.
 - The rewrite goes to a temporary file and renames over the log, so a crash leaves one or the other, whole.
 
