@@ -61,16 +61,7 @@ impl Lang {
     }
 
     fn from_shebang(head: &str) -> Option<Lang> {
-        let line = head.lines().next()?.strip_prefix("#!")?;
-        let mut words = line.split_whitespace();
-        let first = words.next()?;
-        let program = if first.ends_with("/env") {
-            // Skip env's own flags and settings, as in `env -S FOO=1 python3`.
-            words.find(|w| !w.starts_with('-') && !w.contains('='))?
-        } else {
-            first
-        };
-        match program.rsplit('/').next()? {
+        match crate::syntax::shebang_program(head)? {
             "sh" | "bash" | "zsh" | "dash" | "ksh" => Some(Lang::Bash),
             "node" | "nodejs" | "deno" | "bun" => Some(Lang::JavaScript),
             name if name.starts_with("python") => Some(Lang::Python),

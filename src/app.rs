@@ -675,6 +675,7 @@ impl App {
                 let text = info.recovered.clone().unwrap_or_default();
                 let path = self.buffer.path().map(|p| p.to_path_buf());
                 self.buffer = Buffer::from_str(&text, path);
+                self.buffer.default_indent_to(self.default_indent);
                 self.buffer.set_dirty();
                 self.mode = Mode::Insert;
                 if info.file_changed {
@@ -3197,6 +3198,28 @@ mod tests {
         a.run_command(Command::ToggleWrap);
         assert!(a.soft_wrap);
         assert_eq!(a.scroll_row(), 0);
+    }
+
+    #[test]
+    fn recovery_keeps_the_default_indent() {
+        let t = Instant::now();
+        let opts = Options {
+            default_indent: Indent::Spaces(2),
+            ..Options::default()
+        };
+        let path = std::path::PathBuf::from("/x/a.txt");
+        let mut a = App::new(Buffer::from_str("base", Some(path.clone())), None, &opts);
+        assert_eq!(a.buffer.indent(), Indent::Spaces(2));
+        a.mode = Mode::Recover(RecoverInfo {
+            target: path,
+            swap_path: "/no/such/swap".into(),
+            modified: String::new(),
+            recovered: Some("no indent here".to_string()),
+            file_changed: false,
+        });
+        a.handle_key(Key::Char('r'), t).unwrap();
+        assert_eq!(a.buffer.to_string(), "no indent here");
+        assert_eq!(a.buffer.indent(), Indent::Spaces(2));
     }
 
     #[test]

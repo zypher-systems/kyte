@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use kyte::buffer::Edit;
 use kyte::history::{compact, log_path_in, Change, FileHistory, SnapshotKind, Timeline};
+use proptest::prelude::*;
 use ropey::Rope;
 
 fn r(s: &str) -> Rope {
@@ -397,6 +398,66 @@ fn outside_versions_survive_compacting() {
 }
 
 #[test]
+fn outside_versions_survive_repeated_compacting() {
+    let t = setup();
+    let mut h = t.writer("v1");
+    for i in 0..500 {
+        h.append(&[ins(2 + i, "x")]).unwrap();
+    }
+    let mine = format!("v1{}", "x".repeat(500));
+    h.note_outside(&r("theirs"), &r(&mine)).unwrap();
+    for i in 0..500 {
+        h.append(&[ins(502 + i, "y")]).unwrap();
+    }
+    let mine = format!("{mine}{}", "y".repeat(500));
+    h.close(&r(&mine)).unwrap();
+    let is_theirs = |tl: &Timeline| (0..tl.len()).any(|i| text(tl, i) == "theirs");
+    for round in 0..3 {
+        compact(&t.log(), 10, 2_000).unwrap();
+        let tl = t.timeline();
+        assert!(is_theirs(&tl), "lost in round {round}");
+        let keeps_label = (0..tl.len()).any(|i| {
+            matches!(
+                tl.version(i).change,
+                Change::Snapshot {
+                    kind: SnapshotKind::Outside,
+                    ..
+                }
+            )
+        });
+        assert!(keeps_label, "not marked as outside in round {round}");
+        // Another session piles more edits on top.
+        let end = text(&tl, tl.len() - 1);
+        let mut h = t.writer(&end);
+        for i in 0..1_000 {
+            h.append(&[ins(end.chars().count() + i, "z")]).unwrap();
+        }
+        drop(h);
+    }
+}
+
+#[test]
+fn saved_versions_survive_repeated_compacting() {
+    let t = setup();
+    let saved = long_log(&t, 6, 300);
+    for _ in 0..3 {
+        compact(&t.log(), 10, 1_000).unwrap();
+        assert_eq!(saved_texts(&t.timeline()), saved);
+    }
+}
+
+#[test]
+fn deleting_the_history_removes_a_leftover_compacting_file() {
+    let t = setup();
+    let mut h = t.writer("a");
+    h.append(&[ins(1, "b")]).unwrap();
+    let leftover = t.log().with_extension("compacting");
+    fs::write(&leftover, "a full copy of the history").unwrap();
+    h.delete(&r("ab")).unwrap();
+    assert!(!leftover.exists());
+}
+
+#[test]
 fn a_new_session_carries_on_after_compacting_without_another_copy() {
     let t = setup();
     let saved = long_log(&t, 3, 300);
@@ -494,6 +555,85 @@ fn a_log_that_cant_shrink_isnt_retried_until_it_grows() {
 fn saved_last(t: &T) -> String {
     let tl = t.timeline();
     text(&tl, tl.len() - 1)
+}
+
+#[derive(Debug, Clone)]
+enum Step {
+    Type(usize),
+    Save,
+    Outside(u8),
+    CloseAndReopen,
+    Compact(u64),
+}
+
+fn steps() -> impl Strategy<Value = Vec<Step>> {
+    proptest::collection::vec(
+        prop_oneof![
+            4 => (1usize..120).prop_map(Step::Type),
+            2 => Just(Step::Save),
+            1 => any::<u8>().prop_map(Step::Outside),
+            1 => Just(Step::CloseAndReopen),
+            2 => (0u64..4_000).prop_map(Step::Compact),
+        ],
+        1..40,
+    )
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(64))]
+
+    /// Whatever happens, every saved version and every outside version stays
+    /// in the timeline, and the newest version is the text being edited.
+    #[test]
+    fn retention_never_loses_what_it_promises_to_keep(script in steps()) {
+        let t = setup();
+        let mut text_now = String::from("start\n");
+        let mut h = t.writer(&text_now);
+        h.append(&[ins(0, "x")]).unwrap();
+        text_now.insert(0, 'x');
+        let mut promised: Vec<String> = Vec::new();
+        for step in script {
+            match step {
+                Step::Type(n) => {
+                    for i in 0..n {
+                        let at = (i * 37) % (text_now.len() + 1);
+                        text_now.insert(at, 'y');
+                        h.append(&[ins(at, "y")]).unwrap();
+                    }
+                }
+                Step::Save => {
+                    h.mark_saved(&r(&text_now)).unwrap();
+                    promised.push(text_now.clone());
+                }
+                Step::Outside(n) => {
+                    let outside = format!("outside version {n} {}\n", promised.len());
+                    h.note_outside(&r(&outside), &r(&text_now)).unwrap();
+                    promised.push(outside);
+                }
+                Step::CloseAndReopen => {
+                    h.close(&r(&text_now)).unwrap();
+                    h = t.writer(&text_now);
+                    h.append(&[ins(0, "z")]).unwrap();
+                    text_now.insert(0, 'z');
+                }
+                Step::Compact(target) => {
+                    h.close(&r(&text_now)).unwrap();
+                    compact(&t.log(), 0, target).unwrap();
+                    h = t.writer(&text_now);
+                    h.append(&[ins(0, "c")]).unwrap();
+                    text_now.insert(0, 'c');
+                }
+            }
+        }
+        h.close(&r(&text_now)).unwrap();
+        compact(&t.log(), 0, 500).unwrap();
+        let tl = t.timeline();
+        let all: Vec<String> = (0..tl.len()).map(|i| text(&tl, i)).collect();
+        for p in &promised {
+            prop_assert!(all.contains(p), "lost {p:?}");
+        }
+        prop_assert_eq!(all.last(), Some(&text_now));
+    }
 }
 
 #[test]

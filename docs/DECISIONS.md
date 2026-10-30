@@ -38,7 +38,8 @@ These replace the matching parts of `ARCHITECTURE`. `docs/ROADMAP.md` holds the 
 - Compacting keeps saved versions and outside versions always, and the newest edits as they were, as far as the budget goes. Older runs of edits between kept versions become one edit per changed region, found with the line diff. This honours "keep every edit" for recent work and every version the user ever saved, without file copies of each.
 - A first version used one edit spanning each run. On a real 112 MB log with scattered edits it grew the log to 525 MB, because that edit holds most of the file every time. Small test logs couldn't show this. So a run keeps its original edits when they're smaller, a result that isn't smaller is thrown away, and `tests/history.rs` covers scattered edits.
 - Measured on 112 MB logs with 1,000 saves: edits in runs, like typing, shrink to 71 MB in about 1.2 seconds with every saved version identical. Edits scattered evenly across the file can't shrink, so that log stays as it is, after about 4.5 seconds at exit.
-- It can leave a log over the limit if the kept versions alone are that large, because the rule is to keep them. A kept version loses its "outside" label in the timeline, since it's stored as an edit.
+- It can leave a log over the limit if the kept versions alone are that large, because the rule is to keep them.
+- An outside version stays a full snapshot through compaction. Storing it as an edit would be smaller, but the next compaction couldn't tell it from any other edit and would drop it, so that first version kept outside versions for one compaction only. External review caught this.
 - It runs when a file is closed, because a pause there goes unnoticed and one at the first keystroke wouldn't, and it stops looking for savings after 3 seconds, on top of reading and rewriting the log. So a long session can run past the limit until it ends. Nothing else is paid unless a log is over the limit.
 - A log that can't get under the limit gets a small `.compact-tried` note with its size, and isn't tried again until it has grown by a quarter, so a hopeless log doesn't pause every exit.
 - The rewrite goes to a temporary file and renames over the log, so a crash leaves one or the other, whole.
@@ -52,6 +53,7 @@ These replace the matching parts of `ARCHITECTURE`. `docs/ROADMAP.md` holds the 
 - Markdown uses the block grammar only: headings and code blocks show, but inline emphasis doesn't, because that needs a second parser per line.
 - Embedded languages aren't colored, such as JavaScript inside HTML or code in a Markdown fence.
 - Language comes from the file name or extension, and failing that from a `#!` line. `env` and its flags are looked past. A buffer with no file name stays plain until it's saved.
+- The comment for `Esc #` follows the same order: name, then extension, then the `#!` program, with Node, Deno and Bun scripts using `//`. `#![` is a Rust attribute, not a `#!` line.
 - The cost is size: the binary goes from about 7 MB to about 15 MB, nearly all of it grammar tables, and the release profile now strips symbols. `--no-default-features` gives about 1.3 MB.
 - Typing at the end of a file, per key on a release build: 12 to 22 ms at 100 KB across languages, and 64 ms (Go) to 113 ms (C++) at 500 KB. That's usable, so the 512 KiB cap stays, and incremental parsing is still the way to improve it.
 

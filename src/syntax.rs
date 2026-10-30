@@ -8,12 +8,26 @@ use std::path::Path;
 /// Code larger than this isn't parsed on every key, because that would lag.
 pub const MAX_LIVE_PARSE_BYTES: usize = 512 * 1024;
 
-/// The line comment for a file, by extension, or `#` for a `#!` script.
-pub fn comment_prefix(path: &Path, head: &str) -> Option<&'static str> {
-    if head.starts_with("#!") {
-        return Some("#");
+/// The program a `#!` line runs, without its directory. `env` and its own
+/// flags are looked past. `#![...]` is a Rust attribute, not a `#!` line.
+pub fn shebang_program(head: &str) -> Option<&str> {
+    let line = head.lines().next()?.strip_prefix("#!")?;
+    if line.starts_with('[') {
+        return None;
     }
-    match path.extension()?.to_str()? {
+    let mut words = line.split_whitespace();
+    let first = words.next()?;
+    let program = if first.ends_with("/env") {
+        // As in `env -S FOO=1 python3`.
+        words.find(|w| !w.starts_with('-') && !w.contains('='))?
+    } else {
+        first
+    };
+    program.rsplit('/').next()
+}
+
+fn extension_prefix(extension: &str) -> Option<&'static str> {
+    match extension {
         "rs" | "c" | "h" | "cc" | "cpp" | "cxx" | "hh" | "hpp" | "hxx" | "go" | "java" | "js"
         | "mjs" | "cjs" | "jsx" | "ts" | "mts" | "cts" | "tsx" | "jsonc" | "swift" | "kt"
         | "scala" | "cs" | "zig" => Some("//"),
@@ -23,6 +37,28 @@ pub fn comment_prefix(path: &Path, head: &str) -> Option<&'static str> {
         "vim" => Some("\""),
         _ => None,
     }
+}
+
+/// The line comment for a file: by its name or extension, or failing that by
+/// the program in its `#!` line.
+pub fn comment_prefix(path: &Path, head: &str) -> Option<&'static str> {
+    let by_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .and_then(|n| match n {
+            ".bashrc" | ".bash_profile" | ".profile" | ".zshrc" | "PKGBUILD" => Some("#"),
+            _ => None,
+        });
+    let by_extension = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .and_then(extension_prefix);
+    by_name.or(by_extension).or_else(|| {
+        shebang_program(head).map(|program| match program {
+            "node" | "nodejs" | "deno" | "bun" => "//",
+            _ => "#",
+        })
+    })
 }
 
 #[cfg(feature = "highlight")]
@@ -103,9 +139,17 @@ mod code {
                 .and_then(|n| n.utf8_text(text.as_bytes()).ok())
         };
         if matches!(lang, Lang::C | Lang::Cpp) && node.kind() == "function_definition" {
-            let declarator = node.child_by_field_name("declarator")?;
-            let text = declarator.utf8_text(text.as_bytes()).ok()?;
-            return Some(text.split('(').next()?.trim().to_string());
+            // The name sits inside any pointer and parameter wrapping.
+            let mut declarator = node.child_by_field_name("declarator")?;
+            while declarator.kind().ends_with("_declarator") {
+                declarator = declarator
+                    .child_by_field_name("declarator")
+                    .or_else(|| declarator.named_child(0))?;
+            }
+            return declarator
+                .utf8_text(text.as_bytes())
+                .ok()
+                .map(str::to_string);
         }
         let (word, field) = match (lang, node.kind()) {
             (Lang::Rust, "function_item") => ("fn", "name"),
@@ -403,6 +447,26 @@ mod tests {
     }
 
     #[test]
+    fn c_breadcrumbs_name_the_function_not_its_pointer() {
+        let name = |src: &str| {
+            let at = src.find("x()").unwrap();
+            breadcrumb(Path::new("a.c"), src, at).pop()
+        };
+        assert_eq!(
+            name("int *foo(int a) {\n  x();\n}\n").as_deref(),
+            Some("foo")
+        );
+        assert_eq!(
+            name("char **bar(void) {\n  x();\n}\n").as_deref(),
+            Some("bar")
+        );
+        assert_eq!(
+            name("int (*baz(int a))(void) {\n  x();\n}\n").as_deref(),
+            Some("baz")
+        );
+    }
+
+    #[test]
     fn broken_code_doesnt_panic() {
         let src = "fn broken( {\n  let = ;;; }}}\n";
         let path = Path::new("a.rs");
@@ -424,5 +488,29 @@ mod prefix_tests {
         assert_eq!(comment_prefix(Path::new("notes.txt"), ""), None);
         assert_eq!(comment_prefix(Path::new("Makefile"), ""), None);
         assert_eq!(comment_prefix(Path::new("tool"), "#!/bin/sh\n"), Some("#"));
+    }
+
+    #[test]
+    fn a_comment_comes_from_the_language_not_just_a_shebang() {
+        let node = "#!/usr/bin/env node\n";
+        assert_eq!(comment_prefix(Path::new("script.js"), node), Some("//"));
+        assert_eq!(comment_prefix(Path::new("script.ts"), node), Some("//"));
+        assert_eq!(comment_prefix(Path::new("tool"), node), Some("//"));
+        assert_eq!(
+            comment_prefix(Path::new("tool"), "#!/usr/bin/deno\n"),
+            Some("//")
+        );
+        assert_eq!(
+            comment_prefix(Path::new("tool"), "#!/usr/bin/python3\n"),
+            Some("#")
+        );
+        let attr = "#![deny(warnings)]\n";
+        assert_eq!(comment_prefix(Path::new("lib.rs"), attr), Some("//"));
+        assert_eq!(
+            comment_prefix(Path::new("tool"), attr),
+            None,
+            "not a shebang"
+        );
+        assert_eq!(comment_prefix(Path::new(".bashrc"), ""), Some("#"));
     }
 }

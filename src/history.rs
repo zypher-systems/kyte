@@ -415,6 +415,7 @@ impl FileHistory {
         self.pending_fsync = false;
         self.base = text.clone();
         let _ = fs::remove_file(tried_path(&self.path));
+        let _ = fs::remove_file(self.path.with_extension("compacting"));
         match fs::remove_file(&self.path) {
             Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
             _ => Ok(()),
@@ -523,30 +524,50 @@ pub fn compact(path: &Path, limit: u64, target: u64) -> io::Result<()> {
     let mut out = MAGIC.to_vec();
     out.extend_from_slice(&version_bytes(t.version(0)));
     // The oldest part: only the versions to keep.
+    let is_outside = |v: &Version| {
+        matches!(
+            v.change,
+            Change::Snapshot {
+                kind: SnapshotKind::Outside,
+                ..
+            }
+        )
+    };
     let mut run_start = 1;
     for i in 1..keep_from {
         let v = t.version(i);
         if !kept_old(v) && i + 1 != keep_from {
             continue;
         }
-        let run = run_start..i + 1;
-        let original: Vec<u8> = run.flat_map(|j| version_bytes(t.version(j))).collect();
-        let mut short = Vec::new();
-        let in_time = Instant::now() < deadline;
-        if in_time {
-            let old = t.text_at(run_start - 1).to_string();
-            let new = t.text_at(i).to_string();
-            for (at, del, ins) in edits_between(&old, &new) {
-                short.extend_from_slice(&edit_record(at, del, &ins, v.time_ms));
+        // An outside version stays a snapshot of its own. As an edit it would
+        // look like any other, and the next compaction would drop it.
+        let run_end = if is_outside(v) { i } else { i + 1 };
+        if run_start < run_end {
+            let last = t.version(run_end - 1);
+            let original: Vec<u8> = (run_start..run_end)
+                .flat_map(|j| version_bytes(t.version(j)))
+                .collect();
+            let mut short = Vec::new();
+            let in_time = Instant::now() < deadline;
+            if in_time {
+                let old = t.text_at(run_start - 1).to_string();
+                let new = t.text_at(run_end - 1).to_string();
+                for (at, del, ins) in edits_between(&old, &new) {
+                    short.extend_from_slice(&edit_record(at, del, &ins, last.time_ms));
+                }
+            }
+            if in_time && short.len() < original.len() {
+                out.extend_from_slice(&short);
+                if last.saved {
+                    let state = DiskState::new(0, 0);
+                    out.extend_from_slice(&mark_bytes(MARK_SAVED, state, last.time_ms));
+                }
+            } else {
+                out.extend_from_slice(&original);
             }
         }
-        if in_time && short.len() < original.len() {
-            out.extend_from_slice(&short);
-            if v.saved {
-                out.extend_from_slice(&mark_bytes(MARK_SAVED, DiskState::new(0, 0), v.time_ms));
-            }
-        } else {
-            out.extend_from_slice(&original);
+        if is_outside(v) {
+            out.extend_from_slice(&version_bytes(v));
         }
         run_start = i + 1;
     }
