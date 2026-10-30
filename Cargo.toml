@@ -3,6 +3,7 @@ name = "kyte-editor"
 version = "0.1.0"
 edition = "2021"
 description = "Kyte: a terminal text editor"
+license = "MIT"
 publish = false
 
 [lib]

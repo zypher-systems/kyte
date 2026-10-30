@@ -6,7 +6,7 @@ A terminal text editor, written in Rust with Ratatui.
 - **Power one key away.** Esc opens a one-key operator layer and shows a legend. Pressing Esc twice opens a command palette.
 - **Crash-safe.** Every edit is written to a swap log before it reaches the screen. After a crash, `kill -9` or a power cut, Kyte offers to recover.
 
-All rights reserved, license TBD.
+MIT License. See [LICENSE](LICENSE).
 
 ![Kyte demo](docs/demo/demo.gif)
 
@@ -185,4 +185,4 @@ These Docker files have not been run yet, because the build machine had no Docke
 - `docs/ACCEPTANCE.md`: the acceptance criteria and how each one was verified
 - `docs/KEY_LAB.md`: measured key bytes and event sequences
 
-All rights reserved, license TBD.
+MIT License. See [LICENSE](LICENSE).
