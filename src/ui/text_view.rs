@@ -40,12 +40,13 @@ fn display_symbol(g: &str, w: usize) -> String {
 pub fn visible_text(line: &str, left: usize, width: usize) -> String {
     let mut out = String::new();
     let right = left + width;
-    let mut col = 0;
-    for (_, g) in graphemes_with_char_offsets(line) {
+    let mut walk = graphemes_with_char_offsets(line);
+    let mut col = walk.skip_plain(left);
+    while let Some((_, g)) = walk.next() {
         let w = grapheme_width(g, col);
         let end = col + w;
         if end <= left {
-            col = end;
+            col = end + walk.skip_plain(left - end);
             continue;
         }
         if col >= right {
@@ -245,5 +246,13 @@ mod tests {
     #[test]
     fn horizontal_scroll() {
         assert_eq!(visible_text("abcdefgh", 3, 3), "def");
+    }
+
+    #[test]
+    fn horizontal_scroll_past_mixed_text() {
+        assert_eq!(visible_text("ab世cdef", 4, 2), "cd");
+        assert_eq!(visible_text("ab\tcdef", 5, 2), "de");
+        assert_eq!(visible_text("abcd世ef", 5, 3), " ef");
+        assert_eq!(visible_text("abc", 10, 3), "");
     }
 }

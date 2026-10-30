@@ -332,6 +332,23 @@ fn ac11_large_file_ctrl_end_and_typing_within_1s() {
 // ---------------------------------------------------------------- AC-18
 
 #[test]
+fn long_single_line_stays_responsive() {
+    let env = Env::new();
+    let f = env.write("long.txt", &"a".repeat(5_000_000));
+    let mut p = env.open(&f);
+    p.send_keys(&["C-End"]);
+    wait_status(&p, "Col 5000001");
+    let t = Instant::now();
+    p.send_str("x");
+    wait_status(&p, "Col 5000002");
+    // A loose bound for a debug build; the slow path took far longer.
+    assert!(t.elapsed() < Duration::from_secs(1), "{:?}", t.elapsed());
+    save_and_wait(&mut p);
+    quit_clean(&mut p);
+    assert_eq!(fs::metadata(&f).unwrap().len(), 5_000_001);
+}
+
+#[test]
 fn ac18_quit_dirty_asks_then_discards() {
     let env = Env::new();
     let f = env.write("q.txt", "keep me\n");

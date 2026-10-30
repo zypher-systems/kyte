@@ -56,6 +56,12 @@ These replace the swap format and flows in `ARCHITECTURE` sections 6 and 8.
 - Pasting into the search prompt searches. Go to line and Save as take the first pasted line.
 - Tests that need a read-only directory skip when run as root, because root can write to it anyway.
 
+## 0.1.1 long lines
+
+- `graphemes_with_char_offsets` built a vector for the whole line, at 24 bytes per grapheme, several times per key. It's now a lazy iterator, so callers stop as soon as they have their answer.
+- ASCII takes a fast path: an ASCII byte followed by another ASCII byte is its own grapheme unless it's the CR of a CRLF, because everything that joins graphemes is non-ASCII. Runs of printable ASCII are skipped in bulk when finding a column. Property tests check all of this against full segmentation.
+- Measured on a release build, per keystroke at the end of a 5 MB single line: ASCII went from about 400 ms to 6 ms. Text that's mostly non-ASCII still goes through segmentation, and costs more; `README.md` gives the current figures.
+
 ## Hosting and environment
 
 - Toolchain: rustc/cargo 1.99.1 (stable, 2026-10-13), edition 2021.

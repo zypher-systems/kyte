@@ -68,15 +68,90 @@ pub fn grapheme_width(g: &str, col: usize) -> usize {
     }
 }
 
-/// Graphemes of `s` as (char offset, grapheme).
-pub fn graphemes_with_char_offsets(s: &str) -> Vec<(usize, &str)> {
-    let mut out = Vec::new();
-    let mut chars = 0;
-    for g in s.graphemes(true) {
-        out.push((chars, g));
-        chars += g.chars().count();
+/// Printable ASCII: one byte, one cell.
+fn is_plain(b: u8) -> bool {
+    (0x20..0x7f).contains(&b)
+}
+
+fn is_plain_char(c: char) -> bool {
+    c.is_ascii() && is_plain(c as u8)
+}
+
+/// Graphemes of a string as (char offset, grapheme), found as they're needed
+/// so a very long line costs only as much of it as gets walked. An ASCII byte
+/// followed by another is its own grapheme unless it's the CR of a CRLF, which
+/// skips the costly segmentation for most text.
+#[derive(Clone)]
+pub struct GraphemeWalk<'a> {
+    text: &'a str,
+    byte: usize,
+    chars: usize,
+}
+
+impl<'a> GraphemeWalk<'a> {
+    /// Skips up to `cols` cells of plain ASCII and returns how many it skipped.
+    /// The last byte of a run stays, as it may join what follows it.
+    pub fn skip_plain(&mut self, cols: usize) -> usize {
+        let rest = &self.text.as_bytes()[self.byte..];
+        let run = rest
+            .iter()
+            .take(cols + 1)
+            .take_while(|b| is_plain(**b))
+            .count();
+        let n = run.saturating_sub(1).min(cols);
+        self.byte += n;
+        self.chars += n;
+        n
     }
-    out
+}
+
+impl<'a> Iterator for GraphemeWalk<'a> {
+    type Item = (usize, &'a str);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let rest = &self.text[self.byte..];
+        let bytes = rest.as_bytes();
+        let first = *bytes.first()?;
+        let single =
+            first.is_ascii() && first != b'\r' && bytes.get(1).is_none_or(|b| b.is_ascii());
+        let g = if single {
+            &rest[..1]
+        } else {
+            rest.graphemes(true).next()?
+        };
+        let at = self.chars;
+        self.byte += g.len();
+        self.chars += if single { 1 } else { g.chars().count() };
+        Some((at, g))
+    }
+}
+
+/// Graphemes of `s` as (char offset, grapheme).
+pub fn graphemes_with_char_offsets(s: &str) -> GraphemeWalk<'_> {
+    GraphemeWalk {
+        text: s,
+        byte: 0,
+        chars: 0,
+    }
+}
+
+/// Display column and grapheme count before char offset `off` in `text`.
+fn measure(text: &str, off: usize) -> (usize, usize) {
+    let mut walk = graphemes_with_char_offsets(text);
+    let (mut col, mut count) = (0, 0);
+    loop {
+        let n = walk.skip_plain(off.saturating_sub(walk.chars));
+        col += n;
+        count += n;
+        if walk.chars >= off {
+            return (col, count);
+        }
+        let Some((_, g)) = walk.next() else {
+            return (col, count);
+        };
+        col += grapheme_width(g, col);
+        count += 1;
+    }
 }
 
 /// One open UTF-8 document.
@@ -192,11 +267,7 @@ impl Buffer {
         let line = self.cursor_line();
         let start = self.rope.line_to_char(line);
         let text = self.line_text(line);
-        let off = self.cursor - start;
-        let col = graphemes_with_char_offsets(&text)
-            .iter()
-            .take_while(|(o, _)| *o < off)
-            .count();
+        let (_, col) = measure(&text, self.cursor - start);
         (line + 1, col + 1)
     }
 
@@ -236,7 +307,7 @@ impl Buffer {
 
     /// Char index of the end of line `l` (before its newline).
     pub fn line_end(&self, l: usize) -> usize {
-        self.line_start(l) + self.line_text(l).chars().count()
+        crate::ops::eol(&self.rope, self.line_start(l))
     }
 
     /// Display column of the cursor within its line.
@@ -247,15 +318,7 @@ impl Buffer {
 
     /// Display column of char offset `off` within line `l`.
     pub fn display_col(&self, l: usize, off: usize) -> usize {
-        let text = self.line_text(l);
-        let mut col = 0;
-        for (o, g) in graphemes_with_char_offsets(&text) {
-            if o >= off {
-                break;
-            }
-            col += grapheme_width(g, col);
-        }
-        col
+        measure(&self.line_text(l), off).0
     }
 
     pub fn slice_string(&self, r: Range<usize>) -> String {
@@ -413,6 +476,10 @@ impl Buffer {
         if at == start {
             return self.outside_crlf(at - 1);
         }
+        let plain = |i: usize| is_plain_char(self.rope.char(i));
+        if plain(at - 1) && (at - 1 == start || plain(at - 2)) {
+            return at - 1;
+        }
         let text = self.line_text(line);
         let off = at - start;
         let mut best = 0;
@@ -431,6 +498,10 @@ impl Buffer {
         let len = self.rope.len_chars();
         if at >= len {
             return len;
+        }
+        let plain = |c: Option<char>| c.is_some_and(is_plain_char);
+        if plain(self.rope.get_char(at)) && (at + 1 == len || plain(self.rope.get_char(at + 1))) {
+            return at + 1;
         }
         let line = self.rope.char_to_line(at);
         let start = self.line_start(line);
@@ -575,6 +646,91 @@ mod tests {
         let x = b("a\rb\nc");
         assert_eq!(x.line_count(), 2);
         assert_eq!(x.line_text(0), "a\rb");
+    }
+
+    const FRAGMENTS: &[&str] = &[
+        "a",
+        "b",
+        " ",
+        "~",
+        "\t",
+        "\r",
+        "\r\n",
+        "\u{7f}",
+        "é",
+        "e\u{301}",
+        "a\u{301}",
+        "世",
+        "🙂",
+        "👨\u{200d}👩\u{200d}👧",
+        "🇺🇸",
+        "🇺",
+        "\u{200d}",
+        "\u{301}",
+        "\u{1100}\u{1161}",
+    ];
+
+    proptest::proptest! {
+        #[test]
+        fn walk_matches_full_segmentation(
+            parts in proptest::collection::vec(proptest::sample::select(FRAGMENTS), 0..40)
+        ) {
+            let s = parts.concat();
+            let mut chars = 0;
+            let mut expected = Vec::new();
+            for g in s.graphemes(true) {
+                expected.push((chars, g));
+                chars += g.chars().count();
+            }
+            let walked: Vec<_> = graphemes_with_char_offsets(&s).collect();
+            proptest::prop_assert_eq!(&walked, &expected);
+        }
+
+        #[test]
+        fn measure_matches_a_full_walk(
+            parts in proptest::collection::vec(proptest::sample::select(FRAGMENTS), 0..40),
+            pick in 0usize..120,
+        ) {
+            let s = parts.concat();
+            let off = pick.min(s.chars().count());
+            let (mut col, mut count) = (0, 0);
+            for (o, g) in s.graphemes(true).scan(0, |at, g| {
+                let o = *at;
+                *at += g.chars().count();
+                Some((o, g))
+            }) {
+                if o >= off {
+                    break;
+                }
+                col += grapheme_width(g, col);
+                count += 1;
+            }
+            proptest::prop_assert_eq!(measure(&s, off), (col, count));
+        }
+
+        #[test]
+        fn fast_boundaries_match_the_full_walk(
+            parts in proptest::collection::vec(proptest::sample::select(FRAGMENTS), 0..30)
+        ) {
+            let s = parts.concat().replace("\r\n", "\n");
+            let x = b(&s);
+            let mut at = 0;
+            while at < x.len_chars() {
+                let next = x.next_boundary(at);
+                proptest::prop_assert!(next > at);
+                proptest::prop_assert_eq!(x.prev_boundary(next), at, "at {} in {:?}", at, s);
+                at = next;
+            }
+        }
+    }
+
+    #[test]
+    fn long_ascii_line_measures_with_marks_and_tabs() {
+        let s = format!("{}e\u{301}\tx", "a".repeat(5000));
+        // 5000 cells, one for e + mark, a tab to the next multiple of four
+        assert_eq!(measure(&s, 5000), (5000, 5000));
+        assert_eq!(measure(&s, 5002), (5001, 5001));
+        assert_eq!(measure(&s, 5003), (5004, 5002));
     }
 
     #[test]

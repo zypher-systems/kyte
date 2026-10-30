@@ -187,6 +187,7 @@ These Docker files have not been run yet, because the build machine had no Docke
 - UTF-8 files only (others are refused and left untouched).
 - Kyte keeps each line's ending as it is. New lines use the ending most of the file uses, and the status bar shows `CRLF` for those files. It doesn't convert a file from one to the other. A `\r` that isn't part of a line ending shows as a control picture.
 - Linux only (the swap lock checks `/proc`).
+- A very long single line costs more per keystroke, depending on what's in it. At the end of a 5 MB line on the build machine, plain ASCII takes about 8 ms, a line full of tabs about 45 ms, and CJK text about 170 ms.
 - Not in this version: reader mode, file tree, the Ctrl-K universal palette, light and high-contrast themes, undo history that survives a restart, mouse, selection and clipboard (including OSC 52), multiple buffers or splits, LSP, plugins, a config file, soft wrap, CRLF conversion, non-UTF-8 files, RPM/COPR packaging, and use as the default `$EDITOR`.
 
 ## Documentation

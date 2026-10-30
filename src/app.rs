@@ -611,9 +611,10 @@ impl App {
             .rope()
             .char_to_line(start.min(self.buffer.len_chars()));
         let text = self.buffer.line_text(line);
-        let graphemes = crate::buffer::graphemes_with_char_offsets(&text);
-        let idx = (col - 1).min(graphemes.len().saturating_sub(1));
-        let off = graphemes.get(idx).map(|(o, _)| *o).unwrap_or(0);
+        let off = crate::buffer::graphemes_with_char_offsets(&text)
+            .take(col)
+            .last()
+            .map_or(0, |(o, _)| o);
         let target = self.buffer.line_start(line) + off;
         self.buffer.move_to(target);
     }
