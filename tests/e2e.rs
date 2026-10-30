@@ -1245,15 +1245,64 @@ fn ac21_torn_tail_last_byte_flipped() {
 // ---------------------------------------------------------------- AC-22
 
 #[test]
-fn ac22_stale_swap_offers_only_discard_or_quit() {
+fn ac22_edits_survive_a_file_that_changed_after_the_crash() {
+    let env = Env::new();
+    let f = work_file(&env, "stale.txt", "version 1\n");
+    edit_and_kill(&env, &f, "kept edit ");
+    fs::write(&f, "version 2 from elsewhere\n").unwrap();
+    let (code, text) = print_swap(&env, &f);
+    assert_eq!(code, 0);
+    assert_eq!(text, "kept edit version 1\n");
+    let mut p = open_raw(&env, &f);
+    p.wait_for("Recover unsaved changes", TIMEOUT);
+    assert!(p.screen().contains("changed on disk"), "{}", p.dump());
+    p.send_str("q");
+    assert_eq!(p.wait_exit(TIMEOUT), 0);
+    assert_eq!(
+        fs::read_to_string(&f).unwrap(),
+        "version 2 from elsewhere\n"
+    );
+    let mut p = open_raw(&env, &f);
+    p.wait_for("Recover unsaved changes", TIMEOUT);
+    p.send_str("r");
+    p.wait_for("1 │ kept edit version 1", TIMEOUT);
+    wait_status(&p, "[+]");
+    p.send_keys(&["C-q"]);
+    p.wait_for("Unsaved changes", TIMEOUT);
+    p.send_keys(&["C-q"]);
+    assert_eq!(p.wait_exit(TIMEOUT), 0);
+}
+
+#[test]
+fn ac22_discarding_recovered_edits_keeps_the_changed_file() {
     let env = Env::new();
     let f = work_file(&env, "stale.txt", "version 1\n");
     edit_and_kill(&env, &f, "lost edit ");
     fs::write(&f, "version 2 from elsewhere\n").unwrap();
     let mut p = open_raw(&env, &f);
+    p.wait_for("Recover unsaved changes", TIMEOUT);
+    p.send_str("d");
+    p.wait_for("1 │ version 2 from elsewhere", TIMEOUT);
+    assert!(!p.screen().contains("lost edit"));
+    quit_clean(&mut p);
+    assert_eq!(
+        fs::read_to_string(&f).unwrap(),
+        "version 2 from elsewhere\n"
+    );
+}
+
+#[test]
+fn ac22_unreadable_swap_offers_only_discard_or_quit() {
+    let env = Env::new();
+    let f = work_file(&env, "stale.txt", "version 1\n");
+    edit_and_kill(&env, &f, "lost edit ");
+    let swap = swap_files(&env).pop().unwrap();
+    let mut bytes = fs::read(&swap).unwrap();
+    bytes[0] ^= 0xff;
+    fs::write(&swap, &bytes).unwrap();
+    let mut p = open_raw(&env, &f);
     p.wait_for("Stale swap file", TIMEOUT);
     let s = p.screen();
-    assert!(s.contains("stale"), "{s}");
     assert!(s.contains("d  Discard the stale swap"));
     assert!(s.contains("q  Quit"));
     assert!(!s.contains("r  Recover"));
@@ -1264,25 +1313,67 @@ fn ac22_stale_swap_offers_only_discard_or_quit() {
     p.send_str("q");
     assert_eq!(p.wait_exit(TIMEOUT), 0);
     assert_eq!(
-        fs::read_to_string(&f).unwrap(),
-        "version 2 from elsewhere\n"
+        fs::read(&swap).unwrap(),
+        bytes,
+        "q leaves the swap as it was"
     );
-    assert_eq!(
-        print_swap(&env, &f).0,
-        3,
-        "a stale swap is not a valid swap"
-    );
-    // d discards and opens the file as it is on disk
+    assert_eq!(print_swap(&env, &f).0, 3, "an unreadable swap is not valid");
     let mut p = open_raw(&env, &f);
     p.wait_for("Stale swap file", TIMEOUT);
     p.send_str("d");
-    p.wait_for("1 │ version 2 from elsewhere", TIMEOUT);
-    assert!(!p.screen().contains("lost edit"));
+    p.wait_for("1 │ version 1", TIMEOUT);
     quit_clean(&mut p);
-    assert_eq!(
-        fs::read_to_string(&f).unwrap(),
-        "version 2 from elsewhere\n"
-    );
+}
+
+#[test]
+fn file_deleted_after_the_crash_is_still_recovered() {
+    let env = Env::new();
+    let f = work_file(&env, "gone.txt", "text\n");
+    edit_and_kill(&env, &f, "more ");
+    fs::remove_file(&f).unwrap();
+    let mut p = open_raw(&env, &f);
+    p.wait_for("Recover unsaved changes", TIMEOUT);
+    p.send_str("r");
+    p.wait_for("1 │ more text", TIMEOUT);
+    save_and_wait(&mut p);
+    quit_clean(&mut p);
+    assert_eq!(fs::read_to_string(&f).unwrap(), "more text\n");
+}
+
+#[test]
+fn long_path_opens_with_working_recovery() {
+    let env = Env::new();
+    let mut dir = env.dir.path().to_path_buf();
+    for _ in 0..12 {
+        dir.push("a-rather-long-directory-name");
+    }
+    fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("deep.txt");
+    fs::write(&f, "deep\n").unwrap();
+    assert!(f.to_str().unwrap().len() > 255);
+    edit_and_kill(&env, &f, "saved by the swap ");
+    let (code, text) = print_swap(&env, &f);
+    assert_eq!(code, 0);
+    assert_eq!(text, "saved by the swap deep\n");
+}
+
+#[test]
+fn break_lock_opens_a_file_held_by_another_kyte() {
+    let env = Env::new();
+    let f = work_file(&env, "held.txt", "base\n");
+    let mut a = env.open(&f);
+    a.send_str("held ");
+    wait_status(&a, "[+]");
+    let path = f.to_str().unwrap();
+    let mut refused = Pty::kyte(&bin(), &env.state, &[path]);
+    assert_eq!(refused.wait_exit(TIMEOUT), 2);
+    assert!(refused.screen().contains("--break-lock"));
+    let mut b = Pty::kyte(&bin(), &env.state, &["--break-lock", path]);
+    b.wait_for("Recover unsaved changes", TIMEOUT);
+    a.kill9();
+    b.send_str("r");
+    b.wait_for("1 │ held base", TIMEOUT);
+    b.kill9();
 }
 
 // ---------------------------------------------------------------- AC-24

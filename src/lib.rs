@@ -70,21 +70,24 @@ fn open_file(p: &Path, opts: &Options) -> anyhow::Result<Result<App, ExitCode>> 
         }
     };
     let target = fileio::resolve_target(&abs)?;
+    if opts.break_lock {
+        if let Err(e) = swap::break_lock(&target) {
+            eprintln!("kyte: {}: could not break the lock: {e}", p.display());
+            return Ok(Err(ExitCode::from(1)));
+        }
+    }
     let buffer = Buffer::from_str(&loaded.text, Some(abs));
-    match swap::inspect(&target, loaded.text.as_bytes())? {
+    let status = match swap::inspect(&target, loaded.text.as_bytes()) {
+        Ok(s) => s,
+        Err(e) => return Ok(Ok(without_swap(buffer, opts, e))),
+    };
+    match status {
         SwapStatus::LiveLock { pid } => Ok(Err(live_lock_exit(p, pid))),
-        SwapStatus::None => match SwapWriter::create(&target, loaded.text.as_bytes()) {
+        SwapStatus::None => match SwapWriter::create(&target, buffer.rope()) {
             Ok(w) => Ok(Ok(App::new(buffer, Some(w), opts))),
             Err(e) => match swap::live_lock_pid(&e) {
                 Some(pid) => Ok(Err(live_lock_exit(p, pid))),
-                None => {
-                    let mut app = App::new(buffer, None, opts);
-                    app.message = Some(format!(
-                        "Warning: no swap file ({e}); crash recovery is off"
-                    ));
-                    app.message_is_error = true;
-                    Ok(Ok(app))
-                }
+                None => Ok(Ok(without_swap(buffer, opts, e))),
             },
         },
         SwapStatus::Recoverable(info) => {
@@ -100,9 +103,20 @@ fn open_file(p: &Path, opts: &Options) -> anyhow::Result<Result<App, ExitCode>> 
     }
 }
 
+/// The file still opens when its swap can't be used, with a warning.
+fn without_swap(buffer: Buffer, opts: &Options, e: std::io::Error) -> App {
+    let mut app = App::new(buffer, None, opts);
+    app.message = Some(format!(
+        "Warning: no swap file ({e}); crash recovery is off"
+    ));
+    app.message_is_error = true;
+    app
+}
+
 fn live_lock_exit(p: &Path, pid: u32) -> ExitCode {
     eprintln!(
-        "kyte: {} is already open in another kyte (PID {pid}); not touching its swap file",
+        "kyte: {} is already open in another kyte (PID {pid}); not touching its swap file\n\
+         If that kyte is gone, open the file with --break-lock.",
         p.display()
     );
     ExitCode::from(2)
@@ -130,10 +144,8 @@ fn print_swap(p: &Path) -> ExitCode {
         eprintln!("kyte: no swap file for {}", p.display());
         return ExitCode::from(3);
     }
-    let Ok(base) = String::from_utf8(base) else {
-        eprintln!("kyte: {} is not valid UTF-8; no valid swap", p.display());
-        return ExitCode::from(3);
-    };
+    // A file that is no longer UTF-8 can't be the base, but the snapshot can.
+    let base = String::from_utf8(base).unwrap_or_default();
     match swap::replay(&base, &swap_path) {
         Ok(text) => {
             let mut out = std::io::stdout();

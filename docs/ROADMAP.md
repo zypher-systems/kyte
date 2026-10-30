@@ -13,7 +13,7 @@ Fix every way the current build can lose or damage work. Each fix gets a regress
 - [ ] Unsaved-quit prompt: `y` saves and quits, `n` discards, Esc cancels. Today `y` discards. Remove the double Ctrl-Q discard and update AC-18.
 - [ ] A buffer with no file name can be saved, and its edits reach a swap. Today Ctrl-S refuses and nothing protects the text.
 - [ ] A failed save leaves a way out: Save As, and quitting keeps the swap unless the user discards it. Today confirming quit deletes the swap.
-- [ ] A stale swap can still be recovered. Store the base content in the swap (format v2), so a crash followed by a change on disk doesn't strand the edits.
+- [x] A stale swap can still be recovered. Store the base content in the swap (format v2), so a crash followed by a change on disk doesn't strand the edits.
 - [ ] Ctrl-S warns when the file changed on disk since it was opened or last saved.
 - [ ] A read-only file isn't replaced without an explicit choice.
 
@@ -21,8 +21,8 @@ Fix every way the current build can lose or damage work. Each fix gets a regress
 
 - [ ] A save keeps owner, SELinux label, xattrs and ACLs, and handles hard links. Today the rename resets the label and drops the rest.
 - [ ] CRLF files keep their line endings: End stops before the `\r`, and Enter inserts the file's own line ending.
-- [ ] The swap lock checks that the PID really is Kyte, and a stale lock can be overridden.
-- [ ] Long paths open with crash recovery working: hash the swap file name.
+- [x] The swap lock checks that the PID really is Kyte, and a stale lock can be overridden.
+- [x] Long paths open with crash recovery working: hash the swap file name.
 
 ### Smaller fixes
 

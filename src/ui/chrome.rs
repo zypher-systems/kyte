@@ -221,20 +221,26 @@ pub fn recover(app: &App, text_area: Rect, cells: &mut Cells, theme: &Theme) {
     };
     let path = info.target.display().to_string();
     let lines: Vec<String> = if info.recovered.is_some() {
-        vec![
+        let mut l = vec![
             "Kyte found unsaved changes for:".to_string(),
             format!("  {path}"),
+        ];
+        if info.file_changed {
+            l.push("The file changed on disk after these edits were made.".to_string());
+        }
+        l.extend([
             format!("Swap file written {}", info.modified),
             String::new(),
             "r  Recover the unsaved changes".to_string(),
             "d  Discard them and open the file as it is on disk".to_string(),
             "q  Quit without changing anything (also Esc)".to_string(),
-        ]
+        ]);
+        l
     } else {
         vec![
             "The swap file is stale for:".to_string(),
             format!("  {path}"),
-            "The file changed on disk after the swap was written.".to_string(),
+            "It can't be read, so its edits can't be recovered.".to_string(),
             format!("Swap file written {}", info.modified),
             String::new(),
             "d  Discard the stale swap and open the file".to_string(),

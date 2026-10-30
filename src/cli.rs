@@ -13,6 +13,7 @@ pub struct Options {
     pub esc_ms: u64,
     pub no_kitty: bool,
     pub print_swap: Option<PathBuf>,
+    pub break_lock: bool,
 }
 
 impl Default for Options {
@@ -22,6 +23,7 @@ impl Default for Options {
             esc_ms: DEFAULT_ESC_MS,
             no_kitty: false,
             print_swap: None,
+            break_lock: false,
         }
     }
 }
@@ -62,6 +64,7 @@ Options:\n\
   -V, --version          Print the version and exit\n\
       --esc-ms N         Double-tap Esc window in milliseconds (default {DEFAULT_ESC_MS}; env KYTE_ESC_MS)\n\
       --no-kitty         Never enable the kitty keyboard protocol\n\
+      --break-lock       Open FILE even if another kyte seems to hold it\n\
       --print-swap FILE  Print the content recovered from FILE's swap and exit (exit 3 if none)\n\n\
 Environment:\n\
   KYTE_STATE_DIR         Swap directory override\n\
@@ -108,6 +111,7 @@ pub fn parse_with_env(
             "-h" | "--help" => return Err(CliError::Help),
             "-V" | "--version" => return Err(CliError::Version),
             "--no-kitty" => opts.no_kitty = true,
+            "--break-lock" => opts.break_lock = true,
             "--esc-ms" => {
                 let v = value(inline, &mut args, "--esc-ms")?;
                 opts.esc_ms = parse_ms(&v, "--esc-ms")?;

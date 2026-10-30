@@ -255,8 +255,7 @@ impl App {
             Key::Char('d') => {
                 let _ = std::fs::remove_file(&info.swap_path);
                 self.mode = Mode::Insert;
-                let base = self.buffer.to_string();
-                match SwapWriter::create(&info.target, base.as_bytes()) {
+                match SwapWriter::create(&info.target, self.buffer.rope()) {
                     Ok(w) => {
                         self.swap = Some(w);
                         self.set_message("Discarded the swap file");
@@ -581,7 +580,7 @@ impl App {
                     let _ = old.remove();
                 }
                 if let Some(target) = self.swap_target.clone() {
-                    match SwapWriter::create(&target, text.as_bytes()) {
+                    match SwapWriter::create(&target, self.buffer.rope()) {
                         Ok(w) => self.swap = Some(w),
                         Err(e) => self.set_error(format!("Saved {n} lines, but no swap: {e}")),
                     }

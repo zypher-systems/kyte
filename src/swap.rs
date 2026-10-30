@@ -1,7 +1,9 @@
 //! Crash-safety swap log (section 6): a header naming the target file and its
-//! base content, then append-only CRC-checked edit records. Every edit is
-//! written (not fsynced) as soon as it happens, so it survives `kill -9`;
-//! `App::tick` fsyncs at most once per second.
+//! base content, then append-only CRC-checked records. The first edit also
+//! writes a snapshot of the base, so sessions that only read a file copy
+//! nothing and edits can be recovered even if the file later changes. Every
+//! edit is written (not fsynced) as soon as it happens, so it survives
+//! `kill -9`; `App::tick` fsyncs at most once per second.
 
 use std::fmt;
 use std::fs::{self, DirBuilder, File, OpenOptions};
@@ -16,12 +18,22 @@ use crate::buffer::Edit;
 use crate::fileio;
 
 pub const MAGIC: &[u8; 8] = b"KYTESWP1";
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 /// Byte offset of the writer PID in the header.
 pub const PID_OFFSET: u64 = 12;
-/// Record kind byte for an edit (other kinds are reserved and skipped by replay).
+/// Byte offset of the writer's process start time in the header.
+pub const START_OFFSET: u64 = 16;
+/// Record kind byte for an edit (unknown kinds are skipped by replay).
 pub const KIND_EDIT: u8 = 0;
+/// Record kind byte for a piece of the base snapshot.
+pub const KIND_BASE: u8 = 1;
 const EDIT_FIXED: usize = 1 + 8 + 8 + 4;
+const HEADER_FIXED: usize = 40;
+/// The base snapshot is split into records of about this many bytes.
+const BASE_CHUNK: usize = 1 << 20;
+const SUFFIX: &str = ".kyteswp";
+/// File-name limit on Linux file systems, in bytes.
+const NAME_MAX: usize = 255;
 
 /// Error payload when a live process owns the swap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,6 +66,8 @@ pub struct RecoverInfo {
     pub modified: String,
     /// Replayed content; `None` when the swap is stale.
     pub recovered: Option<String>,
+    /// The file on disk no longer matches what these edits were made against.
+    pub file_changed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,6 +82,8 @@ pub enum SwapStatus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Header {
     pub pid: u32,
+    /// Start time of the writer process, so a recycled PID is not mistaken for it.
+    pub start: u64,
     pub base_len: u64,
     pub base_crc: u32,
     pub path: String,
@@ -75,7 +91,9 @@ pub struct Header {
     pub len: usize,
 }
 
-/// Swap file name for `target`: the absolute path with `%` as `%25` and `/` as `%2F`, plus `.kyteswp`.
+/// Swap file name for `target`: the absolute path with `%` as `%25` and `/` as
+/// `%2F`, plus `.kyteswp`. A name over the file-name limit keeps the end of the
+/// path and adds a hash of the whole path.
 pub fn escape_name(target: &Path) -> String {
     let s = target.to_string_lossy();
     let mut out = String::with_capacity(s.len() + 16);
@@ -86,7 +104,15 @@ pub fn escape_name(target: &Path) -> String {
             c => out.push(c),
         }
     }
-    out.push_str(".kyteswp");
+    if out.len() + SUFFIX.len() > NAME_MAX {
+        let tag = format!("~{:08x}{:08x}", crc(s.as_bytes()), s.len());
+        let mut cut = out.len() - (NAME_MAX - SUFFIX.len() - tag.len());
+        while !out.is_char_boundary(cut) {
+            cut += 1;
+        }
+        out = format!("{}{tag}", &out[cut..]);
+    }
+    out.push_str(SUFFIX);
     out
 }
 
@@ -105,18 +131,45 @@ pub fn pid_alive(pid: u32) -> bool {
     pid != 0 && Path::new("/proc").join(pid.to_string()).exists()
 }
 
+/// Start time of `pid` in clock ticks since boot (field 22 of `/proc/<pid>/stat`).
+pub fn process_start_time(pid: u32) -> Option<u64> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // The command name (field 2) may hold spaces and parentheses.
+    let after_name = stat.rsplit_once(')')?.1;
+    after_name.split_whitespace().nth(19)?.parse().ok()
+}
+
+fn own_start_time() -> u64 {
+    process_start_time(std::process::id()).unwrap_or(0)
+}
+
+/// Whether the process that wrote a swap is still running. A PID now used by
+/// a different process has a different start time.
+fn owner_alive(pid: u32, start: u64) -> bool {
+    pid != std::process::id() && pid_alive(pid) && process_start_time(pid) == Some(start)
+}
+
 fn crc(bytes: &[u8]) -> u32 {
     crc32fast::hash(bytes)
 }
 
-fn header_bytes(pid: u32, target: &Path, base: &[u8]) -> Vec<u8> {
+fn rope_crc(rope: &Rope) -> u32 {
+    let mut h = crc32fast::Hasher::new();
+    for chunk in rope.chunks() {
+        h.update(chunk.as_bytes());
+    }
+    h.finalize()
+}
+
+fn header_bytes(pid: u32, start: u64, target: &Path, base: &Rope) -> Vec<u8> {
     let path = target.to_string_lossy();
-    let mut h = Vec::with_capacity(32 + path.len());
+    let mut h = Vec::with_capacity(HEADER_FIXED + path.len());
     h.extend_from_slice(MAGIC);
     h.extend_from_slice(&VERSION.to_le_bytes());
     h.extend_from_slice(&pid.to_le_bytes());
-    h.extend_from_slice(&(base.len() as u64).to_le_bytes());
-    h.extend_from_slice(&crc(base).to_le_bytes());
+    h.extend_from_slice(&start.to_le_bytes());
+    h.extend_from_slice(&(base.len_bytes() as u64).to_le_bytes());
+    h.extend_from_slice(&rope_crc(base).to_le_bytes());
     h.extend_from_slice(&(path.len() as u32).to_le_bytes());
     h.extend_from_slice(path.as_bytes());
     h
@@ -138,27 +191,29 @@ fn invalid(msg: &str) -> io::Error {
 
 /// Parses the header at the start of `b`.
 pub fn parse_header(b: &[u8]) -> io::Result<Header> {
-    if b.len() < 32 || &b[..8] != MAGIC {
+    if b.len() < HEADER_FIXED || &b[..8] != MAGIC {
         return Err(invalid("not a Kyte swap file"));
     }
     let version = u32_at(b, 8).unwrap();
     if version != VERSION {
         return Err(invalid("unsupported swap version"));
     }
-    let pid = u32_at(b, 12).unwrap();
-    let base_len = u64_at(b, 16).unwrap();
-    let base_crc = u32_at(b, 24).unwrap();
-    let path_len = u32_at(b, 28).unwrap() as usize;
+    let pid = u32_at(b, PID_OFFSET as usize).unwrap();
+    let start = u64_at(b, START_OFFSET as usize).unwrap();
+    let base_len = u64_at(b, 24).unwrap();
+    let base_crc = u32_at(b, 32).unwrap();
+    let path_len = u32_at(b, 36).unwrap() as usize;
     let path = b
-        .get(32..32 + path_len)
+        .get(HEADER_FIXED..HEADER_FIXED + path_len)
         .ok_or_else(|| invalid("truncated swap header"))?;
     let path = String::from_utf8(path.to_vec()).map_err(|_| invalid("bad path in swap header"))?;
     Ok(Header {
         pid,
+        start,
         base_len,
         base_crc,
         path,
-        len: 32 + path_len,
+        len: HEADER_FIXED + path_len,
     })
 }
 
@@ -171,11 +226,86 @@ pub fn encode_record(e: &Edit) -> Vec<u8> {
     payload.extend_from_slice(&(e.removed.chars().count() as u64).to_le_bytes());
     payload.extend_from_slice(&(ins.len() as u32).to_le_bytes());
     payload.extend_from_slice(ins);
+    frame(&payload)
+}
+
+/// Wraps a payload in its length and CRC.
+fn frame(payload: &[u8]) -> Vec<u8> {
     let mut rec = Vec::with_capacity(8 + payload.len());
     rec.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-    rec.extend_from_slice(&crc(&payload).to_le_bytes());
-    rec.extend_from_slice(&payload);
+    rec.extend_from_slice(&crc(payload).to_le_bytes());
+    rec.extend_from_slice(payload);
     rec
+}
+
+/// The base snapshot as records, each holding about [`BASE_CHUNK`] bytes.
+fn encode_base(base: &Rope) -> Vec<u8> {
+    let mut out = Vec::with_capacity(base.len_bytes() + 64);
+    let mut payload = vec![KIND_BASE];
+    for chunk in base.chunks() {
+        payload.extend_from_slice(chunk.as_bytes());
+        if payload.len() > BASE_CHUNK {
+            out.extend_from_slice(&frame(&payload));
+            payload.truncate(1);
+        }
+    }
+    if payload.len() > 1 {
+        out.extend_from_slice(&frame(&payload));
+    }
+    out
+}
+
+/// One framed record starting at `pos`: its payload and the offset after it.
+fn record_at(bytes: &[u8], pos: usize) -> Option<(&[u8], usize)> {
+    let len = u32_at(bytes, pos)? as usize;
+    let sum = u32_at(bytes, pos + 4)?;
+    let payload = bytes.get(pos + 8..pos + 8 + len)?;
+    (crc(payload) == sum).then_some((payload, pos + 8 + len))
+}
+
+/// The base snapshot at the start of the record area, and where it ends.
+fn read_snapshot(bytes: &[u8], start: usize) -> (Vec<u8>, usize) {
+    let mut text = Vec::new();
+    let mut pos = start;
+    while let Some((payload, next)) = record_at(bytes, pos) {
+        if payload.first() != Some(&KIND_BASE) {
+            break;
+        }
+        text.extend_from_slice(&payload[1..]);
+        pos = next;
+    }
+    (text, pos)
+}
+
+/// Text to replay on, where its edits start, and whether the file has moved on.
+struct Base {
+    text: String,
+    edits_at: usize,
+    file_changed: bool,
+}
+
+/// Picks the base for replay: the file when it still matches the header,
+/// otherwise the snapshot. `None` when neither matches.
+fn resolve_base(bytes: &[u8], h: &Header, current: &[u8]) -> Option<Base> {
+    let matches = |b: &[u8]| h.base_len == b.len() as u64 && h.base_crc == crc(b);
+    let (snapshot, edits_at) = read_snapshot(bytes, h.len);
+    if matches(current) {
+        let text = String::from_utf8(current.to_vec()).ok()?;
+        return Some(Base {
+            text,
+            edits_at,
+            file_changed: false,
+        });
+    }
+    if !matches(&snapshot) {
+        return None;
+    }
+    let text = String::from_utf8(snapshot).ok()?;
+    Some(Base {
+        text,
+        edits_at,
+        file_changed: true,
+    })
 }
 
 /// Result of replaying the record area.
@@ -190,12 +320,8 @@ fn replay_records(bytes: &[u8], start: usize, base: &str) -> Replayed {
     let mut rope = Rope::from_str(base);
     let mut pos = start;
     let mut records = 0;
-    while let (Some(len), Some(sum)) = (u32_at(bytes, pos), u32_at(bytes, pos + 4)) {
-        let len = len as usize;
-        let Some(payload) = bytes.get(pos + 8..pos + 8 + len) else {
-            break;
-        };
-        if crc(payload) != sum || payload.is_empty() {
+    while let Some((payload, next)) = record_at(bytes, pos) {
+        if payload.is_empty() {
             break;
         }
         if payload[0] == KIND_EDIT {
@@ -223,47 +349,42 @@ fn replay_records(bytes: &[u8], start: usize, base: &str) -> Replayed {
             }
         }
         // Unknown kinds are length-delimited and skipped (section 13).
-        pos += 8 + len;
+        pos = next;
         records += 1;
     }
     Replayed { rope, records }
 }
 
-/// Replays the swap at `swap_path` on top of `base` (the real file content,
-/// whose CRC and length must match the header).
-pub fn replay(base: &str, swap_path: &Path) -> io::Result<String> {
+/// Replays the swap at `swap_path` on top of `current` (the real file content)
+/// when it matches the header, otherwise on top of the swap's snapshot.
+pub fn replay(current: &str, swap_path: &Path) -> io::Result<String> {
     let bytes = fs::read(swap_path)?;
     let h = parse_header(&bytes)?;
-    if h.base_len != base.len() as u64 || h.base_crc != crc(base.as_bytes()) {
-        return Err(invalid(
-            "the file changed since the swap was written (stale swap)",
-        ));
-    }
-    Ok(replay_records(&bytes, h.len, base).rope.to_string())
+    let base = resolve_base(&bytes, &h, current.as_bytes()).ok_or_else(|| {
+        invalid("the file changed since the swap was written and the swap has no usable copy")
+    })?;
+    Ok(replay_records(&bytes, base.edits_at, &base.text)
+        .rope
+        .to_string())
 }
 
 /// (byte offset after the last record with valid framing and CRC, record count).
 fn framing_end(bytes: &[u8], start: usize) -> (usize, usize) {
     let mut pos = start;
     let mut n = 0;
-    while let (Some(len), Some(sum)) = (u32_at(bytes, pos), u32_at(bytes, pos + 4)) {
-        let len = len as usize;
-        match bytes.get(pos + 8..pos + 8 + len) {
-            Some(p) if crc(p) == sum => {
-                n += 1;
-                pos += 8 + len;
-            }
-            _ => break,
-        }
+    while let Some((_, next)) = record_at(bytes, pos) {
+        n += 1;
+        pos = next;
     }
     (pos, n)
 }
 
-/// Number of records with valid framing in the swap (tests and diagnostics).
+/// Number of records after the base snapshot (tests and diagnostics).
 pub fn record_count(swap_path: &Path) -> io::Result<usize> {
     let bytes = fs::read(swap_path)?;
     let h = parse_header(&bytes)?;
-    Ok(framing_end(&bytes, h.len).1)
+    let (_, edits_at) = read_snapshot(&bytes, h.len);
+    Ok(framing_end(&bytes, edits_at).1)
 }
 
 /// `YYYY-MM-DD HH:MM:SS UTC` (no time-zone database needed).
@@ -308,6 +429,7 @@ pub fn stale_info_in(dir: &Path, target: &Path) -> RecoverInfo {
         modified: modified_of(&swap_path),
         swap_path,
         recovered: None,
+        file_changed: false,
     }
 }
 
@@ -332,18 +454,19 @@ pub fn inspect_in(dir: &Path, target: &Path, current: &[u8]) -> io::Result<SwapS
     let Ok(h) = parse_header(&bytes) else {
         return Ok(SwapStatus::Stale);
     };
-    if h.pid != std::process::id() && pid_alive(h.pid) {
+    if owner_alive(h.pid, h.start) {
         return Ok(SwapStatus::LiveLock { pid: h.pid });
     }
-    if h.base_len != current.len() as u64 || h.base_crc != crc(current) {
-        return Ok(SwapStatus::Stale);
+    if bytes.len() == h.len {
+        // A session that never edited anything has nothing to offer.
+        return Ok(SwapStatus::None);
     }
-    let Ok(base) = std::str::from_utf8(current) else {
+    let Some(base) = resolve_base(&bytes, &h, current) else {
         return Ok(SwapStatus::Stale);
     };
-    let r = replay_records(&bytes, h.len, base);
+    let r = replay_records(&bytes, base.edits_at, &base.text);
     let text = r.rope.to_string();
-    if r.records == 0 || text == base {
+    if r.records == 0 || text.as_bytes() == current {
         // Nothing unsaved to offer.
         return Ok(SwapStatus::None);
     }
@@ -352,7 +475,37 @@ pub fn inspect_in(dir: &Path, target: &Path, current: &[u8]) -> io::Result<SwapS
         modified: modified_of(&swap_path),
         swap_path,
         recovered: Some(text),
+        file_changed: base.file_changed,
     }))
+}
+
+/// Clears the owner of `target`'s swap in `dir` so it no longer counts as a
+/// live lock. The file is otherwise untouched; a missing swap is fine.
+pub fn break_lock_in(dir: &Path, target: &Path) -> io::Result<()> {
+    let path = swap_path_in(dir, target);
+    let mut file = match OpenOptions::new().write(true).open(&path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    file.seek(SeekFrom::Start(PID_OFFSET))?;
+    file.write_all(&0u32.to_le_bytes())
+}
+
+/// [`break_lock_in`] in the configured state directory.
+pub fn break_lock(target: &Path) -> io::Result<()> {
+    break_lock_in(&fileio::state_dir(), target)
+}
+
+/// The owner in the fixed part of a header, if it is a header of this version.
+fn parse_fixed_owner(head: &[u8]) -> Option<(u32, u64)> {
+    if &head[..8] != MAGIC || u32_at(head, 8) != Some(VERSION) {
+        return None;
+    }
+    Some((
+        u32_at(head, PID_OFFSET as usize)?,
+        u64_at(head, START_OFFSET as usize)?,
+    ))
 }
 
 /// Append-only writer for one swap file.
@@ -361,25 +514,28 @@ pub struct SwapWriter {
     file: File,
     path: PathBuf,
     pending_fsync: bool,
+    /// Written ahead of the first edit, then dropped.
+    pending_base: Option<Rope>,
 }
 
 impl SwapWriter {
     /// Creates (or replaces) the swap for `target` with `base` as the base
     /// content. Fails with a live-lock error if a running process owns it.
-    pub fn create(target: &Path, base: &[u8]) -> io::Result<SwapWriter> {
+    pub fn create(target: &Path, base: &Rope) -> io::Result<SwapWriter> {
         Self::create_in(&fileio::state_dir(), target, base)
     }
 
     /// [`create`](Self::create) with an explicit swap directory.
-    pub fn create_in(dir: &Path, target: &Path, base: &[u8]) -> io::Result<SwapWriter> {
+    pub fn create_in(dir: &Path, target: &Path, base: &Rope) -> io::Result<SwapWriter> {
         DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
         let path = swap_path_in(dir, target);
         if let Ok(mut f) = File::open(&path) {
-            let mut head = vec![0u8; 16];
-            if f.read_exact(&mut head).is_ok() && &head[..8] == MAGIC {
-                let pid = u32_at(&head, 12).unwrap();
-                if pid != std::process::id() && pid_alive(pid) {
-                    return Err(io::Error::other(LiveLockError { pid }));
+            let mut head = vec![0u8; HEADER_FIXED];
+            if f.read_exact(&mut head).is_ok() {
+                if let Some((pid, start)) = parse_fixed_owner(&head) {
+                    if owner_alive(pid, start) {
+                        return Err(io::Error::other(LiveLockError { pid }));
+                    }
                 }
             }
         }
@@ -390,12 +546,18 @@ impl SwapWriter {
             .mode(0o600)
             .open(&path)?;
         file.set_permissions(fs::Permissions::from_mode(0o600))?;
-        file.write_all(&header_bytes(std::process::id(), target, base))?;
+        file.write_all(&header_bytes(
+            std::process::id(),
+            own_start_time(),
+            target,
+            base,
+        ))?;
         file.sync_all()?;
         Ok(SwapWriter {
             file,
             path,
             pending_fsync: false,
+            pending_base: Some(base.clone()),
         })
     }
 
@@ -411,12 +573,14 @@ impl SwapWriter {
         file.set_len(pos as u64)?;
         file.seek(SeekFrom::Start(PID_OFFSET))?;
         file.write_all(&std::process::id().to_le_bytes())?;
+        file.write_all(&own_start_time().to_le_bytes())?;
         file.seek(SeekFrom::End(0))?;
         file.sync_all()?;
         Ok(SwapWriter {
             file,
             path: swap_path.to_path_buf(),
             pending_fsync: false,
+            pending_base: None,
         })
     }
 
@@ -429,7 +593,10 @@ impl SwapWriter {
         if edits.is_empty() {
             return Ok(());
         }
-        let mut buf = Vec::new();
+        let mut buf = match self.pending_base.take() {
+            Some(base) => encode_base(&base),
+            None => Vec::new(),
+        };
         for e in edits {
             buf.extend_from_slice(&encode_record(e));
         }
@@ -473,9 +640,10 @@ mod tests {
 
     #[test]
     fn header_roundtrip() {
-        let h = header_bytes(42, Path::new("/a/b.txt"), b"hello");
+        let h = header_bytes(42, 7, Path::new("/a/b.txt"), &Rope::from_str("hello"));
         let p = parse_header(&h).unwrap();
         assert_eq!(p.pid, 42);
+        assert_eq!(p.start, 7);
         assert_eq!(p.base_len, 5);
         assert_eq!(p.base_crc, crc32fast::hash(b"hello"));
         assert_eq!(p.path, "/a/b.txt");

@@ -12,6 +12,16 @@ These replace the matching parts of `ARCHITECTURE`. `docs/ROADMAP.md` holds the 
 - License: MIT. This settles section 16 and the section 4 note.
 - Kyte isn't tied to any one OS. It's meant to be open source for everyone.
 
+## 0.1.1 swap format (version 2)
+
+These replace the swap format and flows in `ARCHITECTURE` sections 6 and 8.
+
+- The header gained the writer's process start time (offset 16), and everything after it moved by 8 bytes. A version 1 swap counts as unreadable: Kyte offers discard or quit. Kyte had no users of the old format.
+- New record kind 1 holds the base snapshot, split at about 1 MiB. It's written once, just ahead of the first edit, so a session that only reads copies nothing to disk, and `SwapWriter` holds a `Rope` clone of the base until then. The swap therefore holds the whole file while edits are unsaved; it stays 0600 in a 0700 directory and is deleted the same way as before.
+- Replay uses the file when it still matches the header and the snapshot otherwise. So a file that changed or was deleted after a crash no longer strands the edits, and "stale" now means only that the swap can't be read. AC-22 changed to match.
+- A live lock needs both the PID and its start time from `/proc/<pid>/stat` to match. `--break-lock` zeroes the swap's PID and changes nothing else, so recovery still works.
+- A swap name over 255 bytes keeps the end of the escaped path and adds the path's CRC and length. If the swap can't be read at all, the file still opens, with the crash-recovery warning. Before this, both cases stopped Kyte from opening the file, despite what the README said.
+
 ## Hosting and environment
 
 - Toolchain: rustc/cargo 1.99.1 (stable, 2026-10-13), edition 2021.
@@ -75,7 +85,7 @@ These replace the matching parts of `ARCHITECTURE`. `docs/ROADMAP.md` holds the 
 - Liveness is `/proc/<pid>` existing and the PID not being Kyte's own; a recycled PID owned by an unrelated process would be reported as a live lock (the safe direction).
 - If the swap cannot be created for a reason other than a live lock (for example an unwritable state directory) Kyte still opens the file and shows a warning on the message line that crash recovery is off.
 - Replay also stops at a record whose edit falls outside the text (bounds check), in addition to short and CRC-bad records. Unknown record kinds are skipped by length (section 13 hook).
-- Very long paths can exceed the 255-byte file-name limit once escaped; this is not handled in the MVP (swap creation fails with a warning and the file still opens).
+- Very long paths can exceed the 255-byte file-name limit once escaped; this is not handled in the MVP (swap creation fails with a warning and the file still opens). Fixed in 0.1.1; see above.
 - Added `SwapWriter::create_in` and `swap::inspect_in` taking an explicit directory so tests do not mutate process-wide environment variables, plus `record_count`, `parse_header`, `encode_record`, `stale_info`, `live_lock_pid`.
 
 ## T10 recovery UI

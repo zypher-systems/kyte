@@ -54,6 +54,7 @@ kyte [OPTIONS] [FILE]
 | `-V`, `--version` | Print `kyte 0.1.0` and exit 0 |
 | `--esc-ms N` | Double-tap window for Esc Esc in milliseconds (default 300; env `KYTE_ESC_MS`) |
 | `--no-kitty` | Never enable the kitty keyboard protocol |
+| `--break-lock` | Open FILE even if another Kyte seems to hold it. Only use this if that Kyte is gone. |
 | `--print-swap FILE` | Print the text recovered from FILE's swap to stdout and exit 0, or exit 3 if no valid swap exists. Works without a terminal. |
 
 | Exit code | Meaning |
@@ -125,8 +126,9 @@ Ctrl-F (or Esc `/`) opens `Search:` on the message line. Kyte jumps to the first
 
 ## Swap files and recovery
 
-- When you open a file, Kyte creates a swap file under `$XDG_STATE_HOME/kyte/swap/` (default `~/.local/state/kyte/swap/`; `KYTE_STATE_DIR` overrides it). It is never placed next to your file. It has mode 0600 and is named after the escaped absolute path, for example `%2Fhome%2Fme%2Fnotes.txt.kyteswp`.
+- When you open a file, Kyte creates a swap file under `$XDG_STATE_HOME/kyte/swap/` (default `~/.local/state/kyte/swap/`; `KYTE_STATE_DIR` overrides it). It is never placed next to your file. It has mode 0600 and is named after the escaped absolute path, for example `%2Fhome%2Fme%2Fnotes.txt.kyteswp`. A name that would be too long keeps the end of the path and adds a hash.
 - Each edit is appended to the swap as a small checksummed record before the screen updates. The swap is fsynced at most once per second. Your real file changes only when you save.
+- The first edit also copies the file's content into the swap, so your edits can be recovered even if the file later changes or disappears. Opening a file without editing it copies nothing.
 - Saving is atomic. Kyte writes a temporary file in the same directory, fsyncs it, keeps the file's permissions, renames it over the original and fsyncs the directory. A failed save (for example in a read-only directory) leaves the original untouched, shows the error and keeps your changes and the swap. Saving through a symlink updates the target and keeps the link.
 - After a save, the swap starts over empty. After a clean quit, the swap is deleted.
 - If Kyte finds a swap with unsaved changes when you open the file, it shows **Recover unsaved changes**:
@@ -134,8 +136,9 @@ Ctrl-F (or Esc `/`) opens `Search:` on the message line. Kyte jumps to the first
   - `d` discards them and opens the file as it is on disk.
   - `q` or Esc quits and changes nothing.
 - A damaged tail (for example a record cut off by a crash) is dropped, and everything before it is recovered.
-- If the file changed on disk after the swap was written, the swap is **stale**: Kyte offers only discard or quit.
-- If another running Kyte has the file open, a second `kyte FILE` exits 2 and names that process's PID.
+- If the file changed on disk after the swap was written, Kyte says so and still offers to recover your version. Recovering shows your version in the editor; the file on disk changes only when you save.
+- A swap Kyte can't read is **stale**: Kyte offers only discard or quit.
+- If another running Kyte has the file open, a second `kyte FILE` exits 2 and names that process's PID. The check includes the process's start time, so a reused PID doesn't count. `--break-lock` overrides it.
 - `kyte --print-swap FILE` prints what would be recovered, without a terminal.
 
 ## Demo
@@ -175,7 +178,6 @@ These Docker files have not been run yet, because the build machine had no Docke
 - **Split escape sequences.** On a legacy terminal over a laggy link, the bytes of an arrow key can arrive split, so the Esc arrives alone. You then see the layer open, and the rest of the sequence closes it again; those characters are discarded, never inserted. Kyte does not try to repair this. `docs/KEY_LAB.md` has the observed behavior. Terminals with the kitty keyboard protocol do not have this problem, and Kyte enables the protocol when it is available.
 - UTF-8 files only (others are refused and left untouched). LF line endings; a CRLF file is edited as is, and the `\r` shows as a control picture.
 - Linux only (the swap lock checks `/proc`).
-- Very long paths can exceed the file-name limit for the swap. The file still opens, with a warning that crash recovery is off.
 - Not in this version: reader mode, file tree, the Ctrl-K universal palette, light and high-contrast themes, undo history that survives a restart, mouse, selection and clipboard (including OSC 52), multiple buffers or splits, LSP, plugins, a config file, soft wrap, CRLF conversion, non-UTF-8 files, RPM/COPR packaging, and use as the default `$EDITOR`.
 
 ## Documentation
