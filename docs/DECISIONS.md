@@ -35,3 +35,11 @@ Every deviation from `ARCHITECTURE` (Mnemo page_e336285940d54098ada133cc08df814b
 - `dirty` is a plain flag: any edit, undo or redo sets it, only a save clears it (undoing back to the saved text still shows `[+]`, as in nano).
 - Backspace and Delete are one undo step each (`GroupKind::Other`); only plain typing coalesces.
 - Zero-width graphemes and control characters take one display cell (control characters are drawn as Unicode control pictures) so the cursor never sits on a zero-width cell.
+
+## T6 overlay and operators
+
+- `d` cursor placement: section 6 says "same column on the following line, clamped" and its example `a\nb▮b\nc` becomes `a\n▮c`. Kyte clamps to the last character of that line (not past its end), which reproduces the example exactly. When the deleted line was the last line, the cursor goes to the line that is now last.
+- `d` on the empty last line after a trailing newline removes that trailing newline (the rule for "last line without a trailing newline" applied literally).
+- `w` works on graphemes (a base letter plus combining marks counts as one word character) and treats newlines as whitespace, so `w` at the end of a line deletes the line break and the next line's indentation.
+- Added `ops::kill_range` (the `k` range built on `ops::eol`) next to the four section 6 functions.
+- A paste while the overlay is open closes the overlay and inserts the paste (it is not an "unknown key"; dropping pasted text silently would lose data). In the palette, pasted text goes into the query with line breaks as spaces; in prompts it is ignored.

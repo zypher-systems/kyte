@@ -390,3 +390,345 @@ fn ac18_quit_clean_exits_and_restores_terminal() {
     assert!(p.screen().contains("shell-before"), "{}", p.dump());
     assert!(!p.screen().contains("INSERT"));
 }
+
+// ---------------------------------------------------------------- Esc layer helpers
+
+const LEGEND_PART: &str = "w del word";
+const LEGEND_END: &str = "Esc Esc palette";
+
+fn has_legend(p: &Pty) -> bool {
+    let s = p.screen();
+    s.contains(LEGEND_PART) || s.contains(LEGEND_END)
+}
+
+fn status_has_esc(p: &Pty) -> bool {
+    status(p).contains(" ESC ")
+}
+
+/// Esc, then wait until the overlay is visible.
+fn open_overlay(p: &mut Pty) {
+    p.send_keys(&["Esc"]);
+    p.wait_for(LEGEND_PART, TIMEOUT);
+}
+
+fn wait_insert(p: &Pty) {
+    p.wait_until("Insert mode (no legend)", TIMEOUT, |s| {
+        !s.contains(LEGEND_PART) && s.contains(" INSERT ")
+    });
+}
+
+/// Saves, quits and returns the file content.
+fn save_quit_read(p: &mut Pty, f: &Path) -> String {
+    save_and_wait(p);
+    quit_clean(p);
+    fs::read_to_string(f).unwrap()
+}
+
+// ---------------------------------------------------------------- AC-09
+
+#[test]
+fn ac09_undo_redo_typing_and_operator() {
+    let env = Env::new();
+    let f = env.write("undo.txt", "first\nsecond\n");
+    let mut p = env.open(&f);
+    p.send_keys(&["End"]);
+    p.send_str("abc");
+    p.wait_for("firstabc", TIMEOUT);
+    p.send_keys(&["C-z"]);
+    p.wait_gone("firstabc", TIMEOUT);
+    p.wait_for("1 │ first", TIMEOUT);
+    p.send_keys(&["C-y"]);
+    p.wait_for("firstabc", TIMEOUT);
+    // operator undone by exactly one Ctrl-Z
+    open_overlay(&mut p);
+    p.send_keys(&["d"]);
+    p.wait_gone("firstabc", TIMEOUT);
+    p.send_keys(&["C-z"]);
+    p.wait_for("firstabc", TIMEOUT);
+    assert!(p.screen().contains("2 │ second"));
+    // the same through the overlay: Esc u, Esc r
+    open_overlay(&mut p);
+    p.send_keys(&["u"]);
+    p.wait_gone("firstabc", TIMEOUT); // undo of the redone typing group
+    wait_insert(&p);
+    open_overlay(&mut p);
+    p.send_keys(&["r"]);
+    p.wait_for("firstabc", TIMEOUT);
+    wait_insert(&p);
+    open_overlay(&mut p);
+    p.send_keys(&["d"]);
+    p.wait_gone("firstabc", TIMEOUT);
+    open_overlay(&mut p);
+    p.send_keys(&["u"]);
+    p.wait_for("firstabc", TIMEOUT);
+    assert_eq!(save_quit_read(&mut p, &f), "firstabc\nsecond\n");
+}
+
+// ---------------------------------------------------------------- AC-12
+
+#[test]
+fn ac12_legend_appears_instantly_and_only_in_overlay() {
+    let env = Env::new();
+    let f = env.write("legend.txt", "foo bar baz\nsecond line\n");
+    let mut p = env.open(&f);
+    assert!(!has_legend(&p));
+    assert!(!status_has_esc(&p));
+    let t = Instant::now();
+    p.send_keys(&["Esc"]);
+    p.wait_for(LEGEND_PART, Duration::from_millis(100));
+    let dt = t.elapsed();
+    assert!(dt < Duration::from_millis(100), "legend took {dt:?}");
+    eprintln!("AC-12: legend visible {dt:?} after Esc");
+    for part in [
+        "w del word",
+        "d del line",
+        "k del to end",
+        "% bracket",
+        "/ search",
+        "u undo",
+        "r redo",
+        "s save",
+        "Esc Esc palette",
+    ] {
+        assert!(
+            p.row(29).contains(part),
+            "legend misses {part:?}: {}",
+            p.row(29)
+        );
+    }
+    assert!(status_has_esc(&p));
+    // after an operator
+    p.send_keys(&["w"]);
+    wait_insert(&p);
+    assert!(!status_has_esc(&p));
+    // after an unknown key
+    open_overlay(&mut p);
+    p.send_keys(&["z"]);
+    wait_insert(&p);
+    assert!(!status_has_esc(&p));
+    // after Esc, 500 ms, Esc
+    open_overlay(&mut p);
+    std::thread::sleep(Duration::from_millis(500));
+    p.send_keys(&["Esc"]);
+    wait_insert(&p);
+    assert!(!status_has_esc(&p));
+    assert!(!p.screen().contains("Command palette"));
+    p.send_keys(&["C-q"]);
+    p.wait_for("Unsaved changes", TIMEOUT);
+    p.send_keys(&["y"]);
+    p.wait_exit(TIMEOUT);
+}
+
+// ---------------------------------------------------------------- AC-13
+
+/// Opens `initial`, sends `keys` (named keys, each a separate write, with the
+/// overlay legend awaited after every Esc), saves, quits, returns the file.
+fn op_case(initial: &str, keys: &[&str]) -> String {
+    let env = Env::new();
+    let f = env.write("op.txt", initial);
+    let mut p = env.open(&f);
+    for k in keys {
+        if *k == "Esc" {
+            open_overlay(&mut p);
+        } else {
+            p.send_keys(&[k]);
+            if keys_close_overlay(k) {
+                wait_insert(&p);
+            }
+        }
+    }
+    save_and_wait(&mut p);
+    quit_clean(&mut p);
+    fs::read_to_string(&f).unwrap()
+}
+
+fn keys_close_overlay(k: &str) -> bool {
+    matches!(k, "w" | "d" | "k" | "%")
+}
+
+#[test]
+fn ac13_w_deletes_to_next_word() {
+    assert_eq!(
+        op_case("foo bar baz", &["Right", "Right", "Right", "Esc", "w"]),
+        "foobar baz"
+    );
+    assert_eq!(op_case("foo bar", &["Esc", "w"]), "bar");
+}
+
+#[test]
+fn ac13_d_middle_last_and_only_line() {
+    assert_eq!(op_case("a\nbb\nc", &["Down", "Right", "Esc", "d"]), "a\nc");
+    assert_eq!(op_case("a\nb\nc", &["Down", "Down", "Esc", "d"]), "a\nb");
+    assert_eq!(op_case("only", &["Esc", "d"]), "");
+}
+
+#[test]
+fn ac13_d_cursor_lands_at_same_column_clamped() {
+    // a\nb|b\nc -> a\n|c ; then typing X proves where the cursor is
+    assert_eq!(
+        op_case("a\nbb\nc", &["Down", "Right", "Esc", "d", "X"]),
+        "a\nXc"
+    );
+    assert_eq!(
+        op_case("a\nlong\nxyz", &["Down", "Right", "Right", "Esc", "d", "X"]),
+        "a\nxyXz"
+    );
+}
+
+#[test]
+fn ac13_k_mid_line_and_at_end_of_line() {
+    assert_eq!(
+        op_case("abcd\nef", &["Right", "Right", "Esc", "k"]),
+        "ab\nef"
+    );
+    assert_eq!(op_case("ab\nef", &["End", "Esc", "k"]), "abef");
+}
+
+#[test]
+fn ac13_percent_nested_not_on_bracket_and_unmatched() {
+    // on a bracket: jump to its partner; X marks the landing spot
+    assert_eq!(op_case("(a[b]c)", &["Esc", "%", "X"]), "(a[b]cX)");
+    assert_eq!(
+        op_case("(a[b]c)", &["Right", "Right", "Esc", "%", "X"]),
+        "(a[bX]c)"
+    );
+    // not on a bracket: first bracket on the line, then its partner
+    assert_eq!(op_case("x(a[b]c)y", &["Esc", "%", "X"]), "x(a[b]cX)y");
+}
+
+#[test]
+fn ac13_percent_unmatched_shows_message_and_does_not_move() {
+    let env = Env::new();
+    let f = env.write("op.txt", "(ab");
+    let mut p = env.open(&f);
+    open_overlay(&mut p);
+    p.send_keys(&["%"]);
+    p.wait_for("No matching bracket", TIMEOUT);
+    wait_status(&p, "Ln 1, Col 1");
+    assert!(!status(&p).contains("[+]"));
+    p.send_str("X");
+    p.wait_gone("No matching bracket", TIMEOUT);
+    assert_eq!(save_quit_read(&mut p, &f), "X(ab");
+}
+
+// ---------------------------------------------------------------- AC-14
+
+#[test]
+fn ac14_double_esc_within_150ms_opens_palette() {
+    let env = Env::new();
+    let f = env.write("pal.txt", "text\n");
+    let mut p = env.open(&f);
+    let t = Instant::now();
+    open_overlay(&mut p);
+    p.send_keys(&["Esc"]);
+    let gap = t.elapsed();
+    assert!(gap < Duration::from_millis(150), "gap {gap:?}");
+    p.wait_for("Command palette", TIMEOUT);
+    assert!(!has_legend(&p));
+    p.send_keys(&["Esc"]);
+    p.wait_gone("Command palette", TIMEOUT);
+    wait_insert(&p);
+    assert!(!status(&p).contains("[+]"));
+    quit_clean(&mut p);
+    assert_eq!(fs::read_to_string(&f).unwrap(), "text\n");
+}
+
+#[test]
+fn ac14_esc_pause_esc_closes_overlay() {
+    let env = Env::new();
+    let f = env.write("pal.txt", "text\n");
+    let mut p = env.open(&f);
+    open_overlay(&mut p);
+    std::thread::sleep(Duration::from_millis(500));
+    p.send_keys(&["Esc"]);
+    wait_insert(&p);
+    std::thread::sleep(Duration::from_millis(50));
+    assert!(!p.screen().contains("Command palette"));
+    assert!(!status(&p).contains("[+]"));
+    quit_clean(&mut p);
+    assert_eq!(fs::read_to_string(&f).unwrap(), "text\n");
+}
+
+#[test]
+fn ac14_esc_ms_800_opens_palette_after_500ms() {
+    let env = Env::new();
+    let f = env.write("pal.txt", "text\n");
+    let mut p = env.open_args(&f, &["--esc-ms", "800"]);
+    open_overlay(&mut p);
+    std::thread::sleep(Duration::from_millis(500));
+    p.send_keys(&["Esc"]);
+    p.wait_for("Command palette", TIMEOUT);
+    p.send_keys(&["Esc"]);
+    wait_insert(&p);
+    quit_clean(&mut p);
+    assert_eq!(fs::read_to_string(&f).unwrap(), "text\n");
+}
+
+#[test]
+fn ac14_kyte_esc_ms_env_is_honoured() {
+    let env = Env::new();
+    let f = env.write("pal.txt", "text\n");
+    let mut p = Pty::spawn(
+        Spawn::new(bin())
+            .env("KYTE_STATE_DIR", env.state.to_string_lossy())
+            .env("KYTE_ESC_MS", "800")
+            .arg("--no-kitty")
+            .arg(f.to_string_lossy()),
+    );
+    p.wait_for("Ln 1, Col 1", TIMEOUT);
+    open_overlay(&mut p);
+    std::thread::sleep(Duration::from_millis(500));
+    p.send_keys(&["Esc"]);
+    p.wait_for("Command palette", TIMEOUT);
+    p.send_keys(&["Esc"]);
+    wait_insert(&p);
+    quit_clean(&mut p);
+}
+
+// ---------------------------------------------------------------- AC-15
+
+#[test]
+fn ac15_unknown_overlay_key_inserts_nothing() {
+    let env = Env::new();
+    let f = env.write("z.txt", "abc\n");
+    let mut p = env.open(&f);
+    open_overlay(&mut p);
+    p.send_keys(&["z"]);
+    wait_insert(&p);
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(p.row(0), "  1 │ abc", "{}", p.dump());
+    assert!(
+        !p.rows()[..28].iter().any(|r| r.contains('z')),
+        "{}",
+        p.dump()
+    );
+    assert!(!status(&p).contains("[+]"));
+    quit_clean(&mut p);
+    assert_eq!(fs::read_to_string(&f).unwrap(), "abc\n");
+}
+
+#[test]
+fn ac15_alt_d_bytes_behave_as_esc_then_d() {
+    let env = Env::new();
+    let f = env.write("alt.txt", "one\ntwo\nthree\n");
+    let mut p = env.open(&f);
+    p.send_keys(&["Down"]);
+    wait_status(&p, "Ln 2");
+    p.send(b"\x1bd"); // legacy Alt-d: ESC d in one write
+    p.wait_gone("two", TIMEOUT);
+    wait_insert(&p);
+    assert_eq!(save_quit_read(&mut p, &f), "one\nthree\n");
+}
+
+#[test]
+fn ac15_ctrl_space_opens_overlay() {
+    let env = Env::new();
+    let f = env.write("cs.txt", "abc\n");
+    let mut p = env.open(&f);
+    p.send_keys(&["C-Space"]);
+    p.wait_for(LEGEND_PART, TIMEOUT);
+    assert!(status_has_esc(&p));
+    p.send_keys(&["d"]);
+    p.wait_gone("abc", TIMEOUT);
+    assert_eq!(save_quit_read(&mut p, &f), "");
+}

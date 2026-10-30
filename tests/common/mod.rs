@@ -299,7 +299,10 @@ impl Pty {
     pub fn rows(&self) -> Vec<String> {
         let p = self.parser.lock().unwrap();
         let (_, cols) = p.screen().size();
-        p.screen().rows(0, cols.get()).collect()
+        p.screen()
+            .rows(0, cols.get())
+            .map(|r| r.trim_end().to_string())
+            .collect()
     }
 
     pub fn row(&self, n: usize) -> String {
