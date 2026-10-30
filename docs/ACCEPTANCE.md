@@ -8,12 +8,12 @@ Gate commands, all run from the repo root:
 cargo build --release                      # 0 warnings (also after `cargo clean --release -p kyte-editor`)
 cargo fmt --check                          # clean
 cargo clippy --all-targets -- -D warnings  # clean
-cargo test                                 # 180 passed, 0 failed, 1 ignored (the AC-25 demo test)
+cargo test                                 # 246 passed, 0 failed, 1 ignored (the AC-25 demo test)
 cargo test --test demo -- --ignored        # 1 passed (AC-25)
 make demo                                  # writes docs/demo/*
 ```
 
-`cargo test` breakdown: lib unit tests 102, `tests/buffer_props.rs` 2 (proptest), `tests/e2e.rs` 50, `tests/fileio.rs` 9, `tests/smoke.rs` 4, `tests/swap.rs` 13, `tests/demo.rs` 0 run and 1 ignored. The full suite was also run three times in a row with no failures.
+Updated for the 0.1.1 work on 2026-10-30, on rustc 1.98.1 with SELinux enforcing. `cargo test` breakdown: lib unit tests 124, `tests/buffer_props.rs` 2 (proptest), `tests/e2e.rs` 77, `tests/fileio.rs` 15, `tests/smoke.rs` 4, `tests/swap.rs` 24, `tests/demo.rs` 0 run and 1 ignored. The full suite was also run three times in a row with no failures.
 
 | AC | Result | How it was verified |
 | --- | --- | --- |
@@ -43,6 +43,6 @@ make demo                                  # writes docs/demo/*
 | AC-24 | pass | e2e `ac24_save_into_read_only_dir_fails_visibly_and_keeps_everything`, `ac24_save_through_symlink_updates_target_keeps_link`; `tests/fileio.rs`. |
 | AC-25 | pass | `make demo` ran headless (no display, no tmux) and wrote `docs/demo/demo.cast`, `demo.gif` (979x694, 33.75 s), `demo.mp4` (h264 978x694, 32.9 s; both checked with `ffprobe`), 13 PNGs, `steps.tsv` and 13 `frames/NN-*.txt`. `frames/03-legend.txt` contains the legend, `07-palette.txt` the palette, and `11-crash.txt` the Recover modal; PNGs 03, 07 and 11 were also inspected by eye. The skip path was checked with agg and ffmpeg removed from `PATH`: it wrote the cast, steps and frames and listed the gif, mp4 and PNGs as skipped. `cargo test --test demo -- --ignored` passed. |
 
-Stretch T13 (feature `highlight`, off by default): `cargo build --release --features highlight` 0 warnings, `cargo clippy --all-targets --features highlight -- -D warnings` clean, `cargo test --features highlight` 186 passed, 0 failed, 1 ignored (the default 180, plus 4 highlight unit tests and 2 tests in `tests/e2e_highlight.rs`). The default build is unchanged and still passes 180.
+Stretch T13 (feature `highlight`, off by default): `cargo build --release --features highlight` 0 warnings, `cargo clippy --all-targets --features highlight -- -D warnings` clean, `cargo test --features highlight` 252 passed, 0 failed, 1 ignored (the default 246, plus 4 highlight unit tests and 2 tests in `tests/e2e_highlight.rs`). The default build still has no tree-sitter crate.
 
 Not verified: `make docker-test` and the Dockerfile, because Docker is not installed on the build box (see `docs/DECISIONS.md`).
