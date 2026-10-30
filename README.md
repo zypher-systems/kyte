@@ -52,7 +52,7 @@ kyte [OPTIONS] [FILE]
 | Option | Meaning |
 | --- | --- |
 | `-h`, `--help` | Show usage and exit 0 |
-| `-V`, `--version` | Print `kyte 0.3.0` and exit 0 |
+| `-V`, `--version` | Print `kyte 0.4.0` and exit 0 |
 | `--esc-ms N` | Double-tap window for Esc Esc in milliseconds (default 300; env `KYTE_ESC_MS`) |
 | `--no-kitty` | Never enable the kitty keyboard protocol |
 | `--no-history` | Keep no file history this session |

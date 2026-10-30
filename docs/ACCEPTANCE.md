@@ -17,7 +17,7 @@ Updated on 2026-10-30, on rustc 1.98.1 with SELinux enforcing. `cargo test` brea
 
 | AC | Result | How it was verified |
 | --- | --- | --- |
-| AC-01 | pass | `cargo build --release` shows 0 warnings. `target/release/kyte --version` prints `kyte 0.3.0` with exit 0; `--help` exits 0; `--bogus` exits 2. Tests: `smoke.rs` `ac01_version_prints_and_exits_0`, `ac01_help_lists_options_and_exits_0` (checks every section 7 option), `ac01_unknown_option_exits_2`, `ac01_missing_value_exits_2`. |
+| AC-01 | pass | `cargo build --release` shows 0 warnings. `target/release/kyte --version` prints `kyte 0.4.0` with exit 0; `--help` exits 0; `--bogus` exits 2. Tests: `smoke.rs` `ac01_version_prints_and_exits_0`, `ac01_help_lists_options_and_exits_0` (checks every section 7 option), `ac01_unknown_option_exits_2`, `ac01_missing_value_exits_2`. |
 | AC-02 | pass | `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` are clean. `cargo test`: 180 passed; the only ignored test is the demo (`ac25_demo_script_writes_cast_frames_and_media`). |
 | AC-03 | pass | e2e `ac03_not_a_tty_exits_2`, `ac03_stdout_not_a_tty_exits_2`, `ac03_directory_exits_2`, `ac03_non_utf8_exits_2_and_file_unchanged` (byte comparison). By hand: `kyte /tmp </dev/null` exits 2 with "kyte: stdin and stdout must be a terminal". Library level: `tests/fileio.rs`. |
 | AC-04 | pass | e2e `ac04_new_file_type_save_quit`: the file is exactly `hello\nworld`, exit 0. |

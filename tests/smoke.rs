@@ -10,7 +10,7 @@ fn kyte() -> Command {
 fn ac01_version_prints_and_exits_0() {
     let out = kyte().arg("--version").output().unwrap();
     assert_eq!(out.status.code(), Some(0));
-    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "kyte 0.3.0");
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "kyte 0.4.0");
 }
 
 #[test]

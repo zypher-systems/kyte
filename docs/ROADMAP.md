@@ -55,9 +55,12 @@ Kyte's pitch is an editor you can't lose work in and don't have to learn.
 - [x] Smart Esc layer: a menu that changes with context, using tree-sitter
 - [x] Reader mode
 
-## Next
+## Released: 0.4.0, working with other tools
 
 - [x] Review changes made by other tools, built on file history
+
+## Next
+
 - [ ] Retention for file history, so logs can't grow without limit
 - [ ] Re-record the demo, which still shows the footer legend (needs `agg`)
 
