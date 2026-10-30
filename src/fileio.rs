@@ -99,6 +99,59 @@ pub fn expand_tilde(text: &str) -> PathBuf {
     }
 }
 
+/// What Tab did to a path being typed.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Completion {
+    /// The text with as much added as every choice shares.
+    pub text: String,
+    /// Names that match, sorted.
+    pub choices: Vec<String>,
+}
+
+/// Completes the last part of a typed path from what's on disk. Hidden files
+/// count only once the name starts with a dot. `None` when nothing matches.
+pub fn complete_path(text: &str) -> Option<Completion> {
+    let (dir_part, stem) = match text.rfind('/') {
+        Some(i) => text.split_at(i + 1),
+        None => ("", text),
+    };
+    let dir = match dir_part {
+        "" => PathBuf::from("."),
+        d => expand_tilde(d),
+    };
+    let mut names: Vec<(String, bool)> = fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let wanted =
+                name.starts_with(stem) && (stem.starts_with('.') || !name.starts_with('.'));
+            let is_dir = fs::metadata(e.path()).is_ok_and(|m| m.is_dir());
+            wanted.then_some((name, is_dir))
+        })
+        .collect();
+    names.sort();
+    let first = &names.first()?.0;
+    let shared = names.iter().fold(first.len(), |n, (name, _)| {
+        first
+            .char_indices()
+            .zip(name.chars())
+            .take_while(|((_, a), b)| a == b)
+            .last()
+            .map_or(0, |((i, c), _)| i + c.len_utf8())
+            .min(n)
+    });
+    let slash = if names.len() == 1 && names[0].1 {
+        "/"
+    } else {
+        ""
+    };
+    Some(Completion {
+        text: format!("{dir_part}{}{slash}", &first[..shared]),
+        choices: names.into_iter().map(|(n, _)| n).collect(),
+    })
+}
+
 /// Absolute form of `path` with its parent directory canonicalized when possible.
 pub fn absolute(path: &Path) -> io::Result<PathBuf> {
     let abs = if path.is_absolute() {

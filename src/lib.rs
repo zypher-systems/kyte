@@ -14,6 +14,7 @@ pub mod input;
 pub mod ops;
 pub mod palette;
 pub mod search;
+pub mod session;
 pub mod swap;
 pub mod term;
 pub mod ui;
@@ -31,7 +32,8 @@ pub use cli::Options;
 
 use app::{App, Mode};
 use buffer::Buffer;
-use swap::{SwapStatus, SwapWriter};
+use session::{Opened, Refused};
+use swap::SwapWriter;
 
 /// How long the event loop waits for input before calling `App::tick`.
 const POLL: Duration = Duration::from_millis(1000);
@@ -74,51 +76,36 @@ fn open_untitled(opts: &Options) -> App {
     }
 }
 
-/// Loads `p`, checks its swap and builds the app; `Err(code)` means exit now.
+/// Opens `p` and builds the app; `Err(code)` means exit now.
 fn open_file(p: &Path, opts: &Options) -> anyhow::Result<Result<App, ExitCode>> {
-    let abs = fileio::absolute(p)?;
-    let loaded = match fileio::load(&abs) {
-        Ok(l) => l,
-        Err(e) => {
-            eprintln!("kyte: {}: {e}", p.display());
-            return Ok(Err(ExitCode::from(2)));
+    match session::open(p, opts.break_lock) {
+        Ok(Opened::Ready {
+            buffer,
+            swap,
+            warning,
+        }) => {
+            let mut app = App::new(buffer, swap, opts);
+            if warning.is_some() {
+                app.message = warning;
+                app.message_is_error = true;
+            }
+            Ok(Ok(app))
         }
-    };
-    let target = fileio::resolve_target(&abs)?;
-    if opts.break_lock {
-        if let Err(e) = swap::break_lock(&target) {
-            eprintln!("kyte: {}: could not break the lock: {e}", p.display());
-            return Ok(Err(ExitCode::from(1)));
-        }
-    }
-    let buffer = Buffer::from_str(&loaded.text, Some(abs));
-    let status = match swap::inspect(&target, loaded.text.as_bytes()) {
-        Ok(s) => s,
-        Err(e) => return Ok(Ok(without_swap(buffer, opts, e))),
-    };
-    match status {
-        SwapStatus::LiveLock { pid } => Ok(Err(live_lock_exit(p, pid))),
-        SwapStatus::None => match SwapWriter::create(&target, buffer.rope()) {
-            Ok(w) => Ok(Ok(App::new(buffer, Some(w), opts))),
-            Err(e) => match swap::live_lock_pid(&e) {
-                Some(pid) => Ok(Err(live_lock_exit(p, pid))),
-                None => Ok(Ok(without_swap(buffer, opts, e))),
-            },
-        },
-        SwapStatus::Recoverable(info) => {
+        Ok(Opened::Recover { buffer, info }) => {
             let mut app = App::new(buffer, None, opts);
             app.mode = Mode::Recover(info);
             Ok(Ok(app))
         }
-        SwapStatus::Stale => {
-            let mut app = App::new(buffer, None, opts);
-            app.mode = Mode::Recover(swap::stale_info(&target));
-            Ok(Ok(app))
+        Ok(Opened::Locked { pid }) => Ok(Err(live_lock_exit(p, pid))),
+        Err(Refused::File(e)) => {
+            eprintln!("kyte: {}: {e}", p.display());
+            Ok(Err(ExitCode::from(2)))
         }
+        Err(Refused::Failed(e)) => Err(e.into()),
     }
 }
 
-/// The file still opens when its swap can't be used, with a warning.
+/// An untitled buffer still opens when its swap can't be made, with a warning.
 fn without_swap(buffer: Buffer, opts: &Options, e: std::io::Error) -> App {
     let mut app = App::new(buffer, None, opts);
     app.message = Some(format!(

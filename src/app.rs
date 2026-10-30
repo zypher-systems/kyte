@@ -13,6 +13,7 @@ use crate::input::{normalize, Input, Key, Motion};
 use crate::ops;
 use crate::palette::PaletteState;
 use crate::search;
+use crate::session::{self, Opened};
 use crate::swap::{self, RecoverInfo, SwapStatus, SwapWriter};
 
 /// How soon after Esc a `[` or `O` counts as the rest of a split key sequence.
@@ -49,7 +50,14 @@ pub enum Prompt {
     GotoLine {
         text: String,
     },
-    ConfirmQuit,
+    /// Unsaved changes stand in the way of `then`.
+    ConfirmLeave {
+        then: After,
+    },
+    /// Asks for a file to open.
+    Open {
+        text: String,
+    },
     /// Asks what to replace.
     ReplaceFind {
         query: String,
@@ -61,17 +69,25 @@ pub enum Prompt {
     },
     /// Stops at each match and asks.
     ReplaceConfirm(ReplaceRun),
-    /// Asks for a file name. `quit_after` quits once the save succeeds.
+    /// Asks for a file name. `then` happens once the save succeeds.
     SaveAs {
         text: String,
-        quit_after: bool,
+        then: After,
     },
-    /// A save that needs a yes first. `quit_after` quits once it succeeds.
+    /// A save that needs a yes first. `then` happens once it succeeds.
     ConfirmSave {
         risk: SaveRisk,
         path: std::path::PathBuf,
-        quit_after: bool,
+        then: After,
     },
+}
+
+/// What a save was for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum After {
+    Stay,
+    Quit,
+    Open(std::path::PathBuf),
 }
 
 /// A replace in progress. It runs from where it started to the end of the
@@ -163,6 +179,7 @@ pub const LEGEND: &[(&str, &str)] = &[
 pub const REPLACE_CONFIRM_TEXT: &str = "Replace this one? y yes, n skip, a all, Esc stop";
 
 pub const CONFIRM_QUIT_TEXT: &str = "Unsaved changes! y saves and quits, n discards, Esc cancels";
+pub const CONFIRM_OPEN_TEXT: &str = "Unsaved changes! y saves first, n discards, Esc cancels";
 
 impl App {
     pub fn new(buffer: Buffer, swap: Option<SwapWriter>, opts: &Options) -> App {
@@ -349,26 +366,24 @@ impl App {
                     self.mode = Mode::Insert;
                 }
             }
-            Mode::Prompt(Prompt::SaveAs { text, quit_after }) => {
-                self.save_as_key(key, text, quit_after)
-            }
-            Mode::Prompt(Prompt::ConfirmQuit) => match key {
+            Mode::Prompt(Prompt::SaveAs { text, then }) => self.save_as_key(key, text, then),
+            Mode::Prompt(Prompt::Open { text }) => self.open_key(key, text),
+            Mode::Prompt(Prompt::ConfirmLeave { then }) => match key {
                 Key::Char('y') => {
                     self.mode = Mode::Insert;
-                    self.start_save(true);
+                    self.start_save(then);
                 }
-                Key::Char('n') => self.discard_and_quit(),
+                Key::Char('n') => {
+                    self.mode = Mode::Insert;
+                    self.after_save(then);
+                }
                 Key::Esc => self.mode = Mode::Insert,
                 _ => {}
             },
-            Mode::Prompt(Prompt::ConfirmSave {
-                risk,
-                path,
-                quit_after,
-            }) => match key {
+            Mode::Prompt(Prompt::ConfirmSave { risk, path, then }) => match key {
                 Key::Char('y') => {
                     self.mode = Mode::Insert;
-                    self.save_after(path, Some(risk), quit_after);
+                    self.save_after(path, Some(risk), then);
                 }
                 Key::Char('n') | Key::Esc => {
                     self.mode = Mode::Insert;
@@ -477,7 +492,8 @@ impl App {
             Key::Ctrl('x') => self.cut(),
             Key::Ctrl('c') => self.copy(),
             Key::Ctrl('v') => self.paste(),
-            Key::Ctrl('s') | Key::Ctrl('o') => self.save(),
+            Key::Ctrl('s') => self.save(),
+            Key::Ctrl('o') => self.open_prompt(),
             Key::Ctrl('q') => self.request_quit(),
             Key::Ctrl('z') => self.undo(),
             Key::Ctrl('y') => self.redo(),
@@ -855,7 +871,8 @@ impl App {
     pub fn run_command(&mut self, cmd: Command) {
         match cmd {
             Command::Save => self.save(),
-            Command::SaveAs => self.open_save_as(false),
+            Command::SaveAs => self.open_save_as(After::Stay),
+            Command::Open => self.open_prompt(),
             Command::Quit => self.request_quit(),
             Command::QuitWithoutSaving => self.discard_and_quit(),
             Command::Undo => self.undo(),
@@ -994,6 +1011,7 @@ impl App {
                 self.incremental(&query, origin);
             }
             Mode::Prompt(Prompt::GotoLine { text: typed })
+            | Mode::Prompt(Prompt::Open { text: typed })
             | Mode::Prompt(Prompt::ReplaceFind { query: typed })
             | Mode::Prompt(Prompt::ReplaceWith { with: typed, .. })
             | Mode::Prompt(Prompt::SaveAs { text: typed, .. }) => {
@@ -1025,49 +1043,172 @@ impl App {
 
     /// Ctrl-S: atomic save, asking first if it would lose something.
     pub fn save(&mut self) {
-        self.start_save(false);
+        self.start_save(After::Stay);
     }
 
     /// Saves to the buffer's file, or asks for a name if it has none.
-    fn start_save(&mut self, quit_after: bool) {
+    fn start_save(&mut self, then: After) {
         match self.buffer.path().map(|p| p.to_path_buf()) {
-            Some(path) => self.save_after(path, None, quit_after),
-            None => self.open_save_as(quit_after),
+            Some(path) => self.save_after(path, None, then),
+            None => self.open_save_as(then),
         }
     }
 
     /// Opens the Save As prompt, starting from the current file name.
-    fn open_save_as(&mut self, quit_after: bool) {
+    fn open_save_as(&mut self, then: After) {
         let text = self
             .buffer
             .path()
             .map(|p| p.display().to_string())
             .unwrap_or_default();
-        self.mode = Mode::Prompt(Prompt::SaveAs { text, quit_after });
+        self.mode = Mode::Prompt(Prompt::SaveAs { text, then });
     }
 
-    fn save_as_key(&mut self, key: Key, mut text: String, quit_after: bool) {
+    fn save_as_key(&mut self, key: Key, mut text: String, then: After) {
         match key {
             Key::Esc => {
                 self.mode = Mode::Insert;
                 self.set_message("Save cancelled");
                 return;
             }
-            Key::Enter => match self.submit_save_as(&text, quit_after) {
+            Key::Enter => match self.submit_save_as(&text, then.clone()) {
                 Ok(()) => return,
                 Err(e) => self.set_error(e),
             },
+            Key::Tab => self.complete_into(&mut text),
             Key::Char(c) => text.push(c),
             Key::Backspace => {
                 text.pop();
             }
             _ => {}
         }
-        self.mode = Mode::Prompt(Prompt::SaveAs { text, quit_after });
+        self.mode = Mode::Prompt(Prompt::SaveAs { text, then });
+    }
+
+    /// Tab in a file prompt: completes the path as far as it can.
+    fn complete_into(&mut self, text: &mut String) {
+        match fileio::complete_path(text) {
+            Some(c) => {
+                *text = c.text;
+                if c.choices.len() > 1 {
+                    self.set_message(c.choices.join("  "));
+                }
+            }
+            None => self.set_error("No match"),
+        }
+    }
+
+    /// Opens the file prompt, starting in the current file's directory.
+    fn open_prompt(&mut self) {
+        let text = self
+            .buffer
+            .path()
+            .and_then(|p| p.parent())
+            .map(|d| format!("{}/", d.display()))
+            .unwrap_or_default();
+        self.mode = Mode::Prompt(Prompt::Open { text });
+    }
+
+    fn open_key(&mut self, key: Key, mut text: String) {
+        match key {
+            Key::Esc => {
+                self.mode = Mode::Insert;
+                return;
+            }
+            Key::Enter => match self.submit_open(&text) {
+                Ok(()) => return,
+                Err(e) => self.set_error(e),
+            },
+            Key::Tab => self.complete_into(&mut text),
+            Key::Char(c) => text.push(c),
+            Key::Backspace => {
+                text.pop();
+            }
+            _ => {}
+        }
+        self.mode = Mode::Prompt(Prompt::Open { text });
+    }
+
+    /// Checks the typed file and opens it; `Err` keeps the prompt open.
+    fn submit_open(&mut self, text: &str) -> Result<(), String> {
+        if text.is_empty() {
+            return Err("Enter a file name".to_string());
+        }
+        let path = fileio::absolute(&fileio::expand_tilde(text)).map_err(|e| e.to_string())?;
+        let target = fileio::resolve_target(&path).map_err(|e| e.to_string())?;
+        if Some(&target) != self.swap_target.as_ref() {
+            session::check(&path)?;
+        }
+        self.mode = Mode::Insert;
+        if self.buffer.is_dirty() {
+            self.mode = Mode::Prompt(Prompt::ConfirmLeave {
+                then: After::Open(path),
+            });
+        } else {
+            self.switch_to(&path);
+        }
+        Ok(())
+    }
+
+    /// Leaves the current buffer for `path`. Anything unsaved in it is gone.
+    fn switch_to(&mut self, path: &std::path::Path) {
+        let same =
+            fileio::resolve_target(path).ok() == self.swap_target && self.swap_target.is_some();
+        if same {
+            // Its swap holds what was just discarded.
+            if let Some(old) = self.swap.take() {
+                let _ = old.remove();
+            }
+        }
+        let opened = match session::open(path, false) {
+            Ok(o) => o,
+            Err(e) => {
+                self.set_error(format!("Can't open {}: {e}", path.display()));
+                return;
+            }
+        };
+        let (buffer, swap, recover, warning) = match opened {
+            Opened::Ready {
+                buffer,
+                swap,
+                warning,
+            } => (buffer, swap, None, warning),
+            Opened::Recover { buffer, info } => (buffer, None, Some(info), None),
+            Opened::Locked { pid } => {
+                self.set_error(format!("Open in another kyte (PID {pid})"));
+                return;
+            }
+        };
+        if let Some(old) = self.swap.take() {
+            let _ = old.remove();
+        }
+        self.swap_target = buffer.path().and_then(|p| fileio::resolve_target(p).ok());
+        self.disk = Some(DiskState::of_rope(buffer.rope()));
+        self.buffer = buffer;
+        self.swap = swap;
+        self.swap_failed = false;
+        self.scroll_top = 0;
+        self.scroll_left = 0;
+        self.mode = recover.map_or(Mode::Insert, Mode::Recover);
+        if let Some(w) = warning {
+            self.set_error(w);
+        } else if self.mode == Mode::Insert {
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            self.set_message(format!("Opened {name}"));
+        }
+    }
+
+    /// Does what a save, or a decision to discard, was for.
+    fn after_save(&mut self, then: After) {
+        match then {
+            After::Stay => {}
+            After::Quit => self.quit = true,
+            After::Open(path) => self.switch_to(&path),
+        }
     }
 
     /// Checks the typed name and starts the save; `Err` keeps the prompt open.
-    fn submit_save_as(&mut self, text: &str, quit_after: bool) -> Result<(), String> {
+    fn submit_save_as(&mut self, text: &str, then: After) -> Result<(), String> {
         if text.is_empty() {
             return Err("Enter a file name".to_string());
         }
@@ -1079,7 +1220,7 @@ impl App {
         let target = fileio::resolve_target(&path).map_err(|e| e.to_string())?;
         if Some(&target) == self.swap_target.as_ref() {
             self.mode = Mode::Insert;
-            self.save_after(path, None, quit_after);
+            self.save_after(path, None, then);
             return Ok(());
         }
         if let Ok(SwapStatus::LiveLock { pid }) = swap::inspect(&target, b"") {
@@ -1090,10 +1231,10 @@ impl App {
             self.mode = Mode::Prompt(Prompt::ConfirmSave {
                 risk: SaveRisk::Exists,
                 path,
-                quit_after,
+                then,
             });
         } else {
-            self.write_file(&path, quit_after);
+            self.write_file(&path, then);
         }
         Ok(())
     }
@@ -1112,25 +1253,18 @@ impl App {
     }
 
     /// Asks the next question after `passed`, or writes the file.
-    fn save_after(&mut self, path: std::path::PathBuf, passed: Option<SaveRisk>, quit_after: bool) {
+    fn save_after(&mut self, path: std::path::PathBuf, passed: Option<SaveRisk>, then: After) {
         match self.next_risk(&path, passed) {
-            Some(risk) => {
-                self.mode = Mode::Prompt(Prompt::ConfirmSave {
-                    risk,
-                    path,
-                    quit_after,
-                })
-            }
-            None => self.write_file(&path, quit_after),
+            Some(risk) => self.mode = Mode::Prompt(Prompt::ConfirmSave { risk, path, then }),
+            None => self.write_file(&path, then),
         }
     }
 
-    fn write_file(&mut self, path: &std::path::Path, quit_after: bool) {
+    fn write_file(&mut self, path: &std::path::Path, then: After) {
         let text = self.buffer.to_string();
         match fileio::save_atomic(path, &text) {
             Ok(()) => {
                 self.disk = Some(DiskState::of_bytes(text.as_bytes()));
-                self.quit = quit_after;
                 if self.buffer.path() != Some(path) {
                     self.buffer.set_path(path.to_path_buf());
                     self.swap_target = fileio::resolve_target(path).ok();
@@ -1151,6 +1285,7 @@ impl App {
                         Err(e) => self.set_error(format!("Saved {n} lines, but no swap: {e}")),
                     }
                 }
+                self.after_save(then);
             }
             Err(e) => self.set_error(format!(
                 "Save failed: {e}. Your changes are safe; Save as in the palette writes them elsewhere"
@@ -1161,13 +1296,13 @@ impl App {
     /// Ctrl-Q: quit now when clean, otherwise ask.
     pub fn request_quit(&mut self) {
         if self.buffer.is_dirty() {
-            self.mode = Mode::Prompt(Prompt::ConfirmQuit);
+            self.mode = Mode::Prompt(Prompt::ConfirmLeave { then: After::Quit });
         } else {
             self.quit = true;
         }
     }
 
-    /// Quits discarding changes (ConfirmQuit `y`, "Quit without saving").
+    /// Quits discarding changes ("Quit without saving").
     pub fn discard_and_quit(&mut self) {
         self.quit = true;
     }
@@ -1183,7 +1318,8 @@ impl App {
             Mode::Prompt(Prompt::ReplaceFind { .. })
             | Mode::Prompt(Prompt::ReplaceWith { .. })
             | Mode::Prompt(Prompt::ReplaceConfirm(_)) => "REPLACE",
-            Mode::Prompt(Prompt::ConfirmQuit) => "QUIT?",
+            Mode::Prompt(Prompt::ConfirmLeave { .. }) => "SAVE?",
+            Mode::Prompt(Prompt::Open { .. }) => "OPEN",
             Mode::Prompt(Prompt::SaveAs { .. }) => "SAVE AS",
             Mode::Prompt(Prompt::ConfirmSave { .. }) => "SAVE?",
             Mode::Help => "HELP",
@@ -1479,14 +1615,17 @@ mod tests {
         let mut a = app("");
         a.handle_key(Key::Char('x'), t).unwrap();
         a.handle_key(Key::Ctrl('q'), t).unwrap();
-        assert_eq!(a.mode, Mode::Prompt(Prompt::ConfirmQuit));
+        assert_eq!(
+            a.mode,
+            Mode::Prompt(Prompt::ConfirmLeave { then: After::Quit })
+        );
         a.handle_key(Key::Esc, t).unwrap();
         assert_eq!(a.mode, Mode::Insert);
         assert!(!a.quit);
         a.handle_key(Key::Ctrl('q'), t).unwrap();
         for ignored in [Key::Ctrl('q'), Key::Char('z'), Key::Enter] {
             a.handle_key(ignored, t).unwrap();
-            assert_eq!(a.mode, Mode::Prompt(Prompt::ConfirmQuit));
+            assert_eq!(a.mode_label(), "SAVE?");
         }
         assert!(!a.quit);
         a.handle_key(Key::Char('n'), t).unwrap();
@@ -1503,7 +1642,7 @@ mod tests {
         assert!(matches!(
             a.mode,
             Mode::Prompt(Prompt::SaveAs {
-                quit_after: true,
+                then: After::Quit,
                 ..
             })
         ));

@@ -5,6 +5,7 @@
 pub enum Command {
     Save,
     SaveAs,
+    Open,
     Quit,
     QuitWithoutSaving,
     Undo,
@@ -24,6 +25,7 @@ pub enum Command {
 pub const REGISTRY: &[Command] = &[
     Command::Save,
     Command::SaveAs,
+    Command::Open,
     Command::Quit,
     Command::QuitWithoutSaving,
     Command::Undo,
@@ -44,6 +46,7 @@ impl Command {
         match self {
             Command::Save => "Save",
             Command::SaveAs => "Save as",
+            Command::Open => "Open file",
             Command::Quit => "Quit",
             Command::QuitWithoutSaving => "Quit without saving",
             Command::Undo => "Undo",
@@ -65,6 +68,7 @@ impl Command {
         match self {
             Command::Save => "Ctrl-S",
             Command::SaveAs => "",
+            Command::Open => "Ctrl-O",
             Command::Quit => "Ctrl-Q",
             Command::QuitWithoutSaving => "",
             Command::Undo => "Ctrl-Z",
@@ -103,7 +107,7 @@ pub const KEY_HELP: &[(&str, &str)] = &[
     ("Ctrl-Home, Ctrl-End", "start / end of file"),
     ("Shift + any move, Ctrl-A", "select, select all"),
     ("Ctrl-X, Ctrl-C, Ctrl-V", "cut, copy, paste"),
-    ("Ctrl-S (Ctrl-O)", "save"),
+    ("Ctrl-S, Ctrl-O", "save, open a file"),
     ("Ctrl-Q", "quit (asks if unsaved)"),
     ("Ctrl-Z, Ctrl-Y", "undo, redo"),
     ("Ctrl-F, Ctrl-R", "search, replace"),
@@ -121,13 +125,14 @@ mod tests {
 
     #[test]
     fn every_command_has_a_label() {
-        assert_eq!(REGISTRY.len(), 15);
+        assert_eq!(REGISTRY.len(), 16);
         let labels: Vec<&str> = REGISTRY.iter().map(|c| c.label()).collect();
         assert_eq!(
             labels,
             vec![
                 "Save",
                 "Save as",
+                "Open file",
                 "Quit",
                 "Quit without saving",
                 "Undo",

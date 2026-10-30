@@ -4,7 +4,9 @@ use std::fs;
 use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-use kyte::fileio::{disk_state, is_read_only, load, save_atomic, state_dir_from, OpenError};
+use kyte::fileio::{
+    complete_path, disk_state, is_read_only, load, save_atomic, state_dir_from, OpenError,
+};
 use rustix::fs::{mknodat, setxattr, FileType, Mode, XattrFlags, CWD};
 
 fn names(dir: &Path) -> Vec<String> {
@@ -212,6 +214,45 @@ fn read_only_detection() {
         return;
     }
     assert!(is_read_only(&p));
+}
+
+#[test]
+fn completion_extends_to_what_the_choices_share() {
+    let d = tempfile::tempdir().unwrap();
+    fs::write(d.path().join("notes-one.txt"), "").unwrap();
+    fs::write(d.path().join("notes-two.txt"), "").unwrap();
+    fs::write(d.path().join(".hidden"), "").unwrap();
+    fs::create_dir(d.path().join("src")).unwrap();
+    let base = format!("{}/", d.path().display());
+    let c = complete_path(&format!("{base}no")).unwrap();
+    assert_eq!(c.text, format!("{base}notes-"));
+    assert_eq!(c.choices, vec!["notes-one.txt", "notes-two.txt"]);
+    let c = complete_path(&format!("{base}notes-o")).unwrap();
+    assert_eq!(c.text, format!("{base}notes-one.txt"));
+    assert_eq!(c.choices.len(), 1);
+    // a directory gets its slash, ready for the next part
+    assert_eq!(
+        complete_path(&format!("{base}s")).unwrap().text,
+        format!("{base}src/")
+    );
+    // hidden files wait for a dot
+    assert_eq!(complete_path(&base).unwrap().choices.len(), 3);
+    assert_eq!(
+        complete_path(&format!("{base}.")).unwrap().text,
+        format!("{base}.hidden")
+    );
+    assert_eq!(complete_path(&format!("{base}zzz")), None);
+    assert_eq!(complete_path("/no/such/dir/x"), None);
+}
+
+#[test]
+fn completion_keeps_multi_byte_names_whole() {
+    let d = tempfile::tempdir().unwrap();
+    fs::write(d.path().join("世界a"), "").unwrap();
+    fs::write(d.path().join("世界b"), "").unwrap();
+    let base = format!("{}/", d.path().display());
+    let c = complete_path(&format!("{base}世")).unwrap();
+    assert_eq!(c.text, format!("{base}世界"));
 }
 
 #[test]

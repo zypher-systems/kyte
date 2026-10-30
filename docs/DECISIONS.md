@@ -12,6 +12,16 @@ These replace the matching parts of `ARCHITECTURE`. `docs/ROADMAP.md` holds the 
 - License: MIT. This settles section 16 and the section 4 note.
 - Kyte isn't tied to any one OS. It's meant to be open source for everyone.
 
+## 0.2.0 opening files
+
+- Ctrl-O opens a file, so it no longer saves. Kyte holds one buffer at a time; opening a file replaces it, and multiple buffers stay on the later list. The clipboard survives the switch, which makes it the way to move text between files.
+- Startup and Ctrl-O share `session.rs`, so a file opened either way gets the same swap checks, lock and recovery.
+- `session::check` runs when Enter is pressed and changes nothing, so a file that can't be opened leaves the buffer alone and the prompt open. Only then does Kyte ask about unsaved changes.
+- The unsaved prompt now says what it's for. `After` carries what a save was for through Save As and the save questions, so `y` while opening a file still reaches the file even if the buffer has no name yet.
+- Reopening the current file after pressing `n` removes its swap first. Otherwise its own discarded edits would be offered back for recovery.
+- If the opened file has a crashed session, `q` in the recovery modal closes Kyte. The old buffer has already been left, and the modal does say quit.
+- Tab completes from what's on disk, stops at what the choices share, and lists them on the message line. Hidden files need a leading dot.
+
 ## 0.2.0 search and replace
 
 - Search uses smart case instead of a toggle: no capitals matches any case, and any capital is exact. This needs no extra key. It replaces the "case-sensitive, smart-case is out" rule in T7.

@@ -7,7 +7,9 @@ use super::theme::Theme;
 use ratatui::layout::Rect as R;
 use ratatui::widgets::{Block, Borders, Clear, Widget};
 
-use crate::app::{App, Mode, Prompt, CONFIRM_QUIT_TEXT, LEGEND, REPLACE_CONFIRM_TEXT};
+use crate::app::{
+    After, App, Mode, Prompt, CONFIRM_OPEN_TEXT, CONFIRM_QUIT_TEXT, LEGEND, REPLACE_CONFIRM_TEXT,
+};
 use crate::command::KEY_HELP;
 use crate::palette::VISIBLE_ROWS;
 
@@ -59,7 +61,11 @@ pub fn message_line(app: &App, area: Rect, cells: &mut Cells, theme: &Theme) -> 
         return None;
     }
     let text = match &app.mode {
-        Mode::Prompt(Prompt::ConfirmQuit) => CONFIRM_QUIT_TEXT.to_string(),
+        Mode::Prompt(Prompt::ConfirmLeave { then: After::Quit }) => CONFIRM_QUIT_TEXT.to_string(),
+        Mode::Prompt(Prompt::ConfirmLeave { .. }) => CONFIRM_OPEN_TEXT.to_string(),
+        Mode::Prompt(Prompt::Open { text }) => {
+            return input_prompt(app, "Open", text, area, cells, theme)
+        }
         Mode::Prompt(Prompt::ConfirmSave { risk, .. }) => risk.question().to_string(),
         Mode::Prompt(Prompt::ReplaceConfirm(_)) => REPLACE_CONFIRM_TEXT.to_string(),
         Mode::Prompt(Prompt::ReplaceFind { query }) => {

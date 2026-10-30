@@ -81,7 +81,8 @@ Environment variables: `KYTE_STATE_DIR` (where swap files go; overrides the defa
 | Shift + any movement key | Select text. Typing, Backspace or Delete then replace or remove it; Esc clears it |
 | Ctrl-A | Select all |
 | Ctrl-X, Ctrl-C, Ctrl-V | Cut, copy, paste. With nothing selected, cut and copy take the whole line, and a whole line pastes above the current one |
-| Ctrl-S (also Ctrl-O) | Save. With no file name, Kyte asks for one |
+| Ctrl-S | Save. With no file name, Kyte asks for one |
+| Ctrl-O | Open another file |
 | Ctrl-Q | Quit. With unsaved changes, Kyte asks first: `y` saves and quits, `n` discards, Esc cancels |
 | Ctrl-Z, Ctrl-Y | Undo, redo |
 | Ctrl-F | Search |
@@ -125,9 +126,11 @@ Under tmux, set `tmux set -g escape-time 10`. tmux's default of 500 ms delays ev
 
 Esc Esc (or Ctrl-P) opens a fuzzy-filtered list. Type to filter, Up and Down to select, Enter to run, Esc to close without running anything.
 
-Commands: Save, Save as, Quit, Quit without saving, Undo, Redo, Cut, Copy, Paste, Select all, Find, Replace, Go to line, Toggle line numbers, Show key help.
+Commands: Save, Save as, Open file, Quit, Quit without saving, Undo, Redo, Cut, Copy, Paste, Select all, Find, Replace, Go to line, Toggle line numbers, Show key help.
 
-**Save as** asks for a file name, starting from the current one; `~/` means your home directory. It asks before overwriting a file, and refuses a file another Kyte has open. The buffer then belongs to the new file, and the old file stays as it was.
+**Save as** asks for a file name, starting from the current one; `~/` means your home directory, and Tab completes the path. It asks before overwriting a file, and refuses a file another Kyte has open. The buffer then belongs to the new file, and the old file stays as it was.
+
+**Open file** (Ctrl-O) asks for a path, starting in the current file's directory. Tab completes it. A path that doesn't exist yet opens as a new file. Kyte holds one file at a time, so opening another replaces the current one, and if you have unsaved changes it asks first: `y` saves them, `n` discards them, Esc cancels. If the new file left a crashed session behind, Kyte offers to recover it; quitting that offer closes Kyte.
 
 **Go to line** asks for a 1-based line number. Numbers past the end go to the last line, and anything that is not a number shows an error. **Show key help** shows the key table; Esc closes it.
 
