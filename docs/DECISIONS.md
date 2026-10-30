@@ -62,6 +62,10 @@ These replace the swap format and flows in `ARCHITECTURE` sections 6 and 8.
 - ASCII takes a fast path: an ASCII byte followed by another ASCII byte is its own grapheme unless it's the CR of a CRLF, because everything that joins graphemes is non-ASCII. Runs of printable ASCII are skipped in bulk when finding a column. Property tests check all of this against full segmentation.
 - Measured on a release build, per keystroke at the end of a 5 MB single line: ASCII went from about 400 ms to 6 ms. Text that's mostly non-ASCII still goes through segmentation, and costs more; `README.md` gives the current figures.
 
+## 0.1.1 release number
+
+The versioning rule makes any release with a new feature a MINOR bump, and 0.1.1 adds Save As, untitled recovery and `--break-lock`. It was released as a PATCH by decision on Oct 30, 2026, because those features exist to fix lost-work bugs. It's an exception, not a change to the rule.
+
 ## Hosting and environment
 
 - Toolchain: rustc/cargo 1.99.1 (stable, 2026-10-13), edition 2021.

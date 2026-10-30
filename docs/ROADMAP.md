@@ -4,9 +4,9 @@ Kyte is a terminal text editor that opens ready to type. It starts in edit mode,
 
 Version numbers below are targets. The version changes only when a release is decided.
 
-## Now: 0.1.1, trust
+## Released: 0.1.1, trust
 
-Fix every way the current build can lose or damage work. Each fix gets a regression test.
+Fixed every known way the build could lose or damage work. Each fix has a regression test.
 
 ### Work or data lost
 

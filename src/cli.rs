@@ -49,7 +49,7 @@ impl fmt::Display for CliError {
     }
 }
 
-/// `kyte 0.1.0`, taken from the crate version.
+/// `kyte 0.1.1`, taken from the crate version.
 pub fn version() -> String {
     format!("kyte {}", env!("CARGO_PKG_VERSION"))
 }
@@ -177,7 +177,7 @@ mod tests {
         assert_eq!(p(&["--help"]), Err(CliError::Help));
         assert_eq!(p(&["-V"]), Err(CliError::Version));
         assert_eq!(p(&["--version"]), Err(CliError::Version));
-        assert_eq!(version(), "kyte 0.1.0");
+        assert_eq!(version(), "kyte 0.1.1");
     }
 
     #[test]
