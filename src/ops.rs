@@ -94,11 +94,14 @@ pub fn line_range(rope: &Rope, at: usize) -> Range<usize> {
     let has_newline = end > start && rope.char(end - 1) == '\n';
     if !has_newline && l > 0 {
         start -= 1;
+        if start > 0 && rope.char(start - 1) == '\r' {
+            start -= 1;
+        }
     }
     start..end
 }
 
-/// End of the line at `at`, before its newline (for `k`).
+/// End of the line at `at`, before its LF or CRLF (for `k`).
 pub fn eol(rope: &Rope, at: usize) -> usize {
     let len = rope.len_chars();
     let l = rope.char_to_line(at.min(len));
@@ -107,6 +110,9 @@ pub fn eol(rope: &Rope, at: usize) -> usize {
     let mut n = line.len_chars();
     if n > 0 && line.char(n - 1) == '\n' {
         n -= 1;
+        if n > 0 && line.char(n - 1) == '\r' {
+            n -= 1;
+        }
     }
     start + n
 }
@@ -118,7 +124,8 @@ pub fn kill_range(rope: &Rope, at: usize) -> Range<usize> {
     if at < e {
         at..e
     } else if at < rope.len_chars() {
-        at..at + 1
+        let crlf = rope.char(at) == '\r' && rope.get_char(at + 1) == Some('\n');
+        at..at + if crlf { 2 } else { 1 }
     } else {
         at..at
     }
@@ -192,6 +199,23 @@ mod tests {
 
     fn r(s: &str) -> Rope {
         Rope::from_str(s)
+    }
+
+    #[test]
+    fn crlf_is_kept_whole_by_the_operators() {
+        // k stops before the line ending, then joins by removing all of it
+        let x = r("ab\r\ncd\r\n");
+        assert_eq!(eol(&x, 0), 2);
+        assert_eq!(kill_range(&x, 0), 0..2);
+        assert_eq!(kill_range(&x, 2), 2..4);
+        // d takes the line with its ending
+        assert_eq!(line_range(&x, 0), 0..4);
+        // on a last line with no ending, the previous line's ending goes
+        let y = r("ab\r\ncd");
+        assert_eq!(line_range(&y, 5), 2..6);
+        // w treats the ending as one piece of whitespace
+        let z = r("ab\r\n  cd");
+        assert_eq!(word_end(&z, 2), 6);
     }
 
     fn del(s: &str, range: Range<usize>) -> String {

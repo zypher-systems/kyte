@@ -1598,6 +1598,97 @@ fn break_lock_opens_a_file_held_by_another_kyte() {
     b.kill9();
 }
 
+// ---------------------------------------------------------------- line endings
+
+#[test]
+fn crlf_file_keeps_its_line_endings() {
+    let env = Env::new();
+    let f = env.write("dos.txt", "one\r\ntwo\r\n");
+    let mut p = env.open(&f);
+    wait_status(&p, "CRLF");
+    assert!(!p.screen().contains('\u{240d}'), "no \\r on screen");
+    p.send_keys(&["End"]);
+    wait_status(&p, "Ln 1, Col 4");
+    p.send_str("X");
+    p.send_keys(&["Enter"]);
+    p.send_str("Y");
+    wait_status(&p, "Ln 2, Col 2");
+    save_and_wait(&mut p);
+    quit_clean(&mut p);
+    assert_eq!(fs::read(&f).unwrap(), b"oneX\r\nY\r\ntwo\r\n");
+}
+
+#[test]
+fn paste_into_a_crlf_file_uses_its_line_ending() {
+    let env = Env::new();
+    let f = env.write("dos.txt", "one\r\n");
+    let mut p = env.open(&f);
+    p.paste("a\rb\r");
+    p.wait_for("2 │ b", TIMEOUT);
+    save_and_wait(&mut p);
+    quit_clean(&mut p);
+    assert_eq!(fs::read(&f).unwrap(), b"a\r\nb\r\none\r\n");
+}
+
+#[test]
+fn crlf_operators_and_backspace_keep_the_ending_whole() {
+    assert_eq!(
+        crlf_case("ab\r\ncd\r\n", &["Esc", "k"]),
+        b"\r\ncd\r\n",
+        "k stops before the ending"
+    );
+    assert_eq!(
+        crlf_case("ab\r\ncd\r\n", &["Down", "BS"]),
+        b"abcd\r\n",
+        "Backspace joins"
+    );
+    assert_eq!(
+        crlf_case("ab\r\ncd\r\n", &["End", "Del"]),
+        b"abcd\r\n",
+        "Delete joins"
+    );
+    assert_eq!(
+        crlf_case("ab\r\ncd", &["Down", "Esc", "d"]),
+        b"ab",
+        "d on a last line takes the previous ending"
+    );
+}
+
+fn crlf_case(text: &str, keys: &[&str]) -> Vec<u8> {
+    let env = Env::new();
+    let f = env.write("dos.txt", text);
+    let mut p = env.open(&f);
+    for k in keys {
+        match *k {
+            "k" | "d" => {
+                p.send_str(k);
+                wait_status(&p, "[+]");
+            }
+            "Esc" => open_overlay(&mut p),
+            "BS" => {
+                p.send_keys(&["Backspace"]);
+                wait_status(&p, "[+]");
+            }
+            "Del" => {
+                p.send_keys(&["Delete"]);
+                wait_status(&p, "[+]");
+            }
+            "Down" => {
+                p.send_keys(&["Down"]);
+                wait_status(&p, "Ln 2");
+            }
+            "End" => {
+                p.send_keys(&["End"]);
+                wait_status(&p, "Col 3");
+            }
+            other => panic!("{other}"),
+        }
+    }
+    save_and_wait(&mut p);
+    quit_clean(&mut p);
+    fs::read(&f).unwrap()
+}
+
 // ---------------------------------------------------------------- saving safely
 
 #[test]

@@ -89,6 +89,19 @@ pub struct Buffer {
     undo: Vec<Group>,
     redo: Vec<Group>,
     pending_edits: Vec<Edit>,
+    /// What Enter inserts: the line ending most of the file uses.
+    eol: &'static str,
+}
+
+/// The line ending most of `text` uses (LF on a tie).
+fn dominant_eol(text: &str) -> &'static str {
+    let crlf = text.matches("\r\n").count();
+    let lf = text.matches('\n').count() - crlf;
+    if crlf > lf {
+        "\r\n"
+    } else {
+        "\n"
+    }
 }
 
 impl Buffer {
@@ -103,7 +116,18 @@ impl Buffer {
             undo: Vec::new(),
             redo: Vec::new(),
             pending_edits: Vec::new(),
+            eol: dominant_eol(text),
         }
+    }
+
+    /// The line ending new lines get.
+    pub fn eol(&self) -> &'static str {
+        self.eol
+    }
+
+    /// Enter: inserts the file's line ending.
+    pub fn insert_newline(&mut self) {
+        self.insert_str(self.eol, GroupKind::Typing);
     }
 
     #[allow(clippy::inherent_to_string)]
@@ -176,13 +200,34 @@ impl Buffer {
         (line + 1, col + 1)
     }
 
-    /// Text of line `l` without its trailing `\n` (a `\r` stays an ordinary character).
+    /// Text of line `l` without its line ending, LF or CRLF. A `\r` anywhere
+    /// else stays an ordinary character.
     pub fn line_text(&self, l: usize) -> String {
         let mut s = self.rope.line(l).to_string();
         if s.ends_with('\n') {
             s.pop();
+            if s.ends_with('\r') {
+                s.pop();
+            }
         }
         s
+    }
+
+    /// Whether char index `at` is the `\n` of a CRLF.
+    fn inside_crlf(&self, at: usize) -> bool {
+        at > 0
+            && at < self.rope.len_chars()
+            && self.rope.char(at) == '\n'
+            && self.rope.char(at - 1) == '\r'
+    }
+
+    /// `at`, moved off the middle of a CRLF.
+    fn outside_crlf(&self, at: usize) -> usize {
+        if self.inside_crlf(at) {
+            at - 1
+        } else {
+            at
+        }
     }
 
     pub fn line_start(&self, l: usize) -> usize {
@@ -246,7 +291,7 @@ impl Buffer {
     pub fn apply_with_cursor(&mut self, edit: Edit, kind: GroupKind, cursor_after: usize) {
         let before = self.cursor;
         self.raw_apply(&edit);
-        self.cursor = cursor_after.min(self.rope.len_chars());
+        self.cursor = self.outside_crlf(cursor_after.min(self.rope.len_chars()));
         self.dirty = true;
         self.redo.clear();
         self.pending_edits.push(edit.clone());
@@ -324,7 +369,7 @@ impl Buffer {
             self.raw_apply(&inv);
             self.pending_edits.push(inv);
         }
-        self.cursor = g.cursor_before.min(self.rope.len_chars());
+        self.cursor = self.outside_crlf(g.cursor_before.min(self.rope.len_chars()));
         self.want_col = self.cursor_display_col();
         self.dirty = true;
         self.redo.push(g);
@@ -339,7 +384,7 @@ impl Buffer {
             self.raw_apply(e);
             self.pending_edits.push(e.clone());
         }
-        self.cursor = g.cursor_after.min(self.rope.len_chars());
+        self.cursor = self.outside_crlf(g.cursor_after.min(self.rope.len_chars()));
         self.want_col = self.cursor_display_col();
         self.dirty = true;
         self.close_group();
@@ -358,7 +403,7 @@ impl Buffer {
 
     // ----- motion -----
 
-    /// Previous grapheme boundary before `at` (crosses a newline as one step).
+    /// Previous grapheme boundary before `at` (crosses a line ending as one step).
     pub fn prev_boundary(&self, at: usize) -> usize {
         if at == 0 {
             return 0;
@@ -366,7 +411,7 @@ impl Buffer {
         let line = self.rope.char_to_line(at);
         let start = self.line_start(line);
         if at == start {
-            return at - 1;
+            return self.outside_crlf(at - 1);
         }
         let text = self.line_text(line);
         let off = at - start;
@@ -381,7 +426,7 @@ impl Buffer {
         start + best
     }
 
-    /// Next grapheme boundary after `at` (crosses a newline as one step).
+    /// Next grapheme boundary after `at` (crosses a line ending as one step).
     pub fn next_boundary(&self, at: usize) -> usize {
         let len = self.rope.len_chars();
         if at >= len {
@@ -393,7 +438,8 @@ impl Buffer {
         let off = at - start;
         let line_len = text.chars().count();
         if off >= line_len {
-            return (at + 1).min(len);
+            let crlf = self.inside_crlf(at + 1);
+            return (at + if crlf { 2 } else { 1 }).min(len);
         }
         for (o, g) in graphemes_with_char_offsets(&text) {
             let end = o + g.chars().count();
@@ -529,6 +575,81 @@ mod tests {
         let x = b("a\rb\nc");
         assert_eq!(x.line_count(), 2);
         assert_eq!(x.line_text(0), "a\rb");
+    }
+
+    #[test]
+    fn dominant_line_ending_decides_what_enter_inserts() {
+        assert_eq!(b("").eol(), "\n");
+        assert_eq!(b("a\nb\n").eol(), "\n");
+        assert_eq!(b("a\r\nb\r\n").eol(), "\r\n");
+        assert_eq!(b("a\r\nb\r\nc\n").eol(), "\r\n");
+        assert_eq!(b("a\r\nb\n").eol(), "\n", "a tie goes to LF");
+        let mut x = b("one\r\n");
+        x.move_end();
+        x.insert_newline();
+        assert_eq!(x.to_string(), "one\r\n\r\n");
+        assert_eq!(x.line_col(), (2, 1));
+    }
+
+    #[test]
+    fn crlf_is_one_line_ending_for_every_motion() {
+        let mut x = b("ab\r\ncd\r\n");
+        assert_eq!(x.line_text(0), "ab");
+        x.move_end();
+        assert_eq!(x.cursor(), 2);
+        assert_eq!(x.line_col(), (1, 3));
+        x.move_right();
+        assert_eq!(x.cursor(), 4, "right steps over the whole line ending");
+        assert_eq!(x.line_col(), (2, 1));
+        x.move_left();
+        assert_eq!(x.cursor(), 2, "left does too");
+        x.move_down();
+        x.move_end();
+        assert_eq!(x.cursor(), 6);
+    }
+
+    #[test]
+    fn crlf_is_one_character_for_backspace_and_delete() {
+        let mut x = b("ab\r\ncd\r\n");
+        x.move_down();
+        x.backspace();
+        assert_eq!(x.to_string(), "abcd\r\n");
+        assert!(x.undo());
+        assert_eq!(x.to_string(), "ab\r\ncd\r\n");
+        let mut y = b("ab\r\ncd\r\n");
+        y.move_end();
+        y.delete_forward();
+        assert_eq!(y.to_string(), "abcd\r\n");
+    }
+
+    #[test]
+    fn typing_at_a_crlf_line_end_stays_before_the_ending() {
+        let mut x = b("one\r\ntwo\r\n");
+        x.move_end();
+        typed(&mut x, "X");
+        x.insert_newline();
+        typed(&mut x, "Y");
+        assert_eq!(x.to_string(), "oneX\r\nY\r\ntwo\r\n");
+    }
+
+    #[test]
+    fn deleting_between_cr_and_lf_never_strands_the_cursor_inside_a_crlf() {
+        let mut x = b("a\rb\nc");
+        x.move_to(2);
+        x.delete_forward();
+        assert_eq!(x.to_string(), "a\r\nc");
+        assert_eq!(x.cursor(), 1);
+        assert!(x.undo());
+        assert!(x.redo());
+        assert_eq!(x.cursor(), 1);
+    }
+
+    #[test]
+    fn lone_cr_stays_visible_text() {
+        let mut x = b("a\rb\n");
+        assert_eq!(x.line_text(0), "a\rb");
+        x.move_end();
+        assert_eq!(x.cursor(), 3);
     }
 
     #[test]

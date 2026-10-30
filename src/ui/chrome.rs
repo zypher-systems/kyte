@@ -29,7 +29,12 @@ pub fn status_bar(app: &App, area: Rect, cells: &mut Cells, theme: &Theme) {
         .unwrap_or_else(|| "Untitled".to_string());
     let dirty = if app.buffer.is_dirty() { " [+]" } else { "" };
     let (l, c) = app.buffer.line_col();
-    let rest = format!("│ {name}{dirty} │ Ln {l}, Col {c}");
+    let eol = if app.buffer.eol() == "\r\n" {
+        " │ CRLF"
+    } else {
+        ""
+    };
+    let rest = format!("│ {name}{dirty} │ Ln {l}, Col {c}{eol}");
     let x = mode.chars().count();
     if x < w {
         cells.set_stringn(area.x + x as u16, area.y, rest, w - x, theme.status);

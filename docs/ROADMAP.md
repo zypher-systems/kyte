@@ -20,7 +20,7 @@ Fix every way the current build can lose or damage work. Each fix gets a regress
 ### Files damaged or refused
 
 - [x] A save keeps owner, SELinux label, xattrs and ACLs, and handles hard links. Today the rename resets the label and drops the rest.
-- [ ] CRLF files keep their line endings: End stops before the `\r`, and Enter inserts the file's own line ending.
+- [x] CRLF files keep their line endings: End stops before the `\r`, and Enter inserts the file's own line ending.
 - [x] The swap lock checks that the PID really is Kyte, and a stale lock can be overridden.
 - [x] Long paths open with crash recovery working: hash the swap file name.
 

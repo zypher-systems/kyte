@@ -40,6 +40,13 @@ These replace the swap format and flows in `ARCHITECTURE` sections 6 and 8.
 - A buffer with no file name gets its own swap, named by PID and start time, so several can run at once. Its base is empty, so it never needs a snapshot. A bare `kyte` offers the newest crashed one; any others stay until that one is resolved. Crashed untitled swaps that hold no text are deleted.
 - After recovery the cursor starts at the top of the buffer, as with any freshly opened file.
 
+## 0.1.1 line endings
+
+- A CRLF is one line ending: End stops before the `\r`, and Left, Right, Backspace, Delete, `k`, `d` and `w` all treat the pair as one step. This replaces the T2 note that showed the `\r`, and the rule that `\r` is always an ordinary character. A lone `\r` still is.
+- Enter and paste use the ending most of the file uses, with LF on a tie, decided when the buffer opens. Each existing line keeps its own ending, so a mixed file stays mixed. Converting a file is still out of scope.
+- No edit may leave the cursor between `\r` and `\n`; `apply`, undo and redo move it back before the `\r`.
+- The status bar shows `CRLF`, since the `\r` is no longer visible.
+
 ## Hosting and environment
 
 - Toolchain: rustc/cargo 1.99.1 (stable, 2026-10-13), edition 2021.

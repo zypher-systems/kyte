@@ -182,7 +182,8 @@ These Docker files have not been run yet, because the build machine had no Docke
 ## Known limitations
 
 - **Split escape sequences.** On a legacy terminal over a laggy link, the bytes of an arrow key can arrive split, so the Esc arrives alone. You then see the layer open, and the rest of the sequence closes it again; those characters are discarded, never inserted. Kyte does not try to repair this. `docs/KEY_LAB.md` has the observed behavior. Terminals with the kitty keyboard protocol do not have this problem, and Kyte enables the protocol when it is available.
-- UTF-8 files only (others are refused and left untouched). LF line endings; a CRLF file is edited as is, and the `\r` shows as a control picture.
+- UTF-8 files only (others are refused and left untouched).
+- Kyte keeps each line's ending as it is. New lines use the ending most of the file uses, and the status bar shows `CRLF` for those files. It doesn't convert a file from one to the other. A `\r` that isn't part of a line ending shows as a control picture.
 - Linux only (the swap lock checks `/proc`).
 - Not in this version: reader mode, file tree, the Ctrl-K universal palette, light and high-contrast themes, undo history that survives a restart, mouse, selection and clipboard (including OSC 52), multiple buffers or splits, LSP, plugins, a config file, soft wrap, CRLF conversion, non-UTF-8 files, RPM/COPR packaging, and use as the default `$EDITOR`.
 

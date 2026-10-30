@@ -342,7 +342,7 @@ impl App {
             Key::Ctrl('p') => self.open_palette(),
             Key::Ctrl('f') => self.open_search(),
             Key::Char(c) => b.insert_str(&c.to_string(), GroupKind::Typing),
-            Key::Enter => b.insert_str("\n", GroupKind::Typing),
+            Key::Enter => b.insert_newline(),
             Key::Tab => b.insert_str("\t", GroupKind::Typing),
             Key::Backspace => b.backspace(),
             Key::Delete => b.delete_forward(),
@@ -599,6 +599,7 @@ impl App {
         match &mut self.mode {
             Mode::Insert | Mode::Overlay { .. } => {
                 self.mode = Mode::Insert;
+                let text = text.replace('\n', self.buffer.eol());
                 self.buffer.insert_str(&text, GroupKind::Paste);
             }
             Mode::Palette(state) => {
