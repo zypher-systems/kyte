@@ -105,6 +105,13 @@ pub fn render(app: &App, area: Rect, cells: &mut Cells, theme: &Theme) -> Option
                 text_w,
                 theme,
             );
+            paint_selection(
+                app,
+                line,
+                Rect::new(area.x + gw as u16, y, text_w as u16, 1),
+                cells,
+                theme,
+            );
         } else {
             cells.set_stringn(area.x, y, "~", 1, theme.tilde);
         }
@@ -119,6 +126,29 @@ pub fn render(app: &App, area: Rect, cells: &mut Cells, theme: &Theme) -> Option
         ))
     } else {
         None
+    }
+}
+
+/// Styles the selected part of line `l` in `row`. A selection running past
+/// the end of the line takes one more cell, so an empty line shows as selected.
+fn paint_selection(app: &App, l: usize, row: Rect, cells: &mut Cells, theme: &Theme) {
+    let buf = &app.buffer;
+    let Some(sel) = buf.selection() else {
+        return;
+    };
+    let (start, end) = (buf.line_start(l), buf.line_end(l));
+    if sel.end <= start || sel.start > end {
+        return;
+    }
+    let (_, left) = app.scroll();
+    let from = buf.display_col(l, sel.start.max(start) - start);
+    let to = buf.display_col(l, sel.end.min(end) - start) + usize::from(sel.end > end);
+    let right = left + row.width as usize;
+    let (from, to) = (from.max(left), to.min(right));
+    if from < to {
+        let x = row.x + (from - left) as u16;
+        let area = Rect::new(x, row.y, (to - from) as u16, 1);
+        cells.set_style(area, theme.selection);
     }
 }
 

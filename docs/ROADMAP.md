@@ -38,7 +38,7 @@ Fixed every known way the build could lose or damage work. Each fix has a regres
 ## Next: 0.2.0, daily driver
 
 - [ ] Open a file from inside the editor
-- [ ] Selection, cut, copy and paste, including the system clipboard over OSC 52
+- [x] Selection, cut, copy and paste, including the system clipboard over OSC 52
 - [ ] Find and replace; case-insensitive search; visible match highlighting
 - [x] Word motion and word delete
 - [ ] Auto-indent, and tabs or spaces per file

@@ -322,6 +322,16 @@ impl Pty {
         self.parser.lock().unwrap().screen().alternate_screen()
     }
 
+    /// Background color of the cell at (row, col).
+    pub fn bg(&self, row: u16, col: u16) -> Option<vt100::Color> {
+        self.parser
+            .lock()
+            .unwrap()
+            .screen()
+            .cell(row, col)
+            .map(|c| c.bgcolor())
+    }
+
     /// Foreground color of the cell at (row, col).
     pub fn fg(&self, row: u16, col: u16) -> Option<vt100::Color> {
         self.parser

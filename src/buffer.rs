@@ -166,6 +166,9 @@ pub struct Buffer {
     pending_edits: Vec<Edit>,
     /// What Enter inserts: the line ending most of the file uses.
     eol: &'static str,
+    /// The other end of the selection. Every motion and edit clears it, so
+    /// only code that means to extend a selection has to think about it.
+    anchor: Option<usize>,
 }
 
 /// The line ending most of `text` uses (LF on a tie).
@@ -192,7 +195,49 @@ impl Buffer {
             redo: Vec::new(),
             pending_edits: Vec::new(),
             eol: dominant_eol(text),
+            anchor: None,
         }
+    }
+
+    /// The selected char range, if any.
+    pub fn selection(&self) -> Option<Range<usize>> {
+        let a = self.anchor?;
+        Some(a.min(self.cursor)..a.max(self.cursor))
+    }
+
+    /// Where a selection starting now would be anchored.
+    pub fn selection_anchor(&self) -> usize {
+        self.anchor.unwrap_or(self.cursor)
+    }
+
+    /// Anchors the selection at `at`; an empty one is no selection.
+    pub fn set_selection_anchor(&mut self, at: usize) {
+        self.anchor = (at != self.cursor).then_some(at);
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.anchor = None;
+    }
+
+    pub fn select_all(&mut self) {
+        self.close_group();
+        self.cursor = self.rope.len_chars();
+        self.want_col = self.cursor_display_col();
+        self.set_selection_anchor(0);
+    }
+
+    /// Deletes the selection as one undo step; false when there is none.
+    pub fn delete_selection(&mut self) -> bool {
+        let Some(r) = self.selection() else {
+            return false;
+        };
+        let edit = Edit {
+            at: r.start,
+            removed: self.slice_string(r.clone()),
+            inserted: String::new(),
+        };
+        self.apply_with_cursor(edit, GroupKind::Operator, r.start);
+        true
     }
 
     /// The line ending new lines get.
@@ -353,14 +398,16 @@ impl Buffer {
     /// Like [`apply`](Self::apply) but places the cursor at `cursor_after`.
     pub fn apply_with_cursor(&mut self, edit: Edit, kind: GroupKind, cursor_after: usize) {
         let before = self.cursor;
+        self.anchor = None;
         self.raw_apply(&edit);
         self.cursor = self.outside_crlf(cursor_after.min(self.rope.len_chars()));
         self.dirty = true;
         self.redo.clear();
         self.pending_edits.push(edit.clone());
-        let simple_typing =
-            kind == GroupKind::Typing && edit.removed.is_empty() && !edit.inserted.contains('\n');
+        // Typing over a selection opens a group too, so one undo restores it.
+        let simple_typing = kind == GroupKind::Typing && !edit.inserted.contains('\n');
         let coalesce = simple_typing
+            && edit.removed.is_empty()
             && matches!(self.undo.last(), Some(g) if g.open && g.kind == GroupKind::Typing && g.cursor_after == edit.at);
         if coalesce {
             let g = self.undo.last_mut().unwrap();
@@ -379,16 +426,25 @@ impl Buffer {
         self.want_col = self.cursor_display_col();
     }
 
+    /// Inserts at the cursor, replacing the selection if there is one.
     pub fn insert_str(&mut self, s: &str, kind: GroupKind) {
         if s.is_empty() {
             return;
         }
-        self.apply(Edit::insert(self.cursor, s), kind);
+        let edit = match self.selection() {
+            Some(r) => Edit {
+                at: r.start,
+                removed: self.slice_string(r),
+                inserted: s.to_string(),
+            },
+            None => Edit::insert(self.cursor, s),
+        };
+        self.apply(edit, kind);
     }
 
     /// Deletes the previous grapheme (joins with the previous line at a line start).
     pub fn backspace(&mut self) {
-        if self.cursor == 0 {
+        if self.delete_selection() || self.cursor == 0 {
             return;
         }
         let prev = self.prev_boundary(self.cursor);
@@ -405,7 +461,7 @@ impl Buffer {
 
     /// Deletes the next grapheme (joins with the next line at a line end).
     pub fn delete_forward(&mut self) {
-        if self.cursor >= self.rope.len_chars() {
+        if self.delete_selection() || self.cursor >= self.rope.len_chars() {
             return;
         }
         let next = self.next_boundary(self.cursor);
@@ -426,6 +482,7 @@ impl Buffer {
         let Some(mut g) = self.undo.pop() else {
             return false;
         };
+        self.anchor = None;
         g.open = false;
         for e in g.edits.iter().rev() {
             let inv = e.inverse();
@@ -443,6 +500,7 @@ impl Buffer {
         let Some(g) = self.redo.pop() else {
             return false;
         };
+        self.anchor = None;
         for e in &g.edits {
             self.raw_apply(e);
             self.pending_edits.push(e.clone());
@@ -523,6 +581,7 @@ impl Buffer {
 
     fn set_cursor_h(&mut self, c: usize) {
         self.close_group();
+        self.anchor = None;
         self.cursor = c.min(self.rope.len_chars());
         self.want_col = self.cursor_display_col();
     }
@@ -557,6 +616,7 @@ impl Buffer {
     /// Moves by `delta` lines keeping the remembered column (Up/Down/PageUp/PageDown).
     pub fn move_lines(&mut self, delta: isize) {
         self.close_group();
+        self.anchor = None;
         let line = self.cursor_line() as isize;
         let max = self.line_count() as isize - 1;
         let target = (line + delta).clamp(0, max.max(0)) as usize;
@@ -731,6 +791,75 @@ mod tests {
         assert_eq!(measure(&s, 5000), (5000, 5000));
         assert_eq!(measure(&s, 5002), (5001, 5001));
         assert_eq!(measure(&s, 5003), (5004, 5002));
+    }
+
+    fn select(x: &mut Buffer, from: usize, to: usize) {
+        x.move_to(to);
+        x.set_selection_anchor(from);
+    }
+
+    #[test]
+    fn selection_range_is_ordered_and_an_empty_one_is_none() {
+        let mut x = b("hello");
+        assert_eq!(x.selection(), None);
+        select(&mut x, 1, 4);
+        assert_eq!(x.selection(), Some(1..4));
+        select(&mut x, 4, 1);
+        assert_eq!(x.selection(), Some(1..4));
+        select(&mut x, 2, 2);
+        assert_eq!(x.selection(), None);
+    }
+
+    #[test]
+    fn motion_and_edits_clear_the_selection() {
+        let mut x = b("hello\nworld");
+        select(&mut x, 0, 3);
+        x.move_right();
+        assert_eq!(x.selection(), None);
+        select(&mut x, 0, 3);
+        x.move_down();
+        assert_eq!(x.selection(), None);
+        select(&mut x, 0, 3);
+        x.insert_str("X", GroupKind::Typing);
+        assert_eq!(x.selection(), None);
+        select(&mut x, 0, 1);
+        assert!(x.undo());
+        assert_eq!(x.selection(), None);
+    }
+
+    #[test]
+    fn typing_replaces_the_selection_in_one_undo_step() {
+        let mut x = b("hello world");
+        select(&mut x, 0, 5);
+        typed(&mut x, "bye");
+        assert_eq!(x.to_string(), "bye world");
+        assert!(x.undo());
+        assert_eq!(x.to_string(), "hello world", "the replaced text returns");
+        assert!(!x.undo());
+    }
+
+    #[test]
+    fn backspace_and_delete_remove_the_selection_only() {
+        let mut x = b("abcdef");
+        select(&mut x, 1, 3);
+        x.backspace();
+        assert_eq!(x.to_string(), "adef");
+        assert_eq!(x.cursor(), 1);
+        let mut y = b("abcdef");
+        select(&mut y, 4, 2);
+        y.delete_forward();
+        assert_eq!(y.to_string(), "abef");
+    }
+
+    #[test]
+    fn select_all_covers_everything() {
+        let mut x = b("a\nb\n");
+        x.select_all();
+        assert_eq!(x.selection(), Some(0..4));
+        assert_eq!(b("").selection(), None);
+        let mut e = b("");
+        e.select_all();
+        assert_eq!(e.selection(), None);
     }
 
     #[test]

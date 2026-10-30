@@ -9,7 +9,7 @@ use crate::buffer::{Buffer, GroupKind};
 use crate::cli::Options;
 use crate::command::{self, Command};
 use crate::fileio::{self, DiskState};
-use crate::input::{normalize, Input, Key};
+use crate::input::{normalize, Input, Key, Motion};
 use crate::ops;
 use crate::palette::PaletteState;
 use crate::search;
@@ -113,6 +113,11 @@ pub struct App {
     swap_failed: bool,
     /// Characters still to discard from a split key sequence.
     esc_tail: Option<(EscTail, Instant)>,
+    clipboard: String,
+    /// The clipboard holds a whole line, so it pastes above the current one.
+    clipboard_whole_line: bool,
+    /// Bytes for the terminal itself, written after the next key.
+    terminal_output: Option<String>,
     last_fsync: Option<Instant>,
     scroll_top: usize,
     scroll_left: usize,
@@ -145,6 +150,9 @@ impl App {
             disk,
             swap_failed: false,
             esc_tail: None,
+            clipboard: String::new(),
+            clipboard_whole_line: false,
+            terminal_output: None,
             last_fsync: None,
             buffer,
             mode: Mode::Insert,
@@ -223,6 +231,7 @@ impl App {
         }
         if let Key::Alt(_) = key {
             if self.mode == Mode::Insert {
+                self.buffer.clear_selection();
                 for k in normalize(key, true) {
                     self.handle_key(k, now)?;
                 }
@@ -271,6 +280,11 @@ impl App {
     pub fn recovery_off(&self) -> bool {
         let recovering = matches!(self.mode, Mode::Recover(_));
         !recovering && (self.swap.is_none() || self.swap_failed)
+    }
+
+    /// Bytes waiting to go to the terminal, such as a clipboard copy.
+    pub fn take_terminal_output(&mut self) -> Option<String> {
+        self.terminal_output.take()
     }
 
     /// Whether a swap file is being written.
@@ -386,7 +400,12 @@ impl App {
     fn insert_key(&mut self, key: Key, now: Instant) {
         let b = &mut self.buffer;
         match key {
-            Key::Esc | Key::Ctrl(' ') => self.mode = Mode::Overlay { opened_at: now },
+            // Esc backs out of a selection before it opens anything.
+            Key::Esc if b.selection().is_some() => b.clear_selection(),
+            Key::Esc | Key::Ctrl(' ') => {
+                b.clear_selection();
+                self.mode = Mode::Overlay { opened_at: now };
+            }
             Key::Ctrl('p') => self.open_palette(),
             Key::Ctrl('f') => self.open_search(),
             Key::Char(c) => b.insert_str(&c.to_string(), GroupKind::Typing),
@@ -394,45 +413,140 @@ impl App {
             Key::Tab => b.insert_str("\t", GroupKind::Typing),
             Key::Backspace => b.backspace(),
             Key::Delete => b.delete_forward(),
-            Key::Left => b.move_left(),
-            Key::Right => b.move_right(),
-            Key::WordLeft => {
-                let t = ops::word_start(b.rope(), b.cursor());
-                b.move_to(t);
-            }
-            Key::WordRight => {
-                let t = ops::word_end(b.rope(), b.cursor());
-                b.move_to(t);
+            Key::Left => self.motion(Motion::Left),
+            Key::Right => self.motion(Motion::Right),
+            Key::Up => self.motion(Motion::Up),
+            Key::Down => self.motion(Motion::Down),
+            Key::Home => self.motion(Motion::Home),
+            Key::End => self.motion(Motion::End),
+            Key::PageUp => self.motion(Motion::PageUp),
+            Key::PageDown => self.motion(Motion::PageDown),
+            Key::CtrlHome => self.motion(Motion::FileStart),
+            Key::CtrlEnd => self.motion(Motion::FileEnd),
+            Key::WordLeft => self.motion(Motion::WordLeft),
+            Key::WordRight => self.motion(Motion::WordRight),
+            Key::Select(m) => {
+                let anchor = self.buffer.selection_anchor();
+                self.motion(m);
+                self.buffer.set_selection_anchor(anchor);
             }
             Key::WordBackspace => {
-                let at = b.cursor();
-                let start = ops::word_start(b.rope(), at);
-                self.delete_range(start..at, start);
+                if !b.delete_selection() {
+                    let at = b.cursor();
+                    let start = ops::word_start(b.rope(), at);
+                    self.delete_range(start..at, start);
+                }
             }
-            Key::WordDelete => self.op_word(),
-            Key::Up => b.move_up(),
-            Key::Down => b.move_down(),
-            Key::Home => b.move_home(),
-            Key::End => b.move_end(),
-            Key::PageUp => {
-                let h = self.text_height() as isize;
-                self.buffer.move_lines(-h);
+            Key::WordDelete => {
+                if !b.delete_selection() {
+                    self.op_word();
+                }
             }
-            Key::PageDown => {
-                let h = self.text_height() as isize;
-                self.buffer.move_lines(h);
-            }
-            Key::CtrlHome => b.move_to(0),
-            Key::CtrlEnd => {
-                let n = b.len_chars();
-                b.move_to(n);
-            }
+            Key::Ctrl('a') => b.select_all(),
+            Key::Ctrl('x') => self.cut(),
+            Key::Ctrl('c') => self.copy(),
+            Key::Ctrl('v') => self.paste(),
             Key::Ctrl('s') | Key::Ctrl('o') => self.save(),
-            Key::Ctrl('q') | Key::Ctrl('x') => self.request_quit(),
+            Key::Ctrl('q') => self.request_quit(),
             Key::Ctrl('z') => self.undo(),
             Key::Ctrl('y') => self.redo(),
             _ => {}
         }
+    }
+
+    /// Moves the cursor. A plain move also ends any selection.
+    fn motion(&mut self, m: Motion) {
+        let page = self.text_height() as isize;
+        let b = &mut self.buffer;
+        match m {
+            Motion::Left => b.move_left(),
+            Motion::Right => b.move_right(),
+            Motion::Up => b.move_up(),
+            Motion::Down => b.move_down(),
+            Motion::Home => b.move_home(),
+            Motion::End => b.move_end(),
+            Motion::PageUp => b.move_lines(-page),
+            Motion::PageDown => b.move_lines(page),
+            Motion::FileStart => b.move_to(0),
+            Motion::FileEnd => b.move_to(b.len_chars()),
+            Motion::WordLeft => b.move_to(ops::word_start(b.rope(), b.cursor())),
+            Motion::WordRight => b.move_to(ops::word_end(b.rope(), b.cursor())),
+        }
+    }
+
+    /// The text Ctrl-C or Ctrl-X takes: the selection, or the whole line with
+    /// its line ending. `None` when there is nothing to take.
+    fn clip_text(&self) -> Option<(String, bool)> {
+        let b = &self.buffer;
+        if let Some(r) = b.selection() {
+            return Some((b.slice_string(r), false));
+        }
+        if b.len_chars() == 0 {
+            return None;
+        }
+        let mut line = b.rope().line(b.cursor_line()).to_string();
+        if !line.ends_with('\n') {
+            line.push_str(b.eol());
+        }
+        Some((line, true))
+    }
+
+    /// Puts `text` in Kyte's clipboard and queues it for the system clipboard.
+    fn set_clipboard(&mut self, text: String, whole_line: bool) {
+        self.terminal_output = crate::clipboard::osc52(&text);
+        let lines = text.matches('\n').count();
+        let what = if lines > 0 {
+            format!("{lines} line{}", if lines == 1 { "" } else { "s" })
+        } else {
+            let n = text.chars().count();
+            format!("{n} character{}", if n == 1 { "" } else { "s" })
+        };
+        if self.terminal_output.is_some() {
+            self.set_message(format!("Copied {what}"));
+        } else {
+            self.set_message(format!(
+                "Copied {what} inside Kyte; too large for the system clipboard"
+            ));
+        }
+        self.clipboard = text;
+        self.clipboard_whole_line = whole_line;
+    }
+
+    fn copy(&mut self) {
+        match self.clip_text() {
+            Some((text, whole_line)) => self.set_clipboard(text, whole_line),
+            None => self.set_message("Nothing to copy"),
+        }
+    }
+
+    fn cut(&mut self) {
+        let Some((text, whole_line)) = self.clip_text() else {
+            self.set_message("Nothing to cut");
+            return;
+        };
+        if whole_line {
+            self.op_line();
+        } else {
+            self.buffer.delete_selection();
+        }
+        self.set_clipboard(text, whole_line);
+    }
+
+    /// Pastes Kyte's clipboard. A whole line goes above the current line.
+    fn paste(&mut self) {
+        if self.clipboard.is_empty() {
+            self.set_message("Clipboard is empty; your terminal's paste key reads the system one");
+            return;
+        }
+        let text = self
+            .clipboard
+            .replace("\r\n", "\n")
+            .replace('\n', self.buffer.eol());
+        if self.clipboard_whole_line && self.buffer.selection().is_none() {
+            let start = self.buffer.line_start(self.buffer.cursor_line());
+            self.buffer.move_to(start);
+        }
+        self.buffer.insert_str(&text, GroupKind::Paste);
     }
 
     fn overlay_key(&mut self, key: Key, opened_at: Instant, now: Instant) {
@@ -461,6 +575,7 @@ impl App {
 
     /// Opens the search prompt (Ctrl-F, Esc /, or the palette's Find).
     pub fn open_search(&mut self) {
+        self.buffer.clear_selection();
         self.mode = Mode::Prompt(Prompt::Search {
             query: String::new(),
             origin: self.buffer.cursor(),
@@ -549,6 +664,10 @@ impl App {
             Command::QuitWithoutSaving => self.discard_and_quit(),
             Command::Undo => self.undo(),
             Command::Redo => self.redo(),
+            Command::Cut => self.cut(),
+            Command::Copy => self.copy(),
+            Command::Paste => self.paste(),
+            Command::SelectAll => self.buffer.select_all(),
             Command::Find => self.open_search(),
             Command::GotoLine => {
                 self.mode = Mode::Prompt(Prompt::GotoLine {
@@ -1319,7 +1438,186 @@ mod tests {
     #[test]
     fn clean_quit_is_immediate() {
         let mut a = app("");
-        a.handle_key(Key::Ctrl('x'), Instant::now()).unwrap();
+        a.handle_key(Key::Ctrl('q'), Instant::now()).unwrap();
         assert!(a.quit);
+    }
+
+    fn select_right(a: &mut App, n: usize) {
+        for _ in 0..n {
+            a.handle_key(Key::Select(Motion::Right), Instant::now())
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn shift_motion_extends_and_plain_motion_ends_the_selection() {
+        let t = Instant::now();
+        let mut a = app("hello world");
+        select_right(&mut a, 3);
+        assert_eq!(a.buffer.selection(), Some(0..3));
+        a.handle_key(Key::Select(Motion::End), t).unwrap();
+        assert_eq!(a.buffer.selection(), Some(0..11));
+        a.handle_key(Key::Select(Motion::Home), t).unwrap();
+        assert_eq!(a.buffer.selection(), None, "back at the anchor");
+        select_right(&mut a, 2);
+        a.handle_key(Key::Right, t).unwrap();
+        assert_eq!(a.buffer.selection(), None);
+    }
+
+    #[test]
+    fn selection_by_word_and_across_lines() {
+        let t = Instant::now();
+        let mut a = app("foo bar\nbaz\n");
+        a.handle_key(Key::Select(Motion::WordRight), t).unwrap();
+        assert_eq!(a.buffer.selection(), Some(0..4));
+        a.handle_key(Key::Select(Motion::Down), t).unwrap();
+        assert_eq!(a.buffer.selection(), Some(0..11));
+        a.handle_key(Key::Select(Motion::FileEnd), t).unwrap();
+        assert_eq!(a.buffer.selection(), Some(0..12));
+    }
+
+    #[test]
+    fn esc_clears_a_selection_before_it_opens_the_layer() {
+        let t = Instant::now();
+        let mut a = app("hello");
+        select_right(&mut a, 2);
+        a.handle_key(Key::Esc, t).unwrap();
+        assert_eq!(a.buffer.selection(), None);
+        assert_eq!(a.mode, Mode::Insert);
+        a.handle_key(Key::Esc, t).unwrap();
+        assert!(matches!(a.mode, Mode::Overlay { .. }));
+    }
+
+    #[test]
+    fn alt_chord_with_a_selection_runs_the_operator() {
+        let t = Instant::now();
+        let mut a = app("one\ntwo\n");
+        select_right(&mut a, 2);
+        a.handle_key(Key::Alt('d'), t).unwrap();
+        assert_eq!(a.buffer.to_string(), "two\n");
+        assert_eq!(a.mode, Mode::Insert);
+    }
+
+    #[test]
+    fn word_keys_delete_a_selection_when_there_is_one() {
+        let t = Instant::now();
+        let mut a = app("foo bar baz");
+        a.buffer.move_to(4);
+        select_right(&mut a, 3);
+        a.handle_key(Key::WordBackspace, t).unwrap();
+        assert_eq!(a.buffer.to_string(), "foo  baz");
+        let mut b = app("foo bar baz");
+        select_right(&mut b, 1);
+        b.handle_key(Key::WordDelete, t).unwrap();
+        assert_eq!(b.buffer.to_string(), "oo bar baz");
+    }
+
+    #[test]
+    fn copy_and_paste_a_selection() {
+        let t = Instant::now();
+        let mut a = app("hello world");
+        select_right(&mut a, 5);
+        a.handle_key(Key::Ctrl('c'), t).unwrap();
+        assert_eq!(a.message.as_deref(), Some("Copied 5 characters"));
+        assert_eq!(
+            a.take_terminal_output().as_deref(),
+            Some("\x1b]52;c;aGVsbG8=\x07")
+        );
+        assert_eq!(a.take_terminal_output(), None, "sent once");
+        assert_eq!(a.buffer.selection(), Some(0..5), "copy keeps the selection");
+        a.handle_key(Key::CtrlEnd, t).unwrap();
+        a.handle_key(Key::Ctrl('v'), t).unwrap();
+        assert_eq!(a.buffer.to_string(), "hello worldhello");
+        a.handle_key(Key::Ctrl('z'), t).unwrap();
+        assert_eq!(a.buffer.to_string(), "hello world");
+    }
+
+    #[test]
+    fn cut_a_selection_is_one_undo_step() {
+        let t = Instant::now();
+        let mut a = app("hello world");
+        a.buffer.move_to(5);
+        select_right(&mut a, 6);
+        a.handle_key(Key::Ctrl('x'), t).unwrap();
+        assert_eq!(a.buffer.to_string(), "hello");
+        a.handle_key(Key::Ctrl('z'), t).unwrap();
+        assert_eq!(a.buffer.to_string(), "hello world");
+        a.handle_key(Key::CtrlHome, t).unwrap();
+        a.handle_key(Key::Ctrl('v'), t).unwrap();
+        assert_eq!(a.buffer.to_string(), " worldhello world");
+    }
+
+    #[test]
+    fn with_no_selection_cut_and_copy_take_the_line() {
+        let t = Instant::now();
+        let mut a = app("one\ntwo\nthree");
+        a.buffer.move_to(5);
+        a.handle_key(Key::Ctrl('x'), t).unwrap();
+        assert_eq!(a.buffer.to_string(), "one\nthree");
+        assert_eq!(a.message.as_deref(), Some("Copied 1 line"));
+        a.buffer.move_to(1);
+        a.handle_key(Key::Ctrl('v'), t).unwrap();
+        assert_eq!(
+            a.buffer.to_string(),
+            "two\none\nthree",
+            "a whole line pastes above, wherever the cursor is in the line"
+        );
+    }
+
+    #[test]
+    fn copying_a_last_line_with_no_ending_still_pastes_a_whole_line() {
+        let t = Instant::now();
+        let mut a = app("one\ntwo");
+        a.handle_key(Key::CtrlEnd, t).unwrap();
+        a.handle_key(Key::Ctrl('c'), t).unwrap();
+        a.handle_key(Key::Home, t).unwrap();
+        a.handle_key(Key::Ctrl('v'), t).unwrap();
+        assert_eq!(a.buffer.to_string(), "one\ntwo\ntwo");
+    }
+
+    #[test]
+    fn pasting_over_a_selection_replaces_it() {
+        let t = Instant::now();
+        let mut a = app("abc xyz");
+        select_right(&mut a, 3);
+        a.handle_key(Key::Ctrl('c'), t).unwrap();
+        a.handle_key(Key::End, t).unwrap();
+        a.handle_key(Key::Select(Motion::WordLeft), t).unwrap();
+        a.handle_key(Key::Ctrl('v'), t).unwrap();
+        assert_eq!(a.buffer.to_string(), "abc abc");
+    }
+
+    #[test]
+    fn empty_buffer_and_empty_clipboard_say_so() {
+        let t = Instant::now();
+        let mut a = app("");
+        a.handle_key(Key::Ctrl('c'), t).unwrap();
+        assert_eq!(a.message.as_deref(), Some("Nothing to copy"));
+        a.handle_key(Key::Ctrl('x'), t).unwrap();
+        assert_eq!(a.message.as_deref(), Some("Nothing to cut"));
+        a.handle_key(Key::Ctrl('v'), t).unwrap();
+        assert!(a.message.as_deref().unwrap().contains("Clipboard is empty"));
+        assert!(!a.buffer.is_dirty());
+    }
+
+    #[test]
+    fn paste_uses_the_file_line_ending() {
+        let t = Instant::now();
+        let mut a = app("a\nb\n");
+        a.handle_key(Key::Select(Motion::FileEnd), t).unwrap();
+        a.handle_key(Key::Ctrl('c'), t).unwrap();
+        let mut dos = app("x\r\ny\r\n");
+        dos.clipboard = a.clipboard.clone();
+        dos.handle_key(Key::Ctrl('v'), t).unwrap();
+        assert_eq!(dos.buffer.to_string(), "a\r\nb\r\nx\r\ny\r\n");
+    }
+
+    #[test]
+    fn huge_copy_stays_inside_kyte() {
+        let t = Instant::now();
+        let mut a = app(&"x".repeat(2 << 20));
+        a.handle_key(Key::Ctrl('c'), t).unwrap();
+        assert!(a.message.as_deref().unwrap().contains("inside Kyte"));
+        assert_eq!(a.take_terminal_output(), None);
     }
 }

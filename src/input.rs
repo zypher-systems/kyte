@@ -3,6 +3,23 @@
 
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
+/// Where a cursor movement goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Motion {
+    Left,
+    Right,
+    Up,
+    Down,
+    Home,
+    End,
+    PageUp,
+    PageDown,
+    FileStart,
+    FileEnd,
+    WordLeft,
+    WordRight,
+}
+
 /// A key as Kyte understands it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Key {
@@ -30,6 +47,8 @@ pub enum Key {
     WordBackspace,
     /// Ctrl-Delete or Alt-Delete.
     WordDelete,
+    /// A movement with Shift held: it extends the selection.
+    Select(Motion),
     /// Lowercase letter; Ctrl-Space is `Ctrl(' ')`.
     Ctrl(char),
     Alt(char),
@@ -55,6 +74,25 @@ pub fn map_event(ev: Event) -> Option<Input> {
     }
 }
 
+/// The movement a navigation key makes; `word` is true with Ctrl or Alt held.
+fn motion_of(code: KeyCode, word: bool) -> Option<Motion> {
+    Some(match code {
+        KeyCode::Left if word => Motion::WordLeft,
+        KeyCode::Right if word => Motion::WordRight,
+        KeyCode::Home if word => Motion::FileStart,
+        KeyCode::End if word => Motion::FileEnd,
+        KeyCode::Left => Motion::Left,
+        KeyCode::Right => Motion::Right,
+        KeyCode::Up => Motion::Up,
+        KeyCode::Down => Motion::Down,
+        KeyCode::Home => Motion::Home,
+        KeyCode::End => Motion::End,
+        KeyCode::PageUp => Motion::PageUp,
+        KeyCode::PageDown => Motion::PageDown,
+        _ => return None,
+    })
+}
+
 fn map_key(k: KeyEvent) -> Option<Key> {
     if !matches!(k.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
         return None;
@@ -66,6 +104,11 @@ fn map_key(k: KeyEvent) -> Option<Key> {
     }
     let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
     let alt = k.modifiers.contains(KeyModifiers::ALT);
+    if k.modifiers.contains(KeyModifiers::SHIFT) {
+        if let Some(m) = motion_of(k.code, ctrl || alt) {
+            return Some(Key::Select(m));
+        }
+    }
     let key = match k.code {
         KeyCode::Char(_) if ctrl && alt => return None,
         // Most legacy terminals send Ctrl-Backspace as ^H.
@@ -135,6 +178,33 @@ mod tests {
     const N: KeyModifiers = KeyModifiers::NONE;
     const C: KeyModifiers = KeyModifiers::CONTROL;
     const A: KeyModifiers = KeyModifiers::ALT;
+
+    #[test]
+    fn shift_turns_movement_into_selection() {
+        let s = KeyModifiers::SHIFT;
+        let select = |c, m| key(c, m).unwrap();
+        assert_eq!(
+            select(KeyCode::Left, s),
+            Input::Key(Key::Select(Motion::Left))
+        );
+        assert_eq!(
+            select(KeyCode::End, s),
+            Input::Key(Key::Select(Motion::End))
+        );
+        assert_eq!(
+            select(KeyCode::Right, s | C),
+            Input::Key(Key::Select(Motion::WordRight))
+        );
+        assert_eq!(
+            select(KeyCode::End, s | C),
+            Input::Key(Key::Select(Motion::FileEnd))
+        );
+        assert_eq!(
+            select(KeyCode::Char('A'), s),
+            Input::Key(Key::Char('A')),
+            "Shift on text is just a capital"
+        );
+    }
 
     #[test]
     fn word_keys() {

@@ -12,6 +12,16 @@ These replace the matching parts of `ARCHITECTURE`. `docs/ROADMAP.md` holds the 
 - License: MIT. This settles section 16 and the section 4 note.
 - Kyte isn't tied to any one OS. It's meant to be open source for everyone.
 
+## 0.2.0 selection and clipboard
+
+- Kyte's shortcuts are its own, so Ctrl-X, Ctrl-C and Ctrl-V are cut, copy and paste, and Ctrl-X no longer quits. This fits the Ctrl-S, Ctrl-Z, Ctrl-Y and Ctrl-F keys Kyte already had.
+- Every cursor move and edit clears the selection inside `Buffer`, and only Shift-motions put the anchor back. Code that doesn't know about selection therefore can't leave a stale one behind.
+- Esc with a selection clears it and does nothing else. Alt-key clears it and runs the operator, because the operators work from the cursor.
+- With nothing selected, cut and copy take the whole line and a whole line pastes above the current one, wherever the cursor is in that line. This gives the old Esc `d` a paste partner.
+- `d`, `k` and `w` still only delete; they don't touch the clipboard.
+- OSC 52 only writes. Terminals usually refuse reads, and a read can hang waiting on a terminal that never answers. So Ctrl-V uses Kyte's own clipboard, and the terminal's paste key arrives as a bracketed paste. Text over 1 MiB stays inside Kyte, because terminals drop big sequences silently.
+- Base64 is 20 lines in `clipboard.rs` rather than a crate.
+
 ## 0.1.1 swap format (version 2)
 
 These replace the swap format and flows in `ARCHITECTURE` sections 6 and 8.

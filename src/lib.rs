@@ -5,6 +5,7 @@
 pub mod app;
 pub mod buffer;
 pub mod cli;
+pub mod clipboard;
 pub mod command;
 pub mod fileio;
 #[cfg(feature = "highlight")]
@@ -200,6 +201,13 @@ fn event_loop(app: &mut App, no_kitty: bool) -> anyhow::Result<()> {
             if let Some(input) = input::map_event(ev) {
                 app.handle_input(input, Instant::now())?;
                 redraw = true;
+                if let Some(seq) = app.take_terminal_output() {
+                    // A terminal that can't take it just ignores the copy.
+                    let backend = terminal.backend_mut();
+                    let _ = backend
+                        .write_all(seq.as_bytes())
+                        .and_then(|_| backend.flush());
+                }
             }
         }
         app.tick(Instant::now())?;

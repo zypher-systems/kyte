@@ -34,7 +34,12 @@ pub fn status_bar(app: &App, area: Rect, cells: &mut Cells, theme: &Theme) {
     } else {
         ""
     };
-    let rest = format!("│ {name}{dirty} │ Ln {l}, Col {c}{eol}");
+    let sel = app
+        .buffer
+        .selection()
+        .map(|r| format!(" │ {} selected", r.len()))
+        .unwrap_or_default();
+    let rest = format!("│ {name}{dirty} │ Ln {l}, Col {c}{sel}{eol}");
     let x = mode.chars().count();
     if x < w {
         let (end, _) = cells.set_stringn(area.x + x as u16, area.y, rest, w - x, theme.status);

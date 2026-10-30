@@ -78,8 +78,11 @@ Environment variables: `KYTE_STATE_DIR` (where swap files go; overrides the defa
 | Arrows, Home, End, PageUp, PageDown, Ctrl-Home, Ctrl-End | Move |
 | Ctrl-Left, Ctrl-Right (also Alt) | Move by word |
 | Ctrl-Backspace, Ctrl-Delete (also Alt) | Delete the word before or after the cursor |
+| Shift + any movement key | Select text. Typing, Backspace or Delete then replace or remove it; Esc clears it |
+| Ctrl-A | Select all |
+| Ctrl-X, Ctrl-C, Ctrl-V | Cut, copy, paste. With nothing selected, cut and copy take the whole line, and a whole line pastes above the current one |
 | Ctrl-S (also Ctrl-O) | Save. With no file name, Kyte asks for one |
-| Ctrl-Q (also Ctrl-X) | Quit. With unsaved changes, Kyte asks first: `y` saves and quits, `n` discards, Esc cancels |
+| Ctrl-Q | Quit. With unsaved changes, Kyte asks first: `y` saves and quits, `n` discards, Esc cancels |
 | Ctrl-Z, Ctrl-Y | Undo, redo |
 | Ctrl-F | Search |
 | Esc, Ctrl-Space | Open the operator layer |
@@ -87,6 +90,8 @@ Environment variables: `KYTE_STATE_DIR` (where swap files go; overrides the defa
 | Ctrl-P | Open the command palette |
 
 Pasted text (bracketed paste) is inserted as one block and undone with a single Ctrl-Z.
+
+Copy and cut also reach the system clipboard, through the terminal's OSC 52 sequence, for text up to 1 MiB. Your terminal has to allow this; under tmux, set `tmux set -g set-clipboard on`. Terminals don't let programs read the system clipboard by default, so Ctrl-V pastes what you last copied in Kyte, and your terminal's own paste key (usually Ctrl-Shift-V) pastes from the system.
 
 ### The Esc layer
 
@@ -119,7 +124,7 @@ Under tmux, set `tmux set -g escape-time 10`. tmux's default of 500 ms delays ev
 
 Esc Esc (or Ctrl-P) opens a fuzzy-filtered list. Type to filter, Up and Down to select, Enter to run, Esc to close without running anything.
 
-Commands: Save, Save as, Quit, Quit without saving, Undo, Redo, Find, Go to line, Toggle line numbers, Show key help.
+Commands: Save, Save as, Quit, Quit without saving, Undo, Redo, Cut, Copy, Paste, Select all, Find, Go to line, Toggle line numbers, Show key help.
 
 **Save as** asks for a file name, starting from the current one; `~/` means your home directory. It asks before overwriting a file, and refuses a file another Kyte has open. The buffer then belongs to the new file, and the old file stays as it was.
 
@@ -190,7 +195,7 @@ These Docker files have not been run yet, because the build machine had no Docke
 - Kyte keeps each line's ending as it is. New lines use the ending most of the file uses, and the status bar shows `CRLF` for those files. It doesn't convert a file from one to the other. A `\r` that isn't part of a line ending shows as a control picture.
 - Linux only (the swap lock checks `/proc`).
 - A very long single line costs more per keystroke, depending on what's in it. At the end of a 5 MB line on the build machine, plain ASCII takes about 8 ms, a line full of tabs about 45 ms, and CJK text about 170 ms.
-- Not in this version: reader mode, file tree, the Ctrl-K universal palette, light and high-contrast themes, undo history that survives a restart, mouse, selection and clipboard (including OSC 52), multiple buffers or splits, LSP, plugins, a config file, soft wrap, CRLF conversion, non-UTF-8 files, RPM/COPR packaging, and use as the default `$EDITOR`.
+- Not in this version: reader mode, file tree, the Ctrl-K universal palette, light and high-contrast themes, undo history that survives a restart, mouse, multiple buffers or splits, LSP, plugins, a config file, soft wrap, CRLF conversion, non-UTF-8 files, RPM/COPR packaging, and use as the default `$EDITOR`.
 
 ## Documentation
 

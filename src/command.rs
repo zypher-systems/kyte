@@ -9,6 +9,10 @@ pub enum Command {
     QuitWithoutSaving,
     Undo,
     Redo,
+    Cut,
+    Copy,
+    Paste,
+    SelectAll,
     Find,
     GotoLine,
     ToggleLineNumbers,
@@ -23,6 +27,10 @@ pub const REGISTRY: &[Command] = &[
     Command::QuitWithoutSaving,
     Command::Undo,
     Command::Redo,
+    Command::Cut,
+    Command::Copy,
+    Command::Paste,
+    Command::SelectAll,
     Command::Find,
     Command::GotoLine,
     Command::ToggleLineNumbers,
@@ -38,6 +46,10 @@ impl Command {
             Command::QuitWithoutSaving => "Quit without saving",
             Command::Undo => "Undo",
             Command::Redo => "Redo",
+            Command::Cut => "Cut",
+            Command::Copy => "Copy",
+            Command::Paste => "Paste",
+            Command::SelectAll => "Select all",
             Command::Find => "Find",
             Command::GotoLine => "Go to line",
             Command::ToggleLineNumbers => "Toggle line numbers",
@@ -54,6 +66,10 @@ impl Command {
             Command::QuitWithoutSaving => "",
             Command::Undo => "Ctrl-Z",
             Command::Redo => "Ctrl-Y",
+            Command::Cut => "Ctrl-X",
+            Command::Copy => "Ctrl-C",
+            Command::Paste => "Ctrl-V",
+            Command::SelectAll => "Ctrl-A",
             Command::Find => "Ctrl-F",
             Command::GotoLine => "",
             Command::ToggleLineNumbers => "",
@@ -81,8 +97,10 @@ pub const KEY_HELP: &[(&str, &str)] = &[
     ("Ctrl-Bksp, Ctrl-Del", "delete word before / after"),
     ("PgUp, PgDn", "move by a screen"),
     ("Ctrl-Home, Ctrl-End", "start / end of file"),
+    ("Shift + any move, Ctrl-A", "select, select all"),
+    ("Ctrl-X, Ctrl-C, Ctrl-V", "cut, copy, paste"),
     ("Ctrl-S (Ctrl-O)", "save"),
-    ("Ctrl-Q (Ctrl-X)", "quit (asks if unsaved)"),
+    ("Ctrl-Q", "quit (asks if unsaved)"),
     ("Ctrl-Z, Ctrl-Y", "undo, redo"),
     ("Ctrl-F", "search"),
     ("Ctrl-P", "command palette"),
@@ -98,8 +116,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ten_commands_with_labels() {
-        assert_eq!(REGISTRY.len(), 10);
+    fn every_command_has_a_label() {
+        assert_eq!(REGISTRY.len(), 14);
         let labels: Vec<&str> = REGISTRY.iter().map(|c| c.label()).collect();
         assert_eq!(
             labels,
@@ -110,6 +128,10 @@ mod tests {
                 "Quit without saving",
                 "Undo",
                 "Redo",
+                "Cut",
+                "Copy",
+                "Paste",
+                "Select all",
                 "Find",
                 "Go to line",
                 "Toggle line numbers",

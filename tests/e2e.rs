@@ -391,20 +391,6 @@ fn ac18_quit_dirty_y_saves_and_quits() {
 }
 
 #[test]
-fn ctrl_x_y_saves() {
-    let env = Env::new();
-    let f = env.write("q.txt", "text\n");
-    let mut p = env.open(&f);
-    p.send_str("work ");
-    wait_status(&p, "[+]");
-    p.send_keys(&["C-x"]);
-    p.wait_for("Unsaved changes", TIMEOUT);
-    p.send_str("y");
-    assert_eq!(p.wait_exit(TIMEOUT), 0);
-    assert_eq!(fs::read_to_string(&f).unwrap(), "work text\n");
-}
-
-#[test]
 fn y_with_a_failed_save_stays_open_and_keeps_the_swap() {
     let env = Env::new();
     if fs::metadata(env.dir.path()).unwrap().uid() == 0 {
@@ -1038,13 +1024,17 @@ fn ac16_empty_query_does_nothing() {
 
 // ---------------------------------------------------------------- AC-17
 
-const COMMANDS: [&str; 10] = [
+const COMMANDS: [&str; 14] = [
     "Save",
     "Save as",
     "Quit",
     "Quit without saving",
     "Undo",
     "Redo",
+    "Cut",
+    "Copy",
+    "Paste",
+    "Select all",
     "Find",
     "Go to line",
     "Toggle line numbers",
@@ -1068,7 +1058,7 @@ fn first_result(p: &Pty) -> String {
 }
 
 #[test]
-fn ac17_palette_lists_all_ten_commands() {
+fn ac17_palette_lists_every_command() {
     let env = Env::new();
     let f = env.write("p.txt", "abc\n");
     let mut p = env.open(&f);
@@ -1080,8 +1070,14 @@ fn ac17_palette_lists_all_ten_commands() {
         .collect();
     assert!(first_result(&p).contains("▸ Save"), "{}", p.dump());
     // 8 rows are visible at once; scrolling down reveals the rest
-    for _ in 0..9 {
+    for _ in 0..13 {
         p.send_keys(&["Down"]);
+        std::thread::sleep(Duration::from_millis(5));
+        for c in COMMANDS {
+            if p.screen().contains(c) && !seen.contains(&c) {
+                seen.push(c);
+            }
+        }
     }
     p.wait_for("▸ Show key help", TIMEOUT);
     for c in COMMANDS {
@@ -1089,7 +1085,7 @@ fn ac17_palette_lists_all_ten_commands() {
             seen.push(c);
         }
     }
-    assert_eq!(seen.len(), 10, "saw {seen:?}");
+    assert_eq!(seen.len(), COMMANDS.len(), "saw {seen:?}");
     p.send_keys(&["Esc"]);
     p.wait_gone("Command palette", TIMEOUT);
     quit_clean(&mut p);
@@ -1613,6 +1609,105 @@ fn break_lock_opens_a_file_held_by_another_kyte() {
     b.send_str("r");
     b.wait_for("1 │ held base", TIMEOUT);
     b.kill9();
+}
+
+// ---------------------------------------------------------------- selection
+
+const SHIFT_RIGHT: &[u8] = b"\x1b[1;2C";
+const SHIFT_DOWN: &[u8] = b"\x1b[1;2B";
+
+#[test]
+fn shift_selects_shows_on_screen_and_typing_replaces_it() {
+    let env = Env::new();
+    let f = env.write("s.txt", "hello world\n");
+    let mut p = env.open(&f);
+    let plain = p.bg(0, 6);
+    for _ in 0..5 {
+        p.send(SHIFT_RIGHT);
+    }
+    wait_status(&p, "5 selected");
+    assert_ne!(p.bg(0, 6), plain, "selected text is drawn differently");
+    assert_eq!(p.bg(0, 11), plain, "the rest of the line isn't");
+    p.send_str("bye");
+    p.wait_for("1 │ bye world", TIMEOUT);
+    assert!(!status(&p).contains("selected"));
+    save_and_wait(&mut p);
+    quit_clean(&mut p);
+    assert_eq!(fs::read_to_string(&f).unwrap(), "bye world\n");
+}
+
+#[test]
+fn esc_clears_the_selection_and_shows_no_legend() {
+    let env = Env::new();
+    let f = env.write("s.txt", "hello\n");
+    let mut p = env.open(&f);
+    p.send(SHIFT_RIGHT);
+    wait_status(&p, "1 selected");
+    p.send_keys(&["Esc"]);
+    p.wait_until("selection to clear", TIMEOUT, |s| !s.contains("selected"));
+    assert!(!has_legend(&p));
+    assert!(status(&p).contains("INSERT"));
+    quit_clean(&mut p);
+}
+
+#[test]
+fn copy_reaches_the_terminal_clipboard_and_paste_inserts() {
+    let env = Env::new();
+    let f = env.write("c.txt", "copy me\nnext\n");
+    let mut p = env.open(&f);
+    for _ in 0..4 {
+        p.send(SHIFT_RIGHT);
+    }
+    wait_status(&p, "4 selected");
+    p.send_keys(&["C-c"]);
+    p.wait_for("Copied 4 characters", TIMEOUT);
+    let raw = p.raw_output();
+    let osc = b"\x1b]52;c;Y29weQ==\x07";
+    assert!(
+        raw.windows(osc.len()).any(|w| w == osc),
+        "the copy goes to the terminal as OSC 52"
+    );
+    p.send_keys(&["Down"]);
+    wait_status(&p, "Ln 2");
+    p.send_keys(&["C-v"]);
+    p.wait_for("2 │ nextcopy", TIMEOUT);
+    save_and_wait(&mut p);
+    quit_clean(&mut p);
+    assert_eq!(fs::read_to_string(&f).unwrap(), "copy me\nnextcopy\n");
+}
+
+#[test]
+fn cut_whole_lines_and_multi_line_selection() {
+    let env = Env::new();
+    let f = env.write("c.txt", "one\ntwo\nthree\nfour\n");
+    let mut p = env.open(&f);
+    p.send_keys(&["C-x"]);
+    p.wait_for("1 │ two", TIMEOUT);
+    p.send(SHIFT_DOWN);
+    wait_status(&p, "4 selected");
+    p.send_keys(&["C-x"]);
+    p.wait_for("1 │ three", TIMEOUT);
+    p.send_keys(&["C-End"]);
+    wait_status(&p, "Ln 3");
+    p.send_keys(&["C-v"]);
+    p.wait_for("4 │ ", TIMEOUT);
+    save_and_wait(&mut p);
+    quit_clean(&mut p);
+    assert_eq!(fs::read_to_string(&f).unwrap(), "three\nfour\ntwo\n");
+}
+
+#[test]
+fn select_all_then_terminal_paste_replaces_everything() {
+    let env = Env::new();
+    let f = env.write("a.txt", "old\ntext\n");
+    let mut p = env.open(&f);
+    p.send_keys(&["C-a"]);
+    wait_status(&p, "9 selected");
+    p.paste("new");
+    p.wait_for("1 │ new", TIMEOUT);
+    save_and_wait(&mut p);
+    quit_clean(&mut p);
+    assert_eq!(fs::read_to_string(&f).unwrap(), "new");
 }
 
 // ---------------------------------------------------------------- words

@@ -17,6 +17,7 @@ pub struct Theme {
     pub palette: Style,
     pub palette_border: Style,
     pub selected: Style,
+    pub selection: Style,
     pub modal: Style,
     pub error: Style,
 }
@@ -50,6 +51,7 @@ pub const DARK: Theme = Theme {
         .fg(ix(235))
         .bg(ix(110))
         .add_modifier(Modifier::BOLD),
+    selection: Style::new().bg(ix(60)),
     modal: Style::new().fg(ix(252)).bg(ix(237)),
     error: Style::new()
         .fg(ix(203))
