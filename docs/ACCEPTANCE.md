@@ -13,7 +13,7 @@ cargo test --test demo -- --ignored        # 1 passed (AC-25)
 make demo                                  # writes docs/demo/*
 ```
 
-Updated for the 0.1.1 work on 2026-10-30, on rustc 1.98.1 with SELinux enforcing. `cargo test` breakdown: lib unit tests 124, `tests/buffer_props.rs` 2 (proptest), `tests/e2e.rs` 77, `tests/fileio.rs` 15, `tests/smoke.rs` 4, `tests/swap.rs` 24, `tests/demo.rs` 0 run and 1 ignored. The full suite was also run three times in a row with no failures.
+Updated for the 0.1.1 work on 2026-10-30, on rustc 1.98.1 with SELinux enforcing. `cargo test` breakdown: lib unit tests 123, `tests/buffer_props.rs` 2 (proptest), `tests/e2e.rs` 77, `tests/fileio.rs` 15, `tests/smoke.rs` 4, `tests/swap.rs` 25, `tests/demo.rs` 0 run and 1 ignored. The full suite was also run three times in a row with no failures.
 
 | AC | Result | How it was verified |
 | --- | --- | --- |
