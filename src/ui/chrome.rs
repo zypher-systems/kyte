@@ -25,23 +25,28 @@ pub fn status_bar(app: &App, area: Rect, cells: &mut Cells, theme: &Theme) {
     let w = area.width as usize;
     cells.set_stringn(area.x, area.y, &mode, w, mode_style);
     let name = app
+        .doc
         .buffer
         .path()
         .and_then(|p| p.file_name())
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "Untitled".to_string());
-    let dirty = if app.buffer.is_dirty() { " [+]" } else { "" };
+    let dirty = if app.doc.buffer.is_dirty() {
+        " [+]"
+    } else {
+        ""
+    };
     let (l, c) = app.view_buffer().line_col();
     let place = format!("Ln {l}, Col {c}");
     // In order of importance, because a narrow bar cuts from the end.
     let mut facts = vec![place.clone()];
-    if let Some(r) = app.buffer.selection() {
+    if let Some(r) = app.doc.buffer.selection() {
         facts.push(format!("{} selected", r.len()));
     }
-    if let Indent::Spaces(n) = app.buffer.indent() {
+    if let Indent::Spaces(n) = app.doc.buffer.indent() {
         facts.push(format!("Spaces {n}"));
     }
-    if app.buffer.eol() == "\r\n" {
+    if app.doc.buffer.eol() == "\r\n" {
         facts.push("CRLF".to_string());
     }
     let (rest, facts) = match &app.mode {
@@ -183,7 +188,7 @@ fn menu_for(app: &App) -> Option<Menu> {
     };
     Some(match &app.mode {
         Mode::Overlay { .. } => {
-            let title = if app.buffer.selection().is_some() {
+            let title = if app.doc.buffer.selection().is_some() {
                 "Selection"
             } else {
                 "Esc"

@@ -180,16 +180,9 @@ enum EscTail {
     Ss3,
 }
 
-pub struct App {
+/// One open file and everything tied to it.
+pub struct Doc {
     pub buffer: Buffer,
-    pub mode: Mode,
-    /// Shown on the message line until the next key.
-    pub message: Option<String>,
-    /// The message is an error (drawn in the error style).
-    pub message_is_error: bool,
-    pub show_line_numbers: bool,
-    pub esc_window: Duration,
-    pub quit: bool,
     /// Leave the swap on disk at exit (Recover modal `q`).
     pub keep_swap: bool,
     swap: Option<SwapWriter>,
@@ -199,6 +192,55 @@ pub struct App {
     disk: Option<DiskState>,
     /// A swap write failed, so the swap no longer holds every edit.
     swap_failed: bool,
+    history: Option<FileHistory>,
+    /// A history write failed, so no more are being kept.
+    history_failed: bool,
+    /// The file's text as last read or written, what a review compares with.
+    disk_text: Option<ropey::Rope>,
+    /// The file's size and time when last checked, to spot a change cheaply.
+    disk_stamp: Option<(u64, std::time::SystemTime)>,
+    /// The file on disk has moved on and the change hasn't been reviewed.
+    outside_change: bool,
+    scroll_top: usize,
+    scroll_left: usize,
+    /// With soft wrap, which row of the top line is at the top of the screen.
+    scroll_row: usize,
+}
+
+impl Doc {
+    fn new(buffer: Buffer, swap: Option<SwapWriter>) -> Doc {
+        let swap_target = buffer.path().and_then(|p| fileio::resolve_target(p).ok());
+        let disk = Some(DiskState::of_rope(buffer.rope()));
+        let disk_text = Some(buffer.rope().clone());
+        Doc {
+            buffer,
+            keep_swap: false,
+            swap,
+            swap_target,
+            disk,
+            swap_failed: false,
+            history: None,
+            history_failed: false,
+            disk_text,
+            disk_stamp: None,
+            outside_change: false,
+            scroll_top: 0,
+            scroll_left: 0,
+            scroll_row: 0,
+        }
+    }
+}
+
+pub struct App {
+    pub doc: Doc,
+    pub mode: Mode,
+    /// Shown on the message line until the next key.
+    pub message: Option<String>,
+    /// The message is an error (drawn in the error style).
+    pub message_is_error: bool,
+    pub show_line_numbers: bool,
+    pub esc_window: Duration,
+    pub quit: bool,
     /// Characters still to discard from a split key sequence.
     esc_tail: Option<(EscTail, Instant)>,
     clipboard: String,
@@ -214,17 +256,8 @@ pub struct App {
     history_limit: u64,
     /// What Tab inserts in a file with no indent to go by.
     default_indent: Indent,
-    history: Option<FileHistory>,
-    /// A history write failed, so no more are being kept.
-    history_failed: bool,
     /// The version being browsed, while `Mode::History` is open.
     version_view: Option<Buffer>,
-    /// The file's text as last read or written, what a review compares with.
-    disk_text: Option<ropey::Rope>,
-    /// The file's size and time when last checked, to spot a change cheaply.
-    disk_stamp: Option<(u64, std::time::SystemTime)>,
-    /// The file on disk has moved on and the change hasn't been reviewed.
-    outside_change: bool,
     /// Something changed on screen with no key pressed.
     needs_redraw: bool,
     /// The view lines of the change on screen: (yours, theirs).
@@ -232,10 +265,6 @@ pub struct App {
     /// Reader mode's state, while it's open.
     pub reader: Option<Reader>,
     last_fsync: Option<Instant>,
-    scroll_top: usize,
-    scroll_left: usize,
-    /// With soft wrap, which row of the top line is at the top of the screen.
-    scroll_row: usize,
     /// Long lines wrap at the edge of the screen.
     pub soft_wrap: bool,
     /// The column Up and Down hold to while moving by wrapped rows.
@@ -264,15 +293,8 @@ const PALETTE_KEY: (&str, &str) = ("Esc Esc", "palette");
 impl App {
     pub fn new(mut buffer: Buffer, swap: Option<SwapWriter>, opts: &Options) -> App {
         buffer.default_indent_to(opts.default_indent);
-        let swap_target = buffer.path().and_then(|p| fileio::resolve_target(p).ok());
-        let disk = Some(DiskState::of_rope(buffer.rope()));
-        let disk_text = Some(buffer.rope().clone());
         App {
-            keep_swap: false,
-            swap,
-            swap_target,
-            disk,
-            swap_failed: false,
+            doc: Doc::new(buffer, swap),
             esc_tail: None,
             clipboard: String::new(),
             clipboard_whole_line: false,
@@ -282,26 +304,17 @@ impl App {
             history_on: false,
             history_limit: opts.history_limit_mb.saturating_mul(1_000_000),
             default_indent: opts.default_indent,
-            history: None,
-            history_failed: false,
             version_view: None,
-            disk_text,
-            disk_stamp: None,
-            outside_change: false,
             needs_redraw: false,
             review_marks: None,
             reader: None,
             last_fsync: None,
-            buffer,
             mode: Mode::Insert,
             message: None,
             message_is_error: false,
             show_line_numbers: opts.line_numbers,
             esc_window: Duration::from_millis(opts.esc_ms),
             quit: false,
-            scroll_top: 0,
-            scroll_left: 0,
-            scroll_row: 0,
             soft_wrap: opts.soft_wrap,
             visual_col: None,
             view: (0, 0),
@@ -310,7 +323,7 @@ impl App {
 
     /// The buffer on screen: the version being browsed, or the file.
     pub fn view_buffer(&self) -> &Buffer {
-        self.version_view.as_ref().unwrap_or(&self.buffer)
+        self.version_view.as_ref().unwrap_or(&self.doc.buffer)
     }
 
     /// Starts keeping history for this session.
@@ -321,36 +334,35 @@ impl App {
 
     /// Points the history at the current file and text.
     fn start_history(&mut self) {
-        self.history = None;
-        self.history_failed = false;
+        self.doc.history = None;
+        self.doc.history_failed = false;
         if self.history_on {
-            self.history = self
-                .swap_target
-                .as_ref()
-                .map(|t| FileHistory::new(t, self.buffer.rope()).with_limit(self.history_limit));
+            self.doc.history = self.doc.swap_target.as_ref().map(|t| {
+                FileHistory::new(t, self.doc.buffer.rope()).with_limit(self.history_limit)
+            });
         }
     }
 
     /// Runs one history write. A failure stops history but never the editing.
     fn with_history(&mut self, f: impl FnOnce(&mut FileHistory) -> std::io::Result<()>) {
-        let Some(h) = self.history.as_mut() else {
+        let Some(h) = self.doc.history.as_mut() else {
             return;
         };
         if let Err(e) = f(h) {
-            self.history = None;
-            self.history_failed = true;
+            self.doc.history = None;
+            self.doc.history_failed = true;
             self.set_error(format!("History write failed: {e}"));
         }
     }
 
     /// Whether edits have stopped reaching the history.
     pub fn history_lost(&self) -> bool {
-        self.history_failed
+        self.doc.history_failed
     }
 
     /// The row of the top line at the top of the screen, with soft wrap.
     pub fn scroll_row(&self) -> usize {
-        self.scroll_row
+        self.doc.scroll_row
     }
 
     /// Columns of text beside the gutter.
@@ -381,21 +393,21 @@ impl App {
             l -= 1;
             r = rows_of(l).len() - 1;
         }
-        let top_rows = rows_of(self.scroll_top.min(line)).len();
-        let mut at = (self.scroll_top, self.scroll_row.min(top_rows - 1));
+        let top_rows = rows_of(self.doc.scroll_top.min(line)).len();
+        let mut at = (self.doc.scroll_top, self.doc.scroll_row.min(top_rows - 1));
         if (line, row) < at {
             at = (line, row);
         } else if at < (l, r) {
             at = (l, r);
         }
-        (self.scroll_top, self.scroll_row) = at;
-        self.scroll_left = 0;
+        (self.doc.scroll_top, self.doc.scroll_row) = at;
+        self.doc.scroll_left = 0;
     }
 
     /// One wrapped row up or down, holding the column.
     fn visual_step(&mut self, down: bool) {
         let width = self.text_width();
-        let b = &self.buffer;
+        let b = &self.doc.buffer;
         let line = b.cursor_line();
         let text = b.line_text(line);
         let segments = crate::wrap::segments(&text, width);
@@ -431,13 +443,13 @@ impl App {
             at = at.saturating_sub(1);
         }
         let target = b.line_start(target_line) + seg.chars.start + at;
-        self.buffer.move_to(target);
+        self.doc.buffer.move_to(target);
         self.visual_col = Some(col);
     }
 
     /// (top line, left display column) of the text view.
     pub fn scroll(&self) -> (usize, usize) {
-        (self.scroll_top, self.scroll_left)
+        (self.doc.scroll_top, self.doc.scroll_left)
     }
 
     fn text_height(&self) -> usize {
@@ -464,17 +476,17 @@ impl App {
         let line = buf.cursor_line();
         let lines = buf.line_count();
         let col = buf.cursor_display_col();
-        if line < self.scroll_top {
-            self.scroll_top = line;
-        } else if line >= self.scroll_top + h {
-            self.scroll_top = line + 1 - h;
+        if line < self.doc.scroll_top {
+            self.doc.scroll_top = line;
+        } else if line >= self.doc.scroll_top + h {
+            self.doc.scroll_top = line + 1 - h;
         }
         let max_top = lines.saturating_sub(1);
-        self.scroll_top = self.scroll_top.min(max_top);
-        if col < self.scroll_left {
-            self.scroll_left = col;
-        } else if col >= self.scroll_left + w {
-            self.scroll_left = col + 1 - w;
+        self.doc.scroll_top = self.doc.scroll_top.min(max_top);
+        if col < self.doc.scroll_left {
+            self.doc.scroll_left = col;
+        } else if col >= self.doc.scroll_left + w {
+            self.doc.scroll_left = col + 1 - w;
         }
     }
 
@@ -536,17 +548,17 @@ impl App {
 
     /// Write-ahead: every edit reaches `write()` before anything else happens.
     fn flush_edits(&mut self) {
-        let edits = self.buffer.take_pending_edits();
+        let edits = self.doc.buffer.take_pending_edits();
         if edits.is_empty() {
             return;
         }
         self.with_history(|h| h.append(&edits));
-        if self.swap_failed {
+        if self.doc.swap_failed {
             return;
         }
-        if let Some(w) = self.swap.as_mut() {
+        if let Some(w) = self.doc.swap.as_mut() {
             if let Err(e) = w.append(&edits) {
-                self.swap_failed = true;
+                self.doc.swap_failed = true;
                 self.set_error(format!("Swap write failed: {e}"));
             }
         }
@@ -556,7 +568,7 @@ impl App {
     /// working swap, so it can't scroll away like a message.
     pub fn recovery_off(&self) -> bool {
         let recovering = matches!(self.mode, Mode::Recover(_));
-        !recovering && (self.swap.is_none() || self.swap_failed)
+        !recovering && (self.doc.swap.is_none() || self.doc.swap_failed)
     }
 
     /// Bytes waiting to go to the terminal, such as a clipboard copy.
@@ -566,15 +578,15 @@ impl App {
 
     /// Whether a swap file is being written.
     pub fn swap_path(&self) -> Option<&std::path::Path> {
-        self.swap.as_ref().map(|w| w.path())
+        self.doc.swap.as_ref().map(|w| w.path())
     }
 
     /// Called once after the event loop: removes the swap unless it must be kept.
     pub fn finish(&mut self) {
-        let text = self.buffer.rope().clone();
+        let text = self.doc.buffer.rope().clone();
         self.with_history(|h| h.close(&text));
-        if let Some(w) = self.swap.take() {
-            if self.keep_swap {
+        if let Some(w) = self.doc.swap.take() {
+            if self.doc.keep_swap {
                 let _ = { w }.fsync_if_pending();
             } else {
                 let _ = w.remove();
@@ -676,22 +688,22 @@ impl App {
         match key {
             Key::Char('r') if info.recovered.is_some() => {
                 let text = info.recovered.clone().unwrap_or_default();
-                let path = self.buffer.path().map(|p| p.to_path_buf());
-                self.buffer = Buffer::from_str(&text, path);
-                self.buffer.default_indent_to(self.default_indent);
-                self.buffer.set_dirty();
+                let path = self.doc.buffer.path().map(|p| p.to_path_buf());
+                self.doc.buffer = Buffer::from_str(&text, path);
+                self.doc.buffer.default_indent_to(self.default_indent);
+                self.doc.buffer.set_dirty();
                 self.mode = Mode::Insert;
                 if info.file_changed {
                     // Saving this version replaces what's on disk, so ask first.
-                    self.disk = None;
-                    self.disk_text = None;
+                    self.doc.disk = None;
+                    self.doc.disk_text = None;
                 }
                 self.start_history();
-                let recovered = self.buffer.rope().clone();
+                let recovered = self.doc.buffer.rope().clone();
                 self.with_history(|h| h.snapshot(&recovered, SnapshotKind::Recovered));
                 match SwapWriter::adopt(&info.swap_path) {
                     Ok(w) => {
-                        self.swap = Some(w);
+                        self.doc.swap = Some(w);
                         self.set_message("Recovered unsaved changes; Ctrl-S saves them");
                     }
                     Err(e) => {
@@ -705,18 +717,18 @@ impl App {
                 let fresh = if info.target.as_os_str().is_empty() {
                     SwapWriter::create_untitled()
                 } else {
-                    SwapWriter::create(&info.target, self.buffer.rope())
+                    SwapWriter::create(&info.target, self.doc.buffer.rope())
                 };
                 match fresh {
                     Ok(w) => {
-                        self.swap = Some(w);
+                        self.doc.swap = Some(w);
                         self.set_message("Discarded the swap file");
                     }
                     Err(e) => self.set_error(format!("Discarded the swap; new swap failed: {e}")),
                 }
             }
             Key::Char('q') | Key::Esc => {
-                self.keep_swap = true;
+                self.doc.keep_swap = true;
                 self.quit = true;
             }
             _ => {}
@@ -724,7 +736,7 @@ impl App {
     }
 
     fn insert_key(&mut self, key: Key, now: Instant) {
-        let b = &mut self.buffer;
+        let b = &mut self.doc.buffer;
         match key {
             Key::Esc | Key::Ctrl(' ') => self.mode = Mode::Overlay { opened_at: now },
             Key::Ctrl('p') => self.open_palette(),
@@ -750,9 +762,9 @@ impl App {
             Key::WordLeft => self.motion(Motion::WordLeft),
             Key::WordRight => self.motion(Motion::WordRight),
             Key::Select(m) => {
-                let anchor = self.buffer.selection_anchor();
+                let anchor = self.doc.buffer.selection_anchor();
                 self.motion(m);
-                self.buffer.set_selection_anchor(anchor);
+                self.doc.buffer.set_selection_anchor(anchor);
             }
             Key::WordBackspace => {
                 if !b.delete_selection() {
@@ -782,7 +794,7 @@ impl App {
     /// Moves the cursor. A plain move also ends any selection.
     fn motion(&mut self, m: Motion) {
         let page = self.text_height() as isize;
-        let b = &mut self.buffer;
+        let b = &mut self.doc.buffer;
         match m {
             Motion::Left => b.move_left(),
             Motion::Right => b.move_right(),
@@ -813,7 +825,7 @@ impl App {
     /// The text Ctrl-C or Ctrl-X takes: the selection, or the whole line with
     /// its line ending. `None` when there is nothing to take.
     fn clip_text(&self) -> Option<(String, bool)> {
-        let b = &self.buffer;
+        let b = &self.doc.buffer;
         if let Some(r) = b.selection() {
             return Some((b.slice_string(r), false));
         }
@@ -863,7 +875,7 @@ impl App {
         if whole_line {
             self.op_line();
         } else {
-            self.buffer.delete_selection();
+            self.doc.buffer.delete_selection();
         }
         self.set_clipboard(text, whole_line);
     }
@@ -877,22 +889,22 @@ impl App {
         let text = self
             .clipboard
             .replace("\r\n", "\n")
-            .replace('\n', self.buffer.eol());
-        if self.clipboard_whole_line && self.buffer.selection().is_none() {
-            let start = self.buffer.line_start(self.buffer.cursor_line());
-            self.buffer.move_to(start);
+            .replace('\n', self.doc.buffer.eol());
+        if self.clipboard_whole_line && self.doc.buffer.selection().is_none() {
+            let start = self.doc.buffer.line_start(self.doc.buffer.cursor_line());
+            self.doc.buffer.move_to(start);
         }
-        self.buffer.insert_str(&text, GroupKind::Paste);
+        self.doc.buffer.insert_str(&text, GroupKind::Paste);
     }
 
     fn overlay_key(&mut self, key: Key, opened_at: Instant, now: Instant) {
         self.mode = Mode::Insert;
         let split = now.saturating_duration_since(opened_at) <= ESC_TAIL_WINDOW;
-        let selecting = self.buffer.selection().is_some();
+        let selecting = self.doc.buffer.selection().is_some();
         match key {
             Key::Char('[') if split => self.esc_tail = Some((EscTail::Csi, now)),
             Key::Char('O') if split => self.esc_tail = Some((EscTail::Ss3, now)),
-            Key::Esc if selecting => self.buffer.clear_selection(),
+            Key::Esc if selecting => self.doc.buffer.clear_selection(),
             Key::Esc => {
                 if now.saturating_duration_since(opened_at) <= self.esc_window {
                     self.open_palette();
@@ -907,33 +919,39 @@ impl App {
 
     /// The file's path, when Kyte can parse its language.
     fn code_path(&self) -> Option<&std::path::Path> {
-        let head = self.buffer.head();
-        self.buffer.path().filter(|p| syntax::supported(p, &head))
+        let head = self.doc.buffer.head();
+        self.doc
+            .buffer
+            .path()
+            .filter(|p| syntax::supported(p, &head))
     }
 
     /// Whether the file's language has functions to work with.
     fn has_functions(&self) -> bool {
-        let head = self.buffer.head();
-        self.buffer
+        let head = self.doc.buffer.head();
+        self.doc
+            .buffer
             .path()
             .is_some_and(|p| syntax::has_functions(p, &head))
     }
 
     fn comment_prefix(&self) -> Option<&'static str> {
-        let head = self.buffer.head();
-        self.buffer
+        let head = self.doc.buffer.head();
+        self.doc
+            .buffer
             .path()
             .and_then(|p| syntax::comment_prefix(p, &head))
     }
 
     /// Whether the cursor is on a bracket that has a partner.
     fn on_bracket(&self) -> bool {
-        let at = self.buffer.cursor();
-        self.buffer
+        let at = self.doc.buffer.cursor();
+        self.doc
+            .buffer
             .rope()
             .get_char(at)
             .is_some_and(|c| "()[]{}".contains(c))
-            && ops::match_bracket(self.buffer.rope(), at).is_some()
+            && ops::match_bracket(self.doc.buffer.rope(), at).is_some()
     }
 
     /// The Esc layer's keys, for where the cursor is now. Each one here needs
@@ -942,7 +960,7 @@ impl App {
         let code = self.code_path().is_some();
         let comment = self.comment_prefix().is_some();
         let mut rows = Vec::new();
-        if self.buffer.selection().is_some() {
+        if self.doc.buffer.selection().is_some() {
             rows.extend([("x", "cut"), ("c", "copy")]);
             rows.extend([("/", "find this"), ("R", "replace this")]);
             if comment {
@@ -956,7 +974,7 @@ impl App {
             return rows;
         }
         rows.extend_from_slice(LEGEND);
-        if self.outside_change {
+        if self.doc.outside_change {
             rows.push(("c", "review outside changes"));
         }
         if self.on_bracket() {
@@ -991,7 +1009,7 @@ impl App {
             's' => self.save(),
             'h' => self.open_history(),
             'v' => self.open_reader(),
-            'c' if self.outside_change => self.open_review(),
+            'c' if self.doc.outside_change => self.open_review(),
             'i' if self.on_bracket() => self.select_inside_brackets(),
             '#' => self.toggle_comment(),
             'e' if self.code_path().is_some() => self.expand_selection(),
@@ -1009,9 +1027,9 @@ impl App {
             '/' => self.open_search(),
             'R' => self.open_replace(),
             '#' => self.toggle_comment(),
-            'U' => self.buffer.transform_selection(|s| s.to_uppercase()),
-            'L' => self.buffer.transform_selection(|s| s.to_lowercase()),
-            'S' => self.buffer.sort_lines(),
+            'U' => self.doc.buffer.transform_selection(|s| s.to_uppercase()),
+            'L' => self.doc.buffer.transform_selection(|s| s.to_lowercase()),
+            'S' => self.doc.buffer.sort_lines(),
             'e' if self.code_path().is_some() => self.expand_selection(),
             _ => {}
         }
@@ -1019,14 +1037,16 @@ impl App {
 
     fn toggle_comment(&mut self) {
         if let Some(prefix) = self.comment_prefix() {
-            self.buffer.toggle_comment(prefix);
+            self.doc.buffer.toggle_comment(prefix);
         }
     }
 
     fn select_inside_brackets(&mut self) {
-        let at = self.buffer.cursor();
-        if let Some(other) = ops::match_bracket(self.buffer.rope(), at) {
-            self.buffer.select_range(at.min(other) + 1..at.max(other));
+        let at = self.doc.buffer.cursor();
+        if let Some(other) = ops::match_bracket(self.doc.buffer.rope(), at) {
+            self.doc
+                .buffer
+                .select_range(at.min(other) + 1..at.max(other));
         }
     }
 
@@ -1036,15 +1056,19 @@ impl App {
         f: impl FnOnce(&std::path::Path, &str, usize) -> Option<T>,
     ) -> Option<T> {
         let path = self.code_path()?;
-        let at = self.buffer.rope().char_to_byte(self.buffer.cursor());
-        f(path, &self.buffer.to_string(), at)
+        let at = self
+            .doc
+            .buffer
+            .rope()
+            .char_to_byte(self.doc.buffer.cursor());
+        f(path, &self.doc.buffer.to_string(), at)
     }
 
     /// Selects a byte range of the text.
     fn select_bytes(&mut self, r: std::ops::Range<usize>) {
-        let rope = self.buffer.rope();
+        let rope = self.doc.buffer.rope();
         let range = rope.byte_to_char(r.start)..rope.byte_to_char(r.end);
-        self.buffer.select_range(range);
+        self.doc.buffer.select_range(range);
     }
 
     fn select_function(&mut self) {
@@ -1056,11 +1080,12 @@ impl App {
 
     /// Selects the piece of syntax around the selection or cursor.
     fn expand_selection(&mut self) {
-        let rope = self.buffer.rope();
+        let rope = self.doc.buffer.rope();
         let chars = self
+            .doc
             .buffer
             .selection()
-            .unwrap_or(self.buffer.cursor()..self.buffer.cursor());
+            .unwrap_or(self.doc.buffer.cursor()..self.doc.buffer.cursor());
         let bytes = rope.char_to_byte(chars.start)..rope.char_to_byte(chars.end);
         match self.with_code(|p, t, _| syntax::expand(p, t, bytes)) {
             Some(r) => self.select_bytes(r),
@@ -1076,8 +1101,8 @@ impl App {
         });
         match found {
             Some(b) => {
-                let at = self.buffer.rope().byte_to_char(b);
-                self.buffer.move_to(at);
+                let at = self.doc.buffer.rope().byte_to_char(b);
+                self.doc.buffer.move_to(at);
             }
             None => self.set_message("No more functions"),
         }
@@ -1087,18 +1112,20 @@ impl App {
     pub fn open_search(&mut self) {
         let query = self.selected_query();
         let origin = self
+            .doc
             .buffer
             .selection()
-            .map_or(self.buffer.cursor(), |r| r.start);
-        self.buffer.move_to(origin);
+            .map_or(self.doc.buffer.cursor(), |r| r.start);
+        self.doc.buffer.move_to(origin);
         self.mode = Mode::Prompt(Prompt::Search { query, origin });
     }
 
     /// The selection as a starting query, if it fits on one line.
     fn selected_query(&self) -> String {
-        self.buffer
+        self.doc
+            .buffer
             .selection()
-            .map(|r| self.buffer.slice_string(r))
+            .map(|r| self.doc.buffer.slice_string(r))
             .filter(|s| !s.contains('\n'))
             .unwrap_or_default()
     }
@@ -1117,27 +1144,27 @@ impl App {
     fn search_key(&mut self, key: Key, mut query: String, origin: usize) {
         match key {
             Key::Esc => {
-                let at = self.buffer.cursor();
-                if !search::matches_at(self.buffer.rope(), &query, at) {
-                    self.buffer.move_to(origin);
+                let at = self.doc.buffer.cursor();
+                if !search::matches_at(self.doc.buffer.rope(), &query, at) {
+                    self.doc.buffer.move_to(origin);
                 }
                 self.mode = Mode::Insert;
                 return;
             }
             Key::Enter | Key::Down | Key::Ctrl('f') => {
                 if !query.is_empty() {
-                    let at = self.buffer.cursor();
-                    match search::find_next(self.buffer.rope(), &query, at) {
-                        Some(i) => self.buffer.move_to(i),
+                    let at = self.doc.buffer.cursor();
+                    match search::find_next(self.doc.buffer.rope(), &query, at) {
+                        Some(i) => self.doc.buffer.move_to(i),
                         None => self.set_error("No match"),
                     }
                 }
             }
             Key::Up => {
                 if !query.is_empty() {
-                    let at = self.buffer.cursor();
-                    match search::find_prev(self.buffer.rope(), &query, at) {
-                        Some(i) => self.buffer.move_to(i),
+                    let at = self.doc.buffer.cursor();
+                    match search::find_prev(self.doc.buffer.rope(), &query, at) {
+                        Some(i) => self.doc.buffer.move_to(i),
                         None => self.set_error("No match"),
                     }
                 }
@@ -1158,13 +1185,13 @@ impl App {
     /// Jumps to the first match at or after `origin`, or back to `origin`.
     fn incremental(&mut self, query: &str, origin: usize) {
         if query.is_empty() {
-            self.buffer.move_to(origin);
+            self.doc.buffer.move_to(origin);
             return;
         }
-        match search::find_from(self.buffer.rope(), query, origin) {
-            Some(i) => self.buffer.move_to(i),
+        match search::find_from(self.doc.buffer.rope(), query, origin) {
+            Some(i) => self.doc.buffer.move_to(i),
             None => {
-                self.buffer.move_to(origin);
+                self.doc.buffer.move_to(origin);
                 self.set_error("No match");
             }
         }
@@ -1173,8 +1200,8 @@ impl App {
     /// Opens the replace prompt, starting from the selection if there is one.
     fn open_replace(&mut self) {
         let query = self.selected_query();
-        if let Some(r) = self.buffer.selection() {
-            self.buffer.move_to(r.start);
+        if let Some(r) = self.doc.buffer.selection() {
+            self.doc.buffer.move_to(r.start);
         }
         self.mode = Mode::Prompt(Prompt::ReplaceFind { query });
     }
@@ -1208,7 +1235,7 @@ impl App {
                 return;
             }
             Key::Enter => {
-                let from = self.buffer.cursor();
+                let from = self.doc.buffer.cursor();
                 let run = ReplaceRun {
                     query,
                     with,
@@ -1230,7 +1257,7 @@ impl App {
 
     /// Stops at the next match from `from`, or finishes.
     fn replace_advance(&mut self, mut run: ReplaceRun, from: usize) {
-        let rope = self.buffer.rope();
+        let rope = self.doc.buffer.rope();
         let mut hit = search::find_forward(rope, &run.query, from);
         if hit.is_none() && !run.wrapped {
             run.wrapped = true;
@@ -1238,7 +1265,7 @@ impl App {
         }
         match hit.filter(|i| !run.wrapped || *i < run.origin) {
             Some(i) => {
-                self.buffer.move_to(i);
+                self.doc.buffer.move_to(i);
                 self.mode = Mode::Prompt(Prompt::ReplaceConfirm(run));
             }
             None => self.finish_replace(run.count),
@@ -1255,13 +1282,14 @@ impl App {
     }
 
     fn replace_confirm_key(&mut self, key: Key, mut run: ReplaceRun) {
-        let at = self.buffer.cursor();
+        let at = self.doc.buffer.cursor();
         match key {
             Key::Char('y') => {
                 let edit = self.replacement_at(at, &run);
                 let inserted = edit.inserted.chars().count();
                 let removed = edit.removed.chars().count();
-                self.buffer
+                self.doc
+                    .buffer
                     .apply_with_cursor(edit, GroupKind::Operator, at + inserted);
                 run.count += 1;
                 if run.wrapped {
@@ -1272,7 +1300,7 @@ impl App {
             Key::Char('n') => self.replace_advance(run, at + 1),
             Key::Char('a') => {
                 let (origin, wrapped) = (run.origin, run.wrapped);
-                let hits = search::find_all(self.buffer.rope(), &run.query);
+                let hits = search::find_all(self.doc.buffer.rope(), &run.query);
                 let mut edits: Vec<Edit> = hits
                     .into_iter()
                     .filter(|i| {
@@ -1287,7 +1315,7 @@ impl App {
                 // Last first, so earlier positions stay right.
                 edits.reverse();
                 let count = run.count + edits.len();
-                self.buffer.apply_group(edits, at);
+                self.doc.buffer.apply_group(edits, at);
                 self.finish_replace(count);
             }
             Key::Char('q') | Key::Esc => self.finish_replace(run.count),
@@ -1299,7 +1327,7 @@ impl App {
         let n = run.query.chars().count();
         Edit {
             at,
-            removed: self.buffer.slice_string(at..at + n),
+            removed: self.doc.buffer.slice_string(at..at + n),
             inserted: run.with.clone(),
         }
     }
@@ -1335,8 +1363,8 @@ impl App {
                 ));
             }
             Entry::Find(query) => {
-                self.buffer.clear_selection();
-                let origin = self.buffer.cursor();
+                self.doc.buffer.clear_selection();
+                let origin = self.doc.buffer.cursor();
                 self.incremental(&query, origin);
                 self.mode = Mode::Prompt(Prompt::Search { query, origin });
             }
@@ -1344,9 +1372,9 @@ impl App {
     }
 
     fn go_to_line(&mut self, n: usize) {
-        let last = self.buffer.line_count();
-        let start = self.buffer.line_start(n.min(last) - 1);
-        self.buffer.move_to(start);
+        let last = self.doc.buffer.line_count();
+        let start = self.doc.buffer.line_start(n.min(last) - 1);
+        self.doc.buffer.move_to(start);
     }
 
     fn palette_key(&mut self, key: Key, mut state: PaletteState) {
@@ -1386,7 +1414,7 @@ impl App {
             Command::Cut => self.cut(),
             Command::Copy => self.copy(),
             Command::Paste => self.paste(),
-            Command::SelectAll => self.buffer.select_all(),
+            Command::SelectAll => self.doc.buffer.select_all(),
             Command::Find => self.open_search(),
             Command::Replace => self.open_replace(),
             Command::GotoLine => {
@@ -1398,8 +1426,8 @@ impl App {
             Command::ToggleIndent => self.toggle_indent(),
             Command::ToggleWrap => {
                 self.soft_wrap = !self.soft_wrap;
-                self.scroll_row = 0;
-                self.scroll_left = 0;
+                self.doc.scroll_row = 0;
+                self.doc.scroll_left = 0;
             }
             Command::ChooseTheme => self.mode = Mode::Palette(PaletteState::themes(self.theme)),
             Command::History => self.open_history(),
@@ -1439,8 +1467,8 @@ impl App {
         if r.is_empty() {
             return;
         }
-        let removed = self.buffer.slice_string(r.clone());
-        self.buffer.apply_with_cursor(
+        let removed = self.doc.buffer.slice_string(r.clone());
+        self.doc.buffer.apply_with_cursor(
             Edit {
                 at: r.start,
                 removed,
@@ -1453,58 +1481,59 @@ impl App {
 
     /// `w`: delete to the start of the next word.
     fn op_word(&mut self) {
-        let at = self.buffer.cursor();
-        let end = ops::word_end(self.buffer.rope(), at);
+        let at = self.doc.buffer.cursor();
+        let end = ops::word_end(self.doc.buffer.rope(), at);
         self.delete_range(at..end, at);
     }
 
     /// `d`: delete the current line; the cursor keeps its column on the line
     /// that takes its place, clamped to that line's last character.
     fn op_line(&mut self) {
-        let at = self.buffer.cursor();
-        let (_, col) = self.buffer.line_col();
-        let r = ops::line_range(self.buffer.rope(), at);
+        let at = self.doc.buffer.cursor();
+        let (_, col) = self.doc.buffer.line_col();
+        let r = ops::line_range(self.doc.buffer.rope(), at);
         if r.is_empty() {
             return;
         }
         let start = r.start;
         self.delete_range(r, start);
         let line = self
+            .doc
             .buffer
             .rope()
-            .char_to_line(start.min(self.buffer.len_chars()));
-        let text = self.buffer.line_text(line);
+            .char_to_line(start.min(self.doc.buffer.len_chars()));
+        let text = self.doc.buffer.line_text(line);
         let off = crate::buffer::graphemes_with_char_offsets(&text)
             .take(col)
             .last()
             .map_or(0, |(o, _)| o);
-        let target = self.buffer.line_start(line) + off;
-        self.buffer.move_to(target);
+        let target = self.doc.buffer.line_start(line) + off;
+        self.doc.buffer.move_to(target);
     }
 
     /// `k`: delete to end of line, or join with the next line at the end.
     fn op_kill(&mut self) {
-        let at = self.buffer.cursor();
-        let r = ops::kill_range(self.buffer.rope(), at);
+        let at = self.doc.buffer.cursor();
+        let r = ops::kill_range(self.doc.buffer.rope(), at);
         self.delete_range(r, at);
     }
 
     /// `%`: jump to the matching bracket.
     fn op_bracket(&mut self) {
-        match ops::match_bracket(self.buffer.rope(), self.buffer.cursor()) {
-            Some(t) => self.buffer.move_to(t),
+        match ops::match_bracket(self.doc.buffer.rope(), self.doc.buffer.cursor()) {
+            Some(t) => self.doc.buffer.move_to(t),
             None => self.set_error("No matching bracket"),
         }
     }
 
     fn undo(&mut self) {
-        if !self.buffer.undo() {
+        if !self.doc.buffer.undo() {
             self.set_message("Nothing to undo");
         }
     }
 
     fn redo(&mut self) {
-        if !self.buffer.redo() {
+        if !self.doc.buffer.redo() {
             self.set_message("Nothing to redo");
         }
     }
@@ -1514,8 +1543,8 @@ impl App {
         match &mut self.mode {
             Mode::Insert | Mode::Overlay { .. } => {
                 self.mode = Mode::Insert;
-                let text = text.replace('\n', self.buffer.eol());
-                self.buffer.insert_str(&text, GroupKind::Paste);
+                let text = text.replace('\n', self.doc.buffer.eol());
+                self.doc.buffer.insert_str(&text, GroupKind::Paste);
             }
             Mode::Palette(state) => {
                 let q = format!("{}{}", state.query, text.replace('\n', " "));
@@ -1523,7 +1552,7 @@ impl App {
                 self.theme = state.theme_shown().unwrap_or(self.theme);
             }
             Mode::Prompt(Prompt::Search { query, origin }) => {
-                query.push_str(&text.replace('\n', self.buffer.eol()));
+                query.push_str(&text.replace('\n', self.doc.buffer.eol()));
                 let (query, origin) = (query.clone(), *origin);
                 self.incremental(&query, origin);
             }
@@ -1552,9 +1581,9 @@ impl App {
             .last_fsync
             .is_none_or(|t| now.saturating_duration_since(t) >= Duration::from_secs(1));
         if due {
-            if let Some(w) = self.swap.as_mut() {
+            if let Some(w) = self.doc.swap.as_mut() {
                 if let Err(e) = w.fsync_if_pending() {
-                    self.swap_failed = true;
+                    self.doc.swap_failed = true;
                     self.set_error(format!("Swap fsync failed: {e}"));
                 }
             }
@@ -1572,7 +1601,7 @@ impl App {
 
     /// Saves to the buffer's file, or asks for a name if it has none.
     fn start_save(&mut self, then: After) {
-        match self.buffer.path().map(|p| p.to_path_buf()) {
+        match self.doc.buffer.path().map(|p| p.to_path_buf()) {
             Some(path) => self.save_after(path, None, then),
             None => self.open_save_as(then),
         }
@@ -1581,6 +1610,7 @@ impl App {
     /// Opens the Save As prompt, starting from the current file name.
     fn open_save_as(&mut self, then: After) {
         let text = self
+            .doc
             .buffer
             .path()
             .map(|p| p.display().to_string())
@@ -1625,6 +1655,7 @@ impl App {
     /// Opens the file prompt, starting in the current file's directory.
     fn open_prompt(&mut self) {
         let text = self
+            .doc
             .buffer
             .path()
             .and_then(|p| p.parent())
@@ -1660,11 +1691,11 @@ impl App {
         }
         let path = fileio::absolute(&fileio::expand_tilde(text)).map_err(|e| e.to_string())?;
         let target = fileio::resolve_target(&path).map_err(|e| e.to_string())?;
-        if Some(&target) != self.swap_target.as_ref() {
+        if Some(&target) != self.doc.swap_target.as_ref() {
             session::check(&path)?;
         }
         self.mode = Mode::Insert;
-        if self.buffer.is_dirty() {
+        if self.doc.buffer.is_dirty() {
             self.mode = Mode::Prompt(Prompt::ConfirmLeave {
                 then: After::Open(path),
             });
@@ -1676,11 +1707,11 @@ impl App {
 
     /// Leaves the current buffer for `path`. Anything unsaved in it is gone.
     fn switch_to(&mut self, path: &std::path::Path) {
-        let same =
-            fileio::resolve_target(path).ok() == self.swap_target && self.swap_target.is_some();
+        let same = fileio::resolve_target(path).ok() == self.doc.swap_target
+            && self.doc.swap_target.is_some();
         if same {
             // Its swap holds what was just discarded.
-            if let Some(old) = self.swap.take() {
+            if let Some(old) = self.doc.swap.take() {
                 let _ = old.remove();
             }
         }
@@ -1703,25 +1734,25 @@ impl App {
                 return;
             }
         };
-        if let Some(old) = self.swap.take() {
+        if let Some(old) = self.doc.swap.take() {
             let _ = old.remove();
         }
-        self.swap_target = buffer.path().and_then(|p| fileio::resolve_target(p).ok());
-        self.disk = Some(DiskState::of_rope(buffer.rope()));
-        self.disk_text = Some(buffer.rope().clone());
-        self.disk_stamp = None;
-        self.outside_change = false;
+        self.doc.swap_target = buffer.path().and_then(|p| fileio::resolve_target(p).ok());
+        self.doc.disk = Some(DiskState::of_rope(buffer.rope()));
+        self.doc.disk_text = Some(buffer.rope().clone());
+        self.doc.disk_stamp = None;
+        self.doc.outside_change = false;
         let mut buffer = buffer;
         buffer.default_indent_to(self.default_indent);
-        let closing = self.buffer.rope().clone();
+        let closing = self.doc.buffer.rope().clone();
         self.with_history(|h| h.close(&closing));
-        self.buffer = buffer;
-        self.swap = swap;
-        self.swap_failed = false;
+        self.doc.buffer = buffer;
+        self.doc.swap = swap;
+        self.doc.swap_failed = false;
         self.start_history();
-        self.scroll_top = 0;
-        self.scroll_left = 0;
-        self.scroll_row = 0;
+        self.doc.scroll_top = 0;
+        self.doc.scroll_left = 0;
+        self.doc.scroll_row = 0;
         self.mode = recover.map_or(Mode::Insert, Mode::Recover);
         if let Some(w) = warning {
             self.set_error(w);
@@ -1746,8 +1777,8 @@ impl App {
     }
 
     fn open_reader(&mut self) {
-        self.buffer.clear_selection();
-        let (focus, crumbs) = reader::section_at(&self.buffer);
+        self.doc.buffer.clear_selection();
+        let (focus, crumbs) = reader::section_at(&self.doc.buffer);
         self.bring_into_view(&focus);
         self.reader = Some(Reader {
             focus,
@@ -1760,10 +1791,10 @@ impl App {
     /// Scrolls to show `lines`, unless they're already on screen. Moving the
     /// page while someone reads it loses their place.
     fn bring_into_view(&mut self, lines: &std::ops::Range<usize>) {
-        let bottom = self.scroll_top + self.text_height();
-        if lines.start < self.scroll_top || lines.end > bottom {
-            self.scroll_top = lines.start.saturating_sub(READER_LINES_ABOVE);
-            self.scroll_row = 0;
+        let bottom = self.doc.scroll_top + self.text_height();
+        if lines.start < self.doc.scroll_top || lines.end > bottom {
+            self.doc.scroll_top = lines.start.saturating_sub(READER_LINES_ABOVE);
+            self.doc.scroll_row = 0;
         }
     }
 
@@ -1783,14 +1814,14 @@ impl App {
             Key::PageUp => self.motion(Motion::PageUp),
             Key::PageDown => self.motion(Motion::PageDown),
             Key::Char('n') | Key::Char('p') => {
-                match reader::step(&self.buffer, key == Key::Char('n')) {
-                    Some(at) => self.buffer.move_to(at),
+                match reader::step(&self.doc.buffer, key == Key::Char('n')) {
+                    Some(at) => self.doc.buffer.move_to(at),
                     None => self.set_message("No more sections"),
                 }
             }
             _ => {}
         }
-        let (focus, crumbs) = reader::section_at(&self.buffer);
+        let (focus, crumbs) = reader::section_at(&self.doc.buffer);
         if self.reader.as_ref().is_none_or(|r| r.focus != focus) {
             self.bring_into_view(&focus);
         }
@@ -1803,7 +1834,7 @@ impl App {
 
     /// Whether the file on disk has changes that haven't been reviewed.
     pub fn has_outside_change(&self) -> bool {
-        self.outside_change
+        self.doc.outside_change
     }
 
     /// Whether something changed with no key pressed.
@@ -1817,27 +1848,27 @@ impl App {
         if matches!(self.mode, Mode::Recover(_) | Mode::Review(_)) {
             return;
         }
-        let Some(path) = self.buffer.path().map(|p| p.to_path_buf()) else {
+        let Some(path) = self.doc.buffer.path().map(|p| p.to_path_buf()) else {
             return;
         };
         let Ok(meta) = std::fs::metadata(&path) else {
             return;
         };
         let stamp = meta.modified().ok().map(|t| (meta.len(), t));
-        if stamp == self.disk_stamp {
+        if stamp == self.doc.disk_stamp {
             return;
         }
-        self.disk_stamp = stamp;
-        let changed = matches!(fileio::disk_state(&path), Ok(Some(s)) if Some(s) != self.disk);
-        if changed != self.outside_change {
-            self.outside_change = changed;
+        self.doc.disk_stamp = stamp;
+        let changed = matches!(fileio::disk_state(&path), Ok(Some(s)) if Some(s) != self.doc.disk);
+        if changed != self.doc.outside_change {
+            self.doc.outside_change = changed;
             self.needs_redraw = true;
         }
     }
 
     /// Starts reviewing what changed on disk.
     fn open_review(&mut self) {
-        let Some(path) = self.buffer.path().map(|p| p.to_path_buf()) else {
+        let Some(path) = self.doc.buffer.path().map(|p| p.to_path_buf()) else {
             return;
         };
         let theirs = match std::fs::read_to_string(&path) {
@@ -1847,14 +1878,18 @@ impl App {
                 return;
             }
         };
-        let ours = self.buffer.to_string();
+        let ours = self.doc.buffer.to_string();
         let base = self
+            .doc
             .disk_text
             .as_ref()
             .map_or(ours.clone(), |r| r.to_string());
         let changes = review::changes(&base, &ours, &theirs);
         // The version goes in the history before any choice can lose it.
-        let (outside, current) = (ropey::Rope::from_str(&theirs), self.buffer.rope().clone());
+        let (outside, current) = (
+            ropey::Rope::from_str(&theirs),
+            self.doc.buffer.rope().clone(),
+        );
         self.with_history(|h| h.note_outside(&outside, &current));
         let run = ReviewRun {
             changes: std::sync::Arc::new(changes),
@@ -1888,15 +1923,15 @@ impl App {
         let lines = self.change_lines(&run, run.at);
         let incoming = Self::theirs_text(&run, run.at);
         let added = run.changes[run.at].theirs.len();
-        let mut rope = self.buffer.rope().clone();
+        let mut rope = self.doc.buffer.rope().clone();
         let at = rope.line_to_char(lines.end.min(rope.len_lines()));
         let needs_break = at > 0 && rope.char(at - 1) != '\n' && !incoming.is_empty();
         if needs_break {
-            rope.insert(at, self.buffer.eol());
+            rope.insert(at, self.doc.buffer.eol());
         }
         let at = rope.line_to_char(lines.end.min(rope.len_lines()));
         rope.insert(at, &incoming);
-        let mut view = self.buffer.view_of(rope);
+        let mut view = self.doc.buffer.view_of(rope);
         let first = lines.start.min(view.line_count() - 1);
         view.move_to(view.line_start(first));
         self.review_marks = Some((lines.clone(), lines.end..lines.end + added));
@@ -1908,12 +1943,12 @@ impl App {
     /// The edit that takes change `i`.
     fn change_edit(&self, run: &ReviewRun, i: usize) -> Edit {
         let lines = self.change_lines(run, i);
-        let rope = self.buffer.rope();
+        let rope = self.doc.buffer.rope();
         let start = rope.line_to_char(lines.start);
         let end = rope.line_to_char(lines.end.min(rope.len_lines()));
         Edit {
             at: start,
-            removed: self.buffer.slice_string(start..end),
+            removed: self.doc.buffer.slice_string(start..end),
             inserted: Self::theirs_text(run, i),
         }
     }
@@ -1924,7 +1959,8 @@ impl App {
             Key::Char('y') => {
                 let edit = self.change_edit(&run, i);
                 let end = edit.at + edit.inserted.chars().count();
-                self.buffer
+                self.doc
+                    .buffer
                     .apply_with_cursor(edit, GroupKind::Operator, end);
                 let c = &run.changes[i];
                 run.shift += c.theirs.len() as isize - c.ours.len() as isize;
@@ -1939,7 +1975,7 @@ impl App {
                 run.accepted += edits.len();
                 // Last first, so earlier positions stay right.
                 edits.reverse();
-                self.buffer.apply_group(edits, at);
+                self.doc.buffer.apply_group(edits, at);
                 self.finish_review(&run);
                 return;
             }
@@ -1970,11 +2006,11 @@ impl App {
     /// Every change has an answer, so the file on disk is now the known one.
     fn finish_review(&mut self, run: &ReviewRun) {
         self.close_review();
-        self.disk = Some(DiskState::of_bytes(run.theirs.as_bytes()));
-        self.disk_text = Some(ropey::Rope::from_str(&run.theirs));
-        self.outside_change = false;
-        if self.buffer.to_string() == *run.theirs {
-            self.buffer.mark_clean();
+        self.doc.disk = Some(DiskState::of_bytes(run.theirs.as_bytes()));
+        self.doc.disk_text = Some(ropey::Rope::from_str(&run.theirs));
+        self.doc.outside_change = false;
+        if self.doc.buffer.to_string() == *run.theirs {
+            self.doc.buffer.mark_clean();
         }
         if !run.changes.is_empty() {
             let (took, all) = (run.accepted, run.changes.len());
@@ -1984,7 +2020,7 @@ impl App {
 
     /// Opens the timeline at the newest version.
     fn open_history(&mut self) {
-        let Some(h) = self.history.as_ref() else {
+        let Some(h) = self.doc.history.as_ref() else {
             let why = if !self.history_on {
                 "File history is off this session"
             } else {
@@ -2007,7 +2043,7 @@ impl App {
 
     /// Shows version `at`, with what it changed selected.
     fn show_version(&mut self, timeline: SharedTimeline, at: usize) {
-        let mut view = self.buffer.view_of(timeline.text_at(at));
+        let mut view = self.doc.buffer.view_of(timeline.text_at(at));
         if let Change::Edit { at: pos, ins, .. } = &timeline.version(at).change {
             let end = pos + ins.chars().count();
             view.move_to(end);
@@ -2036,7 +2072,7 @@ impl App {
                 let text = timeline.text_at(at).to_string();
                 let when = history::ago_from_now(timeline.version(at).time_ms);
                 self.close_history();
-                if self.buffer.replace_all(&text) {
+                if self.doc.buffer.replace_all(&text) {
                     self.set_message(format!(
                         "Restored the version from {when}; Ctrl-Z undoes it"
                     ));
@@ -2055,20 +2091,20 @@ impl App {
     }
 
     fn delete_history(&mut self) {
-        let text = self.buffer.rope().clone();
+        let text = self.doc.buffer.rope().clone();
         self.with_history(|h| h.delete(&text));
-        if self.history.is_some() {
+        if self.doc.history.is_some() {
             self.set_message("Deleted this file's history");
         }
     }
 
     /// Switches this file between tabs and spaces for new indent.
     fn toggle_indent(&mut self) {
-        let next = match self.buffer.indent() {
+        let next = match self.doc.buffer.indent() {
             Indent::Tabs => Indent::Spaces(4),
             Indent::Spaces(_) => Indent::Tabs,
         };
-        self.buffer.set_indent(next);
+        self.doc.buffer.set_indent(next);
         self.set_message(match next {
             Indent::Tabs => "Indenting with tabs".to_string(),
             Indent::Spaces(n) => format!("Indenting with {n} spaces"),
@@ -2095,7 +2131,7 @@ impl App {
             return Err("Not a regular file".to_string());
         }
         let target = fileio::resolve_target(&path).map_err(|e| e.to_string())?;
-        if Some(&target) == self.swap_target.as_ref() {
+        if Some(&target) == self.doc.swap_target.as_ref() {
             self.mode = Mode::Insert;
             self.save_after(path, None, then);
             return Ok(());
@@ -2120,7 +2156,8 @@ impl App {
     fn next_risk(&self, path: &std::path::Path, passed: Option<SaveRisk>) -> Option<SaveRisk> {
         if passed.is_none() {
             // An unreadable file is left for the write itself to report.
-            let changed = matches!(fileio::disk_state(path), Ok(Some(s)) if Some(s) != self.disk);
+            let changed =
+                matches!(fileio::disk_state(path), Ok(Some(s)) if Some(s) != self.doc.disk);
             if changed {
                 return Some(SaveRisk::ChangedOnDisk);
             }
@@ -2138,32 +2175,32 @@ impl App {
     }
 
     fn write_file(&mut self, path: &std::path::Path, then: After) {
-        let text = self.buffer.to_string();
+        let text = self.doc.buffer.to_string();
         let overwritten = self.outside_version(path);
         match fileio::save_atomic(path, &text) {
             Ok(()) => {
-                self.disk = Some(DiskState::of_bytes(text.as_bytes()));
-                self.disk_text = Some(self.buffer.rope().clone());
-                self.disk_stamp = None;
-                self.outside_change = false;
+                self.doc.disk = Some(DiskState::of_bytes(text.as_bytes()));
+                self.doc.disk_text = Some(self.doc.buffer.rope().clone());
+                self.doc.disk_stamp = None;
+                self.doc.outside_change = false;
                 self.needs_redraw = true;
-                if self.buffer.path() != Some(path) {
-                    self.buffer.set_path(path.to_path_buf());
-                    self.swap_target = fileio::resolve_target(path).ok();
+                if self.doc.buffer.path() != Some(path) {
+                    self.doc.buffer.set_path(path.to_path_buf());
+                    self.doc.swap_target = fileio::resolve_target(path).ok();
                 }
-                self.buffer.mark_clean();
+                self.doc.buffer.mark_clean();
                 self.note_save(path, overwritten);
-                let n = self.buffer.saved_line_count();
+                let n = self.doc.buffer.saved_line_count();
                 self.set_message(format!("Saved {n} line{}", if n == 1 { "" } else { "s" }));
                 // The saved file is the new base: replace the swap with an empty one.
-                if let Some(old) = self.swap.take() {
+                if let Some(old) = self.doc.swap.take() {
                     let _ = old.remove();
                 }
-                if let Some(target) = self.swap_target.clone() {
-                    match SwapWriter::create(&target, self.buffer.rope()) {
+                if let Some(target) = self.doc.swap_target.clone() {
+                    match SwapWriter::create(&target, self.doc.buffer.rope()) {
                         Ok(w) => {
-                            self.swap = Some(w);
-                            self.swap_failed = false;
+                            self.doc.swap = Some(w);
+                            self.doc.swap_failed = false;
                         }
                         Err(e) => self.set_error(format!("Saved {n} lines, but no swap: {e}")),
                     }
@@ -2177,23 +2214,23 @@ impl App {
     /// The file's content, if it isn't what Kyte last read or wrote. A save is
     /// about to replace it, so the history should keep it.
     fn outside_version(&self, path: &std::path::Path) -> Option<String> {
-        if self.buffer.path() != Some(path) || self.history.is_none() {
+        if self.doc.buffer.path() != Some(path) || self.doc.history.is_none() {
             return None;
         }
         let state = fileio::disk_state(path).ok()??;
-        (Some(state) != self.disk)
+        (Some(state) != self.doc.disk)
             .then(|| std::fs::read_to_string(path).ok())
             .flatten()
     }
 
     /// Records a finished save in the history, for the file it went to.
     fn note_save(&mut self, path: &std::path::Path, overwritten: Option<String>) {
-        let moved = self.history.as_ref().map(|h| h.target());
+        let moved = self.doc.history.as_ref().map(|h| h.target());
         if moved != fileio::resolve_target(path).ok().as_deref() {
-            self.swap_target = fileio::resolve_target(path).ok();
+            self.doc.swap_target = fileio::resolve_target(path).ok();
             self.start_history();
         }
-        let text = self.buffer.rope().clone();
+        let text = self.doc.buffer.rope().clone();
         self.with_history(|h| {
             if let Some(old) = overwritten {
                 h.snapshot(&ropey::Rope::from_str(&old), SnapshotKind::Outside)?;
@@ -2204,7 +2241,7 @@ impl App {
 
     /// Ctrl-Q: quit now when clean, otherwise ask.
     pub fn request_quit(&mut self) {
-        if self.buffer.is_dirty() {
+        if self.doc.buffer.is_dirty() {
             self.mode = Mode::Prompt(Prompt::ConfirmLeave { then: After::Quit });
         } else {
             self.quit = true;
@@ -2282,7 +2319,7 @@ mod tests {
         a.handle_key(Key::Char('y'), t).unwrap();
         assert_eq!(a.message, None, "the error isn't repeated on every key");
         assert!(a.recovery_off(), "the flag outlives the message");
-        assert_eq!(a.buffer.to_string(), "xy", "typing keeps working");
+        assert_eq!(a.doc.buffer.to_string(), "xy", "typing keeps working");
     }
 
     #[test]
@@ -2299,10 +2336,10 @@ mod tests {
             for c in seq.chars() {
                 a.handle_key(Key::Char(c), ms(t, 30)).unwrap();
             }
-            assert_eq!(a.buffer.to_string(), "abc", "{seq}");
+            assert_eq!(a.doc.buffer.to_string(), "abc", "{seq}");
             assert_eq!(a.mode, Mode::Insert);
             a.handle_key(Key::Char('z'), ms(t, 40)).unwrap();
-            assert_eq!(a.buffer.to_string(), "zabc", "{seq}: typing resumes");
+            assert_eq!(a.doc.buffer.to_string(), "zabc", "{seq}: typing resumes");
         }
     }
 
@@ -2313,7 +2350,7 @@ mod tests {
         a.handle_key(Key::Esc, t).unwrap();
         a.handle_key(Key::Char('['), ms(t, 400)).unwrap();
         a.handle_key(Key::Char('A'), ms(t, 410)).unwrap();
-        assert_eq!(a.buffer.to_string(), "Aabc");
+        assert_eq!(a.doc.buffer.to_string(), "Aabc");
     }
 
     #[test]
@@ -2323,7 +2360,7 @@ mod tests {
         a.handle_key(Key::Esc, t).unwrap();
         a.handle_key(Key::Char('['), ms(t, 10)).unwrap();
         a.handle_key(Key::Char('A'), ms(t, 500)).unwrap();
-        assert_eq!(a.buffer.to_string(), "Aabc");
+        assert_eq!(a.doc.buffer.to_string(), "Aabc");
     }
 
     #[test]
@@ -2332,7 +2369,7 @@ mod tests {
         let mut a = search_app();
         a.handle_key(Key::Ctrl('f'), t).unwrap();
         a.handle_paste("baz".to_string()).unwrap();
-        assert_eq!(a.buffer.cursor(), 8, "pasting searches like typing");
+        assert_eq!(a.doc.buffer.cursor(), 8, "pasting searches like typing");
         a.handle_key(Key::Esc, t).unwrap();
         a.run_command(Command::GotoLine);
         a.handle_paste("1\nignored".to_string()).unwrap();
@@ -2349,13 +2386,13 @@ mod tests {
         let t = Instant::now();
         let mut a = app("x\n");
         a.handle_key(Key::Tab, t).unwrap();
-        assert_eq!(a.buffer.to_string(), "\tx\n");
+        assert_eq!(a.doc.buffer.to_string(), "\tx\n");
         a.handle_key(Key::BackTab, t).unwrap();
-        assert_eq!(a.buffer.to_string(), "x\n");
+        assert_eq!(a.doc.buffer.to_string(), "x\n");
         a.run_command(Command::ToggleIndent);
         assert_eq!(a.message.as_deref(), Some("Indenting with 4 spaces"));
         a.handle_key(Key::Tab, t).unwrap();
-        assert_eq!(a.buffer.to_string(), "    x\n");
+        assert_eq!(a.doc.buffer.to_string(), "    x\n");
         a.run_command(Command::ToggleIndent);
         assert_eq!(a.message.as_deref(), Some("Indenting with tabs"));
     }
@@ -2365,26 +2402,26 @@ mod tests {
         let t = Instant::now();
         let mut a = app("foo bar baz");
         a.handle_key(Key::WordRight, t).unwrap();
-        assert_eq!(a.buffer.cursor(), 4);
+        assert_eq!(a.doc.buffer.cursor(), 4);
         a.handle_key(Key::WordRight, t).unwrap();
-        assert_eq!(a.buffer.cursor(), 8);
+        assert_eq!(a.doc.buffer.cursor(), 8);
         a.handle_key(Key::WordLeft, t).unwrap();
-        assert_eq!(a.buffer.cursor(), 4);
+        assert_eq!(a.doc.buffer.cursor(), 4);
         a.handle_key(Key::WordDelete, t).unwrap();
-        assert_eq!(a.buffer.to_string(), "foo baz");
+        assert_eq!(a.doc.buffer.to_string(), "foo baz");
         a.handle_key(Key::WordBackspace, t).unwrap();
-        assert_eq!(a.buffer.to_string(), "baz");
-        assert_eq!(a.buffer.cursor(), 0);
+        assert_eq!(a.doc.buffer.to_string(), "baz");
+        assert_eq!(a.doc.buffer.cursor(), 0);
         a.handle_key(Key::Ctrl('z'), t).unwrap();
-        assert_eq!(a.buffer.to_string(), "foo baz", "one undo step");
-        assert_eq!(a.buffer.cursor(), 4);
+        assert_eq!(a.doc.buffer.to_string(), "foo baz", "one undo step");
+        assert_eq!(a.doc.buffer.cursor(), 4);
     }
 
     #[test]
     fn word_backspace_at_the_start_does_nothing() {
         let mut a = app("abc");
         a.handle_key(Key::WordBackspace, Instant::now()).unwrap();
-        assert!(!a.buffer.is_dirty());
+        assert!(!a.doc.buffer.is_dirty());
     }
 
     #[test]
@@ -2402,7 +2439,7 @@ mod tests {
         a.handle_key(Key::Esc, t).unwrap();
         a.handle_key(Key::Esc, ms(t, 299)).unwrap();
         assert!(matches!(a.mode, Mode::Palette(_)));
-        assert_eq!(a.buffer.to_string(), "x");
+        assert_eq!(a.doc.buffer.to_string(), "x");
     }
 
     #[test]
@@ -2412,7 +2449,7 @@ mod tests {
         a.handle_key(Key::Esc, t).unwrap();
         a.handle_key(Key::Esc, ms(t, 500)).unwrap();
         assert_eq!(a.mode, Mode::Insert);
-        assert!(!a.buffer.is_dirty());
+        assert!(!a.doc.buffer.is_dirty());
     }
 
     #[test]
@@ -2445,15 +2482,15 @@ mod tests {
         a.handle_key(Key::Esc, t).unwrap();
         a.handle_key(Key::Char('z'), t).unwrap();
         assert_eq!(a.mode, Mode::Insert);
-        assert_eq!(a.buffer.to_string(), "abc");
-        assert!(!a.buffer.is_dirty());
+        assert_eq!(a.doc.buffer.to_string(), "abc");
+        assert!(!a.doc.buffer.is_dirty());
     }
 
     #[test]
     fn alt_key_in_insert_is_esc_then_key() {
         let mut a = app("one\ntwo\n");
         a.handle_key(Key::Alt('d'), Instant::now()).unwrap();
-        assert_eq!(a.buffer.to_string(), "two\n");
+        assert_eq!(a.doc.buffer.to_string(), "two\n");
         assert_eq!(a.mode, Mode::Insert);
     }
 
@@ -2463,54 +2500,54 @@ mod tests {
         let mut a = app("foo bar baz");
         a.handle_key(Key::Esc, t).unwrap();
         a.handle_key(Key::Char('w'), t).unwrap();
-        assert_eq!(a.buffer.to_string(), "bar baz");
+        assert_eq!(a.doc.buffer.to_string(), "bar baz");
         assert_eq!(a.mode, Mode::Insert);
         a.handle_key(Key::Ctrl('z'), t).unwrap();
-        assert_eq!(a.buffer.to_string(), "foo bar baz");
+        assert_eq!(a.doc.buffer.to_string(), "foo bar baz");
     }
 
     #[test]
     fn d_cursor_lands_on_following_line_clamped() {
         let t = Instant::now();
         let mut a = app("a\nbb\nc");
-        a.buffer.move_to(3); // b|b
+        a.doc.buffer.move_to(3); // b|b
         a.handle_key(Key::Esc, t).unwrap();
         a.handle_key(Key::Char('d'), t).unwrap();
-        assert_eq!(a.buffer.to_string(), "a\nc");
-        assert_eq!(a.buffer.cursor(), 2);
+        assert_eq!(a.doc.buffer.to_string(), "a\nc");
+        assert_eq!(a.doc.buffer.cursor(), 2);
         let mut b = app("a\nlong\nxyz");
-        b.buffer.move_to(4); // lo|ng
+        b.doc.buffer.move_to(4); // lo|ng
         b.handle_key(Key::Esc, t).unwrap();
         b.handle_key(Key::Char('d'), t).unwrap();
-        assert_eq!(b.buffer.to_string(), "a\nxyz");
-        assert_eq!(b.buffer.line_col(), (2, 3));
+        assert_eq!(b.doc.buffer.to_string(), "a\nxyz");
+        assert_eq!(b.doc.buffer.line_col(), (2, 3));
     }
 
     #[test]
     fn d_on_last_line_moves_to_previous_line() {
         let t = Instant::now();
         let mut a = app("a\nb\nc");
-        a.buffer.move_to(4);
+        a.doc.buffer.move_to(4);
         a.handle_key(Key::Esc, t).unwrap();
         a.handle_key(Key::Char('d'), t).unwrap();
-        assert_eq!(a.buffer.to_string(), "a\nb");
-        assert_eq!(a.buffer.line_col(), (2, 1));
+        assert_eq!(a.doc.buffer.to_string(), "a\nb");
+        assert_eq!(a.doc.buffer.line_col(), (2, 1));
     }
 
     #[test]
     fn k_and_percent_through_overlay() {
         let t = Instant::now();
         let mut a = app("ab(cd)\nef");
-        a.buffer.move_to(2);
+        a.doc.buffer.move_to(2);
         a.handle_key(Key::Esc, t).unwrap();
         a.handle_key(Key::Char('%'), t).unwrap();
-        assert_eq!(a.buffer.cursor(), 5);
+        assert_eq!(a.doc.buffer.cursor(), 5);
         a.handle_key(Key::Esc, t).unwrap();
         a.handle_key(Key::Char('k'), t).unwrap();
-        assert_eq!(a.buffer.to_string(), "ab(cd\nef");
+        assert_eq!(a.doc.buffer.to_string(), "ab(cd\nef");
         a.handle_key(Key::Esc, t).unwrap();
         a.handle_key(Key::Char('k'), t).unwrap();
-        assert_eq!(a.buffer.to_string(), "ab(cdef");
+        assert_eq!(a.doc.buffer.to_string(), "ab(cdef");
     }
 
     #[test]
@@ -2520,7 +2557,7 @@ mod tests {
         a.handle_key(Key::Esc, t).unwrap();
         a.handle_key(Key::Char('%'), t).unwrap();
         assert_eq!(a.message.as_deref(), Some("No matching bracket"));
-        assert_eq!(a.buffer.cursor(), 0);
+        assert_eq!(a.doc.buffer.cursor(), 0);
     }
 
     #[test]
@@ -2532,10 +2569,10 @@ mod tests {
         }
         a.handle_key(Key::Esc, t).unwrap();
         a.handle_key(Key::Char('u'), t).unwrap();
-        assert_eq!(a.buffer.to_string(), "");
+        assert_eq!(a.doc.buffer.to_string(), "");
         a.handle_key(Key::Esc, t).unwrap();
         a.handle_key(Key::Char('r'), t).unwrap();
-        assert_eq!(a.buffer.to_string(), "abc");
+        assert_eq!(a.doc.buffer.to_string(), "abc");
     }
 
     #[test]
@@ -2578,7 +2615,7 @@ mod tests {
         a.handle_key(Key::Esc, t).unwrap();
         assert_eq!(a.mode, Mode::Insert);
         assert!(!a.quit);
-        assert_eq!(a.buffer.to_string(), "x");
+        assert_eq!(a.doc.buffer.to_string(), "x");
     }
 
     #[test]
@@ -2607,28 +2644,28 @@ mod tests {
         let mut a = search_app();
         a.handle_key(Key::Ctrl('f'), t).unwrap();
         typ(&mut a, "ba");
-        assert_eq!(a.buffer.cursor(), 4);
+        assert_eq!(a.doc.buffer.cursor(), 4);
         a.handle_key(Key::Enter, t).unwrap();
-        assert_eq!(a.buffer.cursor(), 8);
+        assert_eq!(a.doc.buffer.cursor(), 8);
         a.handle_key(Key::Enter, t).unwrap();
-        assert_eq!(a.buffer.cursor(), 4);
+        assert_eq!(a.doc.buffer.cursor(), 4);
         a.handle_key(Key::Esc, t).unwrap();
         assert_eq!(a.mode, Mode::Insert);
-        assert_eq!(a.buffer.cursor(), 4);
+        assert_eq!(a.doc.buffer.cursor(), 4);
     }
 
     #[test]
     fn search_no_match_restores_origin() {
         let t = Instant::now();
         let mut a = search_app();
-        a.buffer.move_to(2);
+        a.doc.buffer.move_to(2);
         a.handle_key(Key::Esc, t).unwrap();
         a.handle_key(Key::Char('/'), t).unwrap();
         assert!(matches!(a.mode, Mode::Prompt(Prompt::Search { .. })));
         typ(&mut a, "zz");
-        assert_eq!(a.buffer.cursor(), 2);
+        assert_eq!(a.doc.buffer.cursor(), 2);
         a.handle_key(Key::Esc, t).unwrap();
-        assert_eq!(a.buffer.cursor(), 2);
+        assert_eq!(a.doc.buffer.cursor(), 2);
     }
 
     #[test]
@@ -2638,23 +2675,23 @@ mod tests {
         a.handle_key(Key::Ctrl('f'), t).unwrap();
         typ(&mut a, "ba");
         a.handle_key(Key::Ctrl('f'), t).unwrap();
-        assert_eq!(a.buffer.cursor(), 8);
+        assert_eq!(a.doc.buffer.cursor(), 8);
         a.handle_key(Key::Up, t).unwrap();
-        assert_eq!(a.buffer.cursor(), 4);
+        assert_eq!(a.doc.buffer.cursor(), 4);
         a.handle_key(Key::Up, t).unwrap();
-        assert_eq!(a.buffer.cursor(), 8, "wraps to the end");
+        assert_eq!(a.doc.buffer.cursor(), 8, "wraps to the end");
     }
 
     #[test]
     fn search_starts_from_a_selected_word() {
         let t = Instant::now();
         let mut a = search_app();
-        a.buffer.move_to(7);
-        a.buffer.set_selection_anchor(4);
+        a.doc.buffer.move_to(7);
+        a.doc.buffer.set_selection_anchor(4);
         a.handle_key(Key::Ctrl('f'), t).unwrap();
         assert_eq!(a.search_query(), Some("bar"));
-        assert_eq!(a.buffer.selection(), None);
-        assert_eq!(a.buffer.cursor(), 4);
+        assert_eq!(a.doc.buffer.selection(), None);
+        assert_eq!(a.doc.buffer.cursor(), 4);
     }
 
     /// Runs Ctrl-R with `query` and `with`, stopping at the first question.
@@ -2672,12 +2709,12 @@ mod tests {
         let mut a = app("cat cat cat");
         start_replace(&mut a, "cat", "dog");
         assert_eq!(a.mode_label(), "REPLACE");
-        assert_eq!(a.buffer.cursor(), 0);
+        assert_eq!(a.doc.buffer.cursor(), 0);
         typ(&mut a, "y");
-        assert_eq!(a.buffer.to_string(), "dog cat cat");
+        assert_eq!(a.doc.buffer.to_string(), "dog cat cat");
         typ(&mut a, "n");
         typ(&mut a, "y");
-        assert_eq!(a.buffer.to_string(), "dog cat dog");
+        assert_eq!(a.doc.buffer.to_string(), "dog cat dog");
         assert_eq!(a.mode, Mode::Insert);
         assert_eq!(a.message.as_deref(), Some("Replaced 2 matches"));
     }
@@ -2686,14 +2723,14 @@ mod tests {
     fn replace_all_is_one_undo_step_and_wraps_around() {
         let t = Instant::now();
         let mut a = app("a x b x c x");
-        a.buffer.move_to(6);
+        a.doc.buffer.move_to(6);
         start_replace(&mut a, "x", "yy");
-        assert_eq!(a.buffer.cursor(), 6);
+        assert_eq!(a.doc.buffer.cursor(), 6);
         typ(&mut a, "a");
-        assert_eq!(a.buffer.to_string(), "a yy b yy c yy");
+        assert_eq!(a.doc.buffer.to_string(), "a yy b yy c yy");
         assert_eq!(a.message.as_deref(), Some("Replaced 3 matches"));
         a.handle_key(Key::Ctrl('z'), t).unwrap();
-        assert_eq!(a.buffer.to_string(), "a x b x c x");
+        assert_eq!(a.doc.buffer.to_string(), "a x b x c x");
     }
 
     #[test]
@@ -2701,19 +2738,19 @@ mod tests {
         let mut a = app("aa aa");
         start_replace(&mut a, "a", "aa");
         typ(&mut a, "yyyy");
-        assert_eq!(a.buffer.to_string(), "aaaa aaaa");
+        assert_eq!(a.doc.buffer.to_string(), "aaaa aaaa");
         assert_eq!(a.mode, Mode::Insert);
     }
 
     #[test]
     fn replace_wraps_and_stops_where_it_started_after_growing_the_text() {
         let mut a = app("x-x-x");
-        a.buffer.move_to(2);
+        a.doc.buffer.move_to(2);
         start_replace(&mut a, "x", "long");
         typ(&mut a, "y"); // middle
         typ(&mut a, "y"); // last
         typ(&mut a, "y"); // wraps to the first
-        assert_eq!(a.buffer.to_string(), "long-long-long");
+        assert_eq!(a.doc.buffer.to_string(), "long-long-long");
         assert_eq!(a.message.as_deref(), Some("Replaced 3 matches"));
     }
 
@@ -2722,10 +2759,10 @@ mod tests {
         let mut a = app("ab ab ab");
         start_replace(&mut a, "ab ", "");
         typ(&mut a, "y");
-        assert_eq!(a.buffer.to_string(), "ab ab");
+        assert_eq!(a.doc.buffer.to_string(), "ab ab");
         typ(&mut a, "q");
         assert_eq!(a.mode, Mode::Insert);
-        assert_eq!(a.buffer.to_string(), "ab ab");
+        assert_eq!(a.doc.buffer.to_string(), "ab ab");
         assert_eq!(a.message.as_deref(), Some("Replaced 1 match"));
     }
 
@@ -2735,7 +2772,7 @@ mod tests {
         start_replace(&mut a, "zzz", "y");
         assert_eq!(a.mode, Mode::Insert);
         assert_eq!(a.message.as_deref(), Some("No matches replaced"));
-        assert!(!a.buffer.is_dirty());
+        assert!(!a.doc.buffer.is_dirty());
     }
 
     #[test]
@@ -2743,7 +2780,7 @@ mod tests {
         let mut a = app("Foo foo FOO");
         start_replace(&mut a, "foo", "bar");
         typ(&mut a, "a");
-        assert_eq!(a.buffer.to_string(), "bar bar bar");
+        assert_eq!(a.doc.buffer.to_string(), "bar bar bar");
     }
 
     #[test]
@@ -2761,11 +2798,11 @@ mod tests {
         let mut a = search_app();
         a.handle_key(Key::Ctrl('f'), t).unwrap();
         a.handle_key(Key::Enter, t).unwrap();
-        assert_eq!(a.buffer.cursor(), 0);
+        assert_eq!(a.doc.buffer.cursor(), 0);
         assert!(matches!(a.mode, Mode::Prompt(Prompt::Search { .. })));
         a.handle_key(Key::Esc, t).unwrap();
-        assert_eq!(a.buffer.cursor(), 0);
-        assert!(!a.buffer.is_dirty());
+        assert_eq!(a.doc.buffer.cursor(), 0);
+        assert!(!a.doc.buffer.is_dirty());
     }
 
     #[test]
@@ -2790,12 +2827,12 @@ mod tests {
         assert!(matches!(&a.mode, Mode::Palette(s) if s.is_universal()));
         typ(&mut a, ":3");
         a.handle_key(Key::Enter, t).unwrap();
-        assert_eq!(a.buffer.line_col(), (3, 1));
+        assert_eq!(a.doc.buffer.line_col(), (3, 1));
         assert_eq!(a.mode, Mode::Insert);
         a.handle_key(Key::Ctrl('k'), t).unwrap();
         typ(&mut a, "/two");
         a.handle_key(Key::Enter, t).unwrap();
-        assert_eq!(a.buffer.line_col(), (2, 1), "wraps to find it");
+        assert_eq!(a.doc.buffer.line_col(), (2, 1), "wraps to find it");
         assert_eq!(a.search_query(), Some("two"));
         a.handle_key(Key::Esc, t).unwrap();
         assert_eq!(a.mode, Mode::Insert);
@@ -2824,12 +2861,12 @@ mod tests {
         assert!(matches!(a.mode, Mode::Prompt(Prompt::GotoLine { .. })));
         typ(&mut a, "3");
         a.handle_key(Key::Enter, t).unwrap();
-        assert_eq!(a.buffer.line_col(), (3, 1));
+        assert_eq!(a.doc.buffer.line_col(), (3, 1));
         assert_eq!(a.mode, Mode::Insert);
         a.run_command(Command::GotoLine);
         typ(&mut a, "999");
         a.handle_key(Key::Enter, t).unwrap();
-        assert_eq!(a.buffer.line_col(), (5, 1));
+        assert_eq!(a.doc.buffer.line_col(), (5, 1));
         a.run_command(Command::GotoLine);
         typ(&mut a, "abc");
         a.handle_key(Key::Enter, t).unwrap();
@@ -2837,7 +2874,7 @@ mod tests {
         assert!(a.message_is_error);
         a.handle_key(Key::Esc, t).unwrap();
         assert_eq!(a.mode, Mode::Insert);
-        assert_eq!(a.buffer.line_col(), (5, 1));
+        assert_eq!(a.doc.buffer.line_col(), (5, 1));
     }
 
     #[test]
@@ -2858,7 +2895,7 @@ mod tests {
         typ(&mut a, "und");
         a.handle_key(Key::Esc, t).unwrap();
         assert_eq!(a.mode, Mode::Insert);
-        assert_eq!(a.buffer.to_string(), "x");
+        assert_eq!(a.doc.buffer.to_string(), "x");
     }
 
     #[test]
@@ -2880,14 +2917,14 @@ mod tests {
         let t = Instant::now();
         let mut a = app("hello world");
         select_right(&mut a, 3);
-        assert_eq!(a.buffer.selection(), Some(0..3));
+        assert_eq!(a.doc.buffer.selection(), Some(0..3));
         a.handle_key(Key::Select(Motion::End), t).unwrap();
-        assert_eq!(a.buffer.selection(), Some(0..11));
+        assert_eq!(a.doc.buffer.selection(), Some(0..11));
         a.handle_key(Key::Select(Motion::Home), t).unwrap();
-        assert_eq!(a.buffer.selection(), None, "back at the anchor");
+        assert_eq!(a.doc.buffer.selection(), None, "back at the anchor");
         select_right(&mut a, 2);
         a.handle_key(Key::Right, t).unwrap();
-        assert_eq!(a.buffer.selection(), None);
+        assert_eq!(a.doc.buffer.selection(), None);
     }
 
     #[test]
@@ -2895,11 +2932,11 @@ mod tests {
         let t = Instant::now();
         let mut a = app("foo bar\nbaz\n");
         a.handle_key(Key::Select(Motion::WordRight), t).unwrap();
-        assert_eq!(a.buffer.selection(), Some(0..4));
+        assert_eq!(a.doc.buffer.selection(), Some(0..4));
         a.handle_key(Key::Select(Motion::Down), t).unwrap();
-        assert_eq!(a.buffer.selection(), Some(0..11));
+        assert_eq!(a.doc.buffer.selection(), Some(0..11));
         a.handle_key(Key::Select(Motion::FileEnd), t).unwrap();
-        assert_eq!(a.buffer.selection(), Some(0..12));
+        assert_eq!(a.doc.buffer.selection(), Some(0..12));
     }
 
     #[test]
@@ -2909,10 +2946,10 @@ mod tests {
         select_right(&mut a, 2);
         a.handle_key(Key::Esc, t).unwrap();
         assert!(matches!(a.mode, Mode::Overlay { .. }));
-        assert_eq!(a.buffer.selection(), Some(0..2), "still selected");
+        assert_eq!(a.doc.buffer.selection(), Some(0..2), "still selected");
         assert!(a.layer_rows().contains(&("x", "cut")));
         a.handle_key(Key::Esc, t).unwrap();
-        assert_eq!(a.buffer.selection(), None);
+        assert_eq!(a.doc.buffer.selection(), None);
         assert_eq!(a.mode, Mode::Insert, "not the palette");
     }
 
@@ -2935,20 +2972,20 @@ mod tests {
         let mut a = app("hello world");
         select_right(&mut a, 5);
         esc_then(&mut a, 'U');
-        assert_eq!(a.buffer.to_string(), "HELLO world");
+        assert_eq!(a.doc.buffer.to_string(), "HELLO world");
         assert_eq!(
-            a.buffer.selection(),
+            a.doc.buffer.selection(),
             Some(0..5),
             "ready for the next action"
         );
         esc_then(&mut a, 'L');
-        assert_eq!(a.buffer.to_string(), "hello world");
+        assert_eq!(a.doc.buffer.to_string(), "hello world");
         esc_then(&mut a, 'x');
-        assert_eq!(a.buffer.to_string(), " world");
+        assert_eq!(a.doc.buffer.to_string(), " world");
         let mut b = app("b\na\n");
-        b.buffer.select_all();
+        b.doc.buffer.select_all();
         esc_then(&mut b, 'S');
-        assert_eq!(b.buffer.to_string(), "a\nb\n");
+        assert_eq!(b.doc.buffer.to_string(), "a\nb\n");
     }
 
     #[test]
@@ -2958,7 +2995,7 @@ mod tests {
         esc_then(&mut a, '/');
         assert_eq!(a.search_query(), Some("cat"));
         a.handle_key(Key::Esc, Instant::now()).unwrap();
-        a.buffer.move_to(0);
+        a.doc.buffer.move_to(0);
         select_right(&mut a, 3);
         esc_then(&mut a, 'R');
         assert_eq!(a.search_query(), Some("cat"));
@@ -2969,8 +3006,8 @@ mod tests {
         let mut a = app("hello");
         select_right(&mut a, 2);
         esc_then(&mut a, 'z');
-        assert_eq!(a.buffer.selection(), Some(0..2));
-        assert_eq!(a.buffer.to_string(), "hello");
+        assert_eq!(a.doc.buffer.selection(), Some(0..2));
+        assert_eq!(a.doc.buffer.to_string(), "hello");
         assert_eq!(a.mode, Mode::Insert);
     }
 
@@ -2983,10 +3020,10 @@ mod tests {
         assert!(!r.contains(&"#"), "no comment syntax for .txt");
         assert_eq!(r.last(), Some(&"Esc Esc"));
         let mut off = code_app("/x/notes.txt", "(a) b");
-        off.buffer.move_to(4);
+        off.doc.buffer.move_to(4);
         assert!(!rows(&off).contains(&"i"), "not on a bracket");
         let mut unmatched = code_app("/x/notes.txt", "(a");
-        unmatched.buffer.move_to(0);
+        unmatched.doc.buffer.move_to(0);
         assert!(!rows(&unmatched).contains(&"i"), "no partner");
         let toml = code_app("/x/a.toml", "a = 1\n");
         assert!(rows(&toml).contains(&"#"));
@@ -2995,24 +3032,24 @@ mod tests {
     #[test]
     fn inside_brackets_selects_between_them_from_either_end() {
         let mut a = code_app("/x/a.txt", "f(abc)");
-        a.buffer.move_to(1);
+        a.doc.buffer.move_to(1);
         esc_then(&mut a, 'i');
-        assert_eq!(a.buffer.selection(), Some(2..5));
-        a.buffer.move_to(5);
+        assert_eq!(a.doc.buffer.selection(), Some(2..5));
+        a.doc.buffer.move_to(5);
         esc_then(&mut a, 'i');
-        assert_eq!(a.buffer.selection(), Some(2..5));
+        assert_eq!(a.doc.buffer.selection(), Some(2..5));
     }
 
     #[test]
     fn comment_key_toggles_the_line() {
         let mut a = code_app("/x/a.py", "x = 1\n");
         esc_then(&mut a, '#');
-        assert_eq!(a.buffer.to_string(), "# x = 1\n");
+        assert_eq!(a.doc.buffer.to_string(), "# x = 1\n");
         esc_then(&mut a, '#');
-        assert_eq!(a.buffer.to_string(), "x = 1\n");
+        assert_eq!(a.doc.buffer.to_string(), "x = 1\n");
         let mut plain = code_app("/x/a.txt", "x\n");
         esc_then(&mut plain, '#');
-        assert!(!plain.buffer.is_dirty());
+        assert!(!plain.doc.buffer.is_dirty());
     }
 
     #[cfg(feature = "highlight")]
@@ -3021,21 +3058,21 @@ mod tests {
         let text = "fn one() {\n    let a = 1;\n}\n\nfn two() {}\n";
         let mut a = code_app("/x/a.rs", text);
         assert!(a.layer_rows().contains(&("f", "select function")));
-        a.buffer.move_to(16);
+        a.doc.buffer.move_to(16);
         esc_then(&mut a, 'f');
-        assert_eq!(a.buffer.selection(), Some(0..27));
+        assert_eq!(a.doc.buffer.selection(), Some(0..27));
         // then act on it, the way a user would: Esc f, Esc x
         esc_then(&mut a, 'x');
-        assert_eq!(a.buffer.to_string(), "\n\nfn two() {}\n");
+        assert_eq!(a.doc.buffer.to_string(), "\n\nfn two() {}\n");
         a.handle_key(Key::Ctrl('z'), Instant::now()).unwrap();
-        a.buffer.move_to(0);
+        a.doc.buffer.move_to(0);
         esc_then(&mut a, 'n');
-        assert_eq!(a.buffer.cursor(), 29);
+        assert_eq!(a.doc.buffer.cursor(), 29);
         esc_then(&mut a, 'p');
-        assert_eq!(a.buffer.cursor(), 0);
+        assert_eq!(a.doc.buffer.cursor(), 0);
         esc_then(&mut a, 'p');
         assert_eq!(a.message.as_deref(), Some("No more functions"));
-        a.buffer.move_to(28);
+        a.doc.buffer.move_to(28);
         esc_then(&mut a, 'f');
         assert_eq!(a.message.as_deref(), Some("Not inside a function"));
     }
@@ -3044,22 +3081,22 @@ mod tests {
     #[test]
     fn expand_grows_the_selection_one_level_at_a_time() {
         let mut a = code_app("/x/a.rs", "fn f() { g(1 + 2); }\n");
-        a.buffer.move_to(11);
+        a.doc.buffer.move_to(11);
         esc_then(&mut a, 'e');
-        assert_eq!(a.buffer.selection(), Some(11..12));
+        assert_eq!(a.doc.buffer.selection(), Some(11..12));
         esc_then(&mut a, 'e');
-        assert_eq!(a.buffer.selection(), Some(11..16));
+        assert_eq!(a.doc.buffer.selection(), Some(11..16));
         esc_then(&mut a, 'e');
-        assert_eq!(a.buffer.selection(), Some(10..17));
+        assert_eq!(a.doc.buffer.selection(), Some(10..17));
     }
 
     #[cfg(feature = "highlight")]
     #[test]
     fn code_keys_keep_char_positions_with_non_ascii_text() {
         let mut a = code_app("/x/a.rs", "// 世界\nfn f() {}\n");
-        a.buffer.move_to(7);
+        a.doc.buffer.move_to(7);
         esc_then(&mut a, 'f');
-        assert_eq!(a.buffer.selection(), Some(6..15));
+        assert_eq!(a.doc.buffer.selection(), Some(6..15));
     }
 
     #[test]
@@ -3073,7 +3110,7 @@ mod tests {
             a.handle_key(key, t).unwrap();
         }
         a.handle_paste("pasted".to_string()).unwrap();
-        assert!(!a.buffer.is_dirty());
+        assert!(!a.doc.buffer.is_dirty());
         a.handle_key(Key::Esc, t).unwrap();
         assert_eq!(a.mode, Mode::Insert);
         assert_eq!(a.reader, None);
@@ -3124,9 +3161,9 @@ mod tests {
     fn reader_clears_a_selection_it_replaces() {
         let t = Instant::now();
         let mut a = code_app("/x/a.txt", "one\n");
-        a.buffer.select_all();
+        a.doc.buffer.select_all();
         a.run_command(Command::Reader);
-        assert_eq!(a.buffer.selection(), None);
+        assert_eq!(a.doc.buffer.selection(), None);
         a.handle_key(Key::Esc, t).unwrap();
         assert_eq!(a.mode, Mode::Insert);
     }
@@ -3157,31 +3194,31 @@ mod tests {
     fn up_and_down_move_by_wrapped_row_and_hold_the_column() {
         let t = Instant::now();
         let mut a = wrapped(&format!("{}\nshort\n", "a".repeat(25)));
-        a.buffer.move_to(3);
+        a.doc.buffer.move_to(3);
         a.handle_key(Key::Down, t).unwrap();
-        assert_eq!(a.buffer.cursor(), 13, "same line, one row down");
+        assert_eq!(a.doc.buffer.cursor(), 13, "same line, one row down");
         a.handle_key(Key::Down, t).unwrap();
-        assert_eq!(a.buffer.cursor(), 23);
+        assert_eq!(a.doc.buffer.cursor(), 23);
         a.handle_key(Key::Down, t).unwrap();
-        assert_eq!(a.buffer.line_col(), (2, 4), "onto the next line");
+        assert_eq!(a.doc.buffer.line_col(), (2, 4), "onto the next line");
         a.handle_key(Key::Up, t).unwrap();
-        assert_eq!(a.buffer.cursor(), 23);
+        assert_eq!(a.doc.buffer.cursor(), 23);
         a.handle_key(Key::Up, t).unwrap();
         a.handle_key(Key::Up, t).unwrap();
-        assert_eq!(a.buffer.cursor(), 3);
+        assert_eq!(a.doc.buffer.cursor(), 3);
         a.handle_key(Key::Up, t).unwrap();
-        assert_eq!(a.buffer.cursor(), 3, "the top stays put");
+        assert_eq!(a.doc.buffer.cursor(), 3, "the top stays put");
     }
 
     #[test]
     fn the_column_survives_a_short_row() {
         let t = Instant::now();
         let mut a = wrapped("abcdefgh\nxy\nabcdefgh\n");
-        a.buffer.move_to(6);
+        a.doc.buffer.move_to(6);
         a.handle_key(Key::Down, t).unwrap();
-        assert_eq!(a.buffer.line_col(), (2, 3));
+        assert_eq!(a.doc.buffer.line_col(), (2, 3));
         a.handle_key(Key::Down, t).unwrap();
-        assert_eq!(a.buffer.line_col(), (3, 7));
+        assert_eq!(a.doc.buffer.line_col(), (3, 7));
     }
 
     #[test]
@@ -3202,7 +3239,7 @@ mod tests {
         let t = Instant::now();
         let mut a = wrapped(&"a".repeat(25));
         a.handle_key(Key::Select(Motion::Down), t).unwrap();
-        assert_eq!(a.buffer.selection(), Some(0..10));
+        assert_eq!(a.doc.buffer.selection(), Some(0..10));
     }
 
     fn theme_picker(a: &mut App) {
@@ -3284,7 +3321,7 @@ mod tests {
         };
         let path = std::path::PathBuf::from("/x/a.txt");
         let mut a = App::new(Buffer::from_str("base", Some(path.clone())), None, &opts);
-        assert_eq!(a.buffer.indent(), Indent::Spaces(2));
+        assert_eq!(a.doc.buffer.indent(), Indent::Spaces(2));
         a.mode = Mode::Recover(RecoverInfo {
             target: path,
             swap_path: "/no/such/swap".into(),
@@ -3293,8 +3330,8 @@ mod tests {
             file_changed: false,
         });
         a.handle_key(Key::Char('r'), t).unwrap();
-        assert_eq!(a.buffer.to_string(), "no indent here");
-        assert_eq!(a.buffer.indent(), Indent::Spaces(2));
+        assert_eq!(a.doc.buffer.to_string(), "no indent here");
+        assert_eq!(a.doc.buffer.indent(), Indent::Spaces(2));
     }
 
     #[test]
@@ -3302,8 +3339,8 @@ mod tests {
         let mut a = code_app("/x/a.txt", "abc");
         esc_then(&mut a, 'f');
         esc_then(&mut a, 'n');
-        assert_eq!(a.buffer.selection(), None);
-        assert_eq!(a.buffer.cursor(), 0);
+        assert_eq!(a.doc.buffer.selection(), None);
+        assert_eq!(a.doc.buffer.cursor(), 0);
         assert_eq!(a.message, None);
     }
 
@@ -3313,7 +3350,7 @@ mod tests {
         let mut a = app("one\ntwo\n");
         select_right(&mut a, 2);
         a.handle_key(Key::Alt('x'), t).unwrap();
-        assert_eq!(a.buffer.to_string(), "e\ntwo\n");
+        assert_eq!(a.doc.buffer.to_string(), "e\ntwo\n");
         assert_eq!(a.mode, Mode::Insert);
     }
 
@@ -3321,14 +3358,14 @@ mod tests {
     fn word_keys_delete_a_selection_when_there_is_one() {
         let t = Instant::now();
         let mut a = app("foo bar baz");
-        a.buffer.move_to(4);
+        a.doc.buffer.move_to(4);
         select_right(&mut a, 3);
         a.handle_key(Key::WordBackspace, t).unwrap();
-        assert_eq!(a.buffer.to_string(), "foo  baz");
+        assert_eq!(a.doc.buffer.to_string(), "foo  baz");
         let mut b = app("foo bar baz");
         select_right(&mut b, 1);
         b.handle_key(Key::WordDelete, t).unwrap();
-        assert_eq!(b.buffer.to_string(), "oo bar baz");
+        assert_eq!(b.doc.buffer.to_string(), "oo bar baz");
     }
 
     #[test]
@@ -3343,41 +3380,45 @@ mod tests {
             Some("\x1b]52;c;aGVsbG8=\x07")
         );
         assert_eq!(a.take_terminal_output(), None, "sent once");
-        assert_eq!(a.buffer.selection(), Some(0..5), "copy keeps the selection");
+        assert_eq!(
+            a.doc.buffer.selection(),
+            Some(0..5),
+            "copy keeps the selection"
+        );
         a.handle_key(Key::CtrlEnd, t).unwrap();
         a.handle_key(Key::Ctrl('v'), t).unwrap();
-        assert_eq!(a.buffer.to_string(), "hello worldhello");
+        assert_eq!(a.doc.buffer.to_string(), "hello worldhello");
         a.handle_key(Key::Ctrl('z'), t).unwrap();
-        assert_eq!(a.buffer.to_string(), "hello world");
+        assert_eq!(a.doc.buffer.to_string(), "hello world");
     }
 
     #[test]
     fn cut_a_selection_is_one_undo_step() {
         let t = Instant::now();
         let mut a = app("hello world");
-        a.buffer.move_to(5);
+        a.doc.buffer.move_to(5);
         select_right(&mut a, 6);
         a.handle_key(Key::Ctrl('x'), t).unwrap();
-        assert_eq!(a.buffer.to_string(), "hello");
+        assert_eq!(a.doc.buffer.to_string(), "hello");
         a.handle_key(Key::Ctrl('z'), t).unwrap();
-        assert_eq!(a.buffer.to_string(), "hello world");
+        assert_eq!(a.doc.buffer.to_string(), "hello world");
         a.handle_key(Key::CtrlHome, t).unwrap();
         a.handle_key(Key::Ctrl('v'), t).unwrap();
-        assert_eq!(a.buffer.to_string(), " worldhello world");
+        assert_eq!(a.doc.buffer.to_string(), " worldhello world");
     }
 
     #[test]
     fn with_no_selection_cut_and_copy_take_the_line() {
         let t = Instant::now();
         let mut a = app("one\ntwo\nthree");
-        a.buffer.move_to(5);
+        a.doc.buffer.move_to(5);
         a.handle_key(Key::Ctrl('x'), t).unwrap();
-        assert_eq!(a.buffer.to_string(), "one\nthree");
+        assert_eq!(a.doc.buffer.to_string(), "one\nthree");
         assert_eq!(a.message.as_deref(), Some("Copied 1 line"));
-        a.buffer.move_to(1);
+        a.doc.buffer.move_to(1);
         a.handle_key(Key::Ctrl('v'), t).unwrap();
         assert_eq!(
-            a.buffer.to_string(),
+            a.doc.buffer.to_string(),
             "two\none\nthree",
             "a whole line pastes above, wherever the cursor is in the line"
         );
@@ -3391,7 +3432,7 @@ mod tests {
         a.handle_key(Key::Ctrl('c'), t).unwrap();
         a.handle_key(Key::Home, t).unwrap();
         a.handle_key(Key::Ctrl('v'), t).unwrap();
-        assert_eq!(a.buffer.to_string(), "one\ntwo\ntwo");
+        assert_eq!(a.doc.buffer.to_string(), "one\ntwo\ntwo");
     }
 
     #[test]
@@ -3403,7 +3444,7 @@ mod tests {
         a.handle_key(Key::End, t).unwrap();
         a.handle_key(Key::Select(Motion::WordLeft), t).unwrap();
         a.handle_key(Key::Ctrl('v'), t).unwrap();
-        assert_eq!(a.buffer.to_string(), "abc abc");
+        assert_eq!(a.doc.buffer.to_string(), "abc abc");
     }
 
     #[test]
@@ -3416,7 +3457,7 @@ mod tests {
         assert_eq!(a.message.as_deref(), Some("Nothing to cut"));
         a.handle_key(Key::Ctrl('v'), t).unwrap();
         assert!(a.message.as_deref().unwrap().contains("Clipboard is empty"));
-        assert!(!a.buffer.is_dirty());
+        assert!(!a.doc.buffer.is_dirty());
     }
 
     #[test]
@@ -3428,7 +3469,7 @@ mod tests {
         let mut dos = app("x\r\ny\r\n");
         dos.clipboard = a.clipboard.clone();
         dos.handle_key(Key::Ctrl('v'), t).unwrap();
-        assert_eq!(dos.buffer.to_string(), "a\r\nb\r\nx\r\ny\r\n");
+        assert_eq!(dos.doc.buffer.to_string(), "a\r\nb\r\nx\r\ny\r\n");
     }
 
     #[test]
