@@ -3962,11 +3962,7 @@ fn text_and_markdown_open_for_writing() {
     let f = env.write("notes.md", &format!("# Title\n{long}\n"));
     let mut p = open_writing(&env, &f, "");
     p.wait_for("# Title", TIMEOUT);
-    assert!(
-        !p.screen().contains("1 │ #"),
-        "no line numbers\n{}",
-        p.dump()
-    );
+    p.wait_for("1 │ # Title", TIMEOUT);
     wait_status(&p, "41 words");
     assert!(
         p.screen().lines().nth(2).unwrap().contains("word"),
@@ -3999,10 +3995,40 @@ fn code_shows_as_code_and_each_file_keeps_its_own_view() {
     open_from_prompt(&mut p, rs.to_str().unwrap());
     p.wait_for("1 │ fn main", TIMEOUT);
     assert!(!status(&p).contains("words"), "{}", status(&p));
-    esc_then(&mut p, ",");
+    esc_then(&mut p, "l");
     p.wait_gone("1 │ fn", TIMEOUT);
-    assert!(!p.screen().contains("1 │ one"), "{}", p.dump());
+    esc_then(&mut p, ",");
+    p.wait_for("1 │ one two", TIMEOUT);
     wait_status(&p, "2 words");
+    esc_then(&mut p, ".");
+    p.wait_for("fn main", TIMEOUT);
+    assert!(!p.screen().contains("1 │ fn"), "{}", p.dump());
+    quit_clean(&mut p);
+}
+
+#[test]
+fn line_numbers_show_by_default_and_esc_l_toggles_them() {
+    let env = Env::new();
+    let f = env.write("notes.md", "one two\n");
+    let mut p = open_writing(&env, &f, "");
+    p.wait_for("1 │ one two", TIMEOUT);
+    open_overlay(&mut p);
+    p.wait_for("l line numbers", TIMEOUT);
+    p.send_str("l");
+    p.wait_gone("1 │ one", TIMEOUT);
+    p.wait_for("one two", TIMEOUT);
+    esc_then(&mut p, "l");
+    p.wait_for("1 │ one two", TIMEOUT);
+    quit_clean(&mut p);
+}
+
+#[test]
+fn the_line_numbers_setting_still_turns_them_off_everywhere() {
+    let env = Env::new();
+    let f = env.write("notes.md", "one two\n");
+    let mut p = open_writing(&env, &f, "line_numbers = false\n");
+    p.wait_for("one two", TIMEOUT);
+    assert!(!p.screen().contains("1 │ one"), "{}", p.dump());
     quit_clean(&mut p);
 }
 
@@ -4025,7 +4051,6 @@ fn saving_under_a_writing_name_changes_the_view() {
     p.wait_for("1 │ one two", TIMEOUT);
     save_as(&mut p, md.to_str().unwrap());
     wait_status(&p, "2 words");
-    p.wait_gone("1 │ one", TIMEOUT);
     quit_clean(&mut p);
 }
 

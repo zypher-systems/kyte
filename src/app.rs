@@ -287,9 +287,7 @@ impl Doc {
         self.writing = view.writing && self.prose.is_some();
         self.spelling = view.spell_check && self.writing;
         self.soft_wrap = view.soft_wrap || self.writing;
-        // LaTeX reports errors by line, so it keeps its numbers.
-        let bare = self.writing && self.prose != Some(Prose::Latex);
-        self.line_numbers = view.line_numbers && !bare;
+        self.line_numbers = view.line_numbers;
     }
 
     fn name(&self) -> String {
@@ -454,6 +452,7 @@ pub const LEGEND: &[(&str, &str)] = &[
     ("h", "history"),
     ("v", "reader mode"),
     ("t", "file tree"),
+    ("l", "line numbers"),
 ];
 
 /// The double-tap key, listed last.
@@ -1229,6 +1228,7 @@ impl App {
             'h' => self.open_history(),
             'v' => self.open_reader(),
             't' => self.open_tree(),
+            'l' => self.run_command(Command::ToggleLineNumbers),
             'q' if self.doc.prose == Some(Prose::Latex) => self.insert_citation(),
             'g' if self.doc.prose == Some(Prose::Latex) => self.build_pdf(),
             'o' if self.doc.prose == Some(Prose::Latex) => self.open_pdf(),

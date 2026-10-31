@@ -121,6 +121,7 @@ The next key runs one operator and closes the layer:
 | `s` | Save |
 | `h` | Open the file's history |
 | `t` | Open the file tree |
+| `l` | Turn line numbers on or off for this file |
 | Esc, within 300 ms of the first Esc | Open the command palette |
 | Esc, later | Close the layer |
 | Any other key | Close the layer; the key is discarded, nothing is inserted |
@@ -244,7 +245,7 @@ Ctrl-R asks what to replace and what to replace it with. Kyte then starts at the
 
 ## Writing
 
-Markdown, text and LaTeX files open for writing. Long lines wrap, the status bar shows a word count, and misspelled words are underlined. Markdown and text drop their line numbers. LaTeX keeps them, because its error messages cite lines. **Toggle line numbers**, **Toggle soft wrap** and **Toggle spell check** change one file at a time, and `writing = false` turns the whole setup off. Selecting text shows how many words are selected.
+Markdown, text and LaTeX files open for writing. Long lines wrap, the status bar shows a word count, and misspelled words are underlined. **Toggle soft wrap** and **Toggle spell check** change one file at a time, and `writing = false` turns the whole setup off. Selecting text shows how many words are selected.
 
 The word count in LaTeX covers what a reader reads: the document body, without commands, math, comments, citations or labels. It catches up when you stop typing for a moment. In other files it's live. Files over 2 MiB don't show one.
 
@@ -279,7 +280,7 @@ With soft wrap on, a long line continues on the next screen row, breaking after 
 | `tab_width` | `4` | Columns a tab takes up on screen |
 | `indent` | `"tabs"` | What Tab inserts in a file with no indent to go by: `"tabs"` or `"spaces"` |
 | `indent_width` | `4` | How many spaces, when `indent` is `"spaces"` |
-| `line_numbers` | `true` | Show line numbers |
+| `line_numbers` | `true` | Show line numbers. Esc `l` changes it for one file |
 | `soft_wrap` | `false` | Wrap long lines at the edge of the screen. **Toggle soft wrap** in the palette changes it for the session |
 | `writing` | `true` | Open Markdown, text and LaTeX files for writing |
 | `spell_check` | `true` | Underline misspelled words in writing |

@@ -29,8 +29,7 @@ pub const TEMPLATE: &str = r#"# Kyte settings. Remove the # from a line to use i
 # Wrap long lines at the edge of the screen.
 # soft_wrap = false
 
-# Show Markdown, text and LaTeX files for writing: wrapped, with a word count
-# and, except in LaTeX, no line numbers.
+# Show Markdown, text and LaTeX files for writing: wrapped, with a word count.
 # writing = true
 
 # Underline misspelled words in writing.

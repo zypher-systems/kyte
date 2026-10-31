@@ -34,7 +34,7 @@ These replace the matching parts of `ARCHITECTURE`. `docs/ROADMAP.md` holds the 
 
 - Writing is one setup rather than separate modes for novels or papers, because they want the same things: wrapped lines, a word count and spell check. The setup follows the file's kind, so nothing has to be switched on.
 - Wrap and line numbers moved onto each open file, so a `.md` beside a `.rs` shows each the way it should. Toggles change one file.
-- Text and Markdown lose their line numbers. LaTeX keeps them, because `pdflatex` reports errors by line.
+- Line numbers stay on in writing. Hiding them in Markdown and text was tried, and taken back out on trying it. Esc `l` toggles them for one file, and `line_numbers = false` does it for all.
 - A `.txt` counts as writing unless it has a `#!` line, and `CMakeLists.txt` is code. `.sty` and `.cls` are code too.
 - A LaTeX word count needs to know what's prose, so it walks the parse tree: only `text` nodes in the document body, stepping around citations nested in them. It runs when typing pauses. Text and Markdown just split on spaces, at 0.4 ms for 500 KB, so they stay live.
 - LaTeX's grammar takes about 1.4 ms per KB, some fourteen times the others, because of its huge token list. Parsing the whole file made a 10,000-word paper cost 145 ms a key. `highlight` now parses only a window around the lines it's asked for: 4 KB before, from a blank line where there is one, and 1 KB after. That's about 4 ms a key at any length, so LaTeX also has no size limit. The price is that a block longer than the window can color wrongly when you're inside it.
