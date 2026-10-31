@@ -1,6 +1,7 @@
 //! Building a paper's PDF. The build runs beside the editor, so typing carries
 //! on, and its output is read for problems to jump to.
 
+use std::collections::HashMap;
 use std::io::Read;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -13,6 +14,8 @@ const DEFAULT_COMMAND: &str = "latexmk -pdf -interaction=nonstopmode -file-line-
 const OPEN_COMMAND: &str = "xdg-open %f";
 /// How long to wait for the last of a finished build's output.
 const LAST_OUTPUT: Duration = Duration::from_millis(200);
+/// Past this a source file isn't read to check a warning.
+const MAX_SOURCE_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Something the build reported, with where to go to see it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,10 +78,22 @@ fn source_name(text: &str) -> Option<&str> {
 /// Document text TeX is echoing, which needn't balance.
 #[derive(Clone, Copy, PartialEq)]
 enum Echo {
-    /// The line after `Overfull` or `Underfull`, up to a blank line.
+    /// The text of an `\\hbox` that didn't fit.
     Box,
     /// After `Runaway argument?`, up to the error it leads to.
     Runaway,
+}
+
+/// Whether `line` comes after the text of a box. TeX often goes straight on to
+/// its next record with no blank line: a page, or a file ending or starting.
+/// Box text itself starts with a font or `[]`.
+fn ends_box_text(line: &str) -> bool {
+    let mut chars = line.chars();
+    match chars.next() {
+        None | Some('(' | ')') => true,
+        Some('[') => chars.next().is_some_and(|c| c.is_ascii_digit()),
+        Some(_) => line.trim().is_empty(),
+    }
 }
 
 /// Follows which file TeX is reading. It prints `(` and a name on entering a
@@ -99,13 +114,12 @@ impl Files {
 
     fn read(&mut self, line: &str) {
         match self.echo {
-            Some(Echo::Box) if !line.trim().is_empty() => return,
+            Some(Echo::Box) if !ends_box_text(line) => return,
             Some(Echo::Runaway) if !line.starts_with('!') && error_line(line).is_none() => return,
             _ => self.echo = None,
         }
-        // The line of a box needn't balance, but the report of one does.
-        let full = line.starts_with("Overfull \\") || line.starts_with("Underfull \\");
-        if full && !line.ends_with("[]") {
+        // Only an `\\hbox` shows its text; a `\\vbox` reports on one line.
+        if line.starts_with("Overfull \\hbox") || line.starts_with("Underfull \\hbox") {
             self.echo = Some(Echo::Box);
             return;
         }
@@ -220,6 +234,66 @@ pub fn problems(output: &str, root: &str) -> (Vec<Problem>, Vec<Problem>) {
         files.read(line);
     }
     (errors, warnings)
+}
+
+/// The source files `output` mentions, as the build named them.
+fn sources_in(output: &str) -> Vec<&str> {
+    let mut found = Vec::new();
+    for line in output.lines() {
+        for (at, _) in line.match_indices('(') {
+            if let Some(name) = source_name(&line[at + 1..]) {
+                if !found.contains(&name) {
+                    found.push(name);
+                }
+            }
+        }
+    }
+    found
+}
+
+/// The lines of a source file, if it's small enough to read on the way past. A
+/// path in a log can be anything, so only a regular file is opened.
+fn source_lines(path: &Path) -> Option<Vec<String>> {
+    let meta = std::fs::metadata(path).ok()?;
+    if !meta.is_file() || meta.len() > MAX_SOURCE_BYTES {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
+    let text = String::from_utf8_lossy(&bytes);
+    Some(text.lines().map(str::to_string).collect())
+}
+
+/// Checks each warning against the source. The file a warning came from is
+/// only a reading of TeX's parentheses, and text it prints can throw that off,
+/// so `Citation `key' ... on input line 12` is looked for at line 12, in the
+/// file it's said to be in and then in the others the build read. TeX gives the
+/// line a command ended on, so the two before it count too.
+pub fn check_against_source(warnings: &mut [Problem], output: &str, dir: &Path) {
+    let names = sources_in(output);
+    let mut read: HashMap<String, Option<Vec<String>>> = HashMap::new();
+    for warning in warnings.iter_mut().filter(|w| w.line > 0) {
+        let Some((_, key)) = warning.text.split_once('`') else {
+            continue;
+        };
+        let key = key.split('\'').next().unwrap_or(key);
+        let line = warning.line;
+        let mut holds = |file: &str| {
+            let lines = read
+                .entry(file.to_string())
+                .or_insert_with(|| source_lines(&dir.join(file)));
+            lines.as_ref().is_some_and(|lines| {
+                let near = lines.get(line.saturating_sub(3)..line.min(lines.len()));
+                near.is_some_and(|near| near.iter().any(|l| l.contains(key)))
+            })
+        };
+        if holds(&warning.file) {
+            continue;
+        }
+        let local = names.iter().map(|n| n.strip_prefix("./").unwrap_or(n));
+        if let Some(file) = local.into_iter().find(|n| holds(n)) {
+            warning.file = file.to_string();
+        }
+    }
 }
 
 /// The line that says most about a failure with no errors to list. `latexmk`
@@ -339,7 +413,8 @@ impl Build {
         }
         let bytes = self.output.lock().unwrap();
         let output = String::from_utf8_lossy(&bytes);
-        let (errors, warnings) = problems(&output, &self.name);
+        let (errors, mut warnings) = problems(&output, &self.name);
+        check_against_source(&mut warnings, &output, &self.dir);
         let last_line = last_word(&output);
         Some(Outcome {
             ok: status.success(),
@@ -559,6 +634,55 @@ LaTeX Warning: Citation `afterrun' on page 1 undefined on input line 5.
 
 "#;
 
+    /// From real `latexmk` output: box text with no blank line after it, before
+    /// a page, a file closing and a file opening, and a `\\vbox` with no text.
+    const REAL_TIGHT: &str = r#"This is pdfTeX, Version 3.141592653-2.6-1.40.29 (TeX Live 2026) (preloaded format=pdflatex)
+(./main.tex
+LaTeX2e <2026-06-01>
+(./ch/endsoverfull.tex
+Overfull \hbox (76.16762pt too wide) in paragraph at lines 1--5
+\OT1/cmr/m/n/10 Ends on an over-full para-graph Supercalifragilisticexpialidocious-Supercalifragi
+)
+
+LaTeX Warning: Citation `afterfirst' on page 1 undefined on input line 4.
+
+[1{/usr/local/texlive/2026/texmf-var/fonts/map/pdftex/updmap/pdftex.map}] (./ch/endsbox.tex
+
+LaTeX Warning: Citation `inendsbox' on page 2 undefined on input line 1.
+
+
+Overfull \hbox (234.74217pt too wide) detected at line 2
+\OT1/cmr/m/n/10 Smith) last thing in the file and it is much too wide for the box
+)
+
+LaTeX Warning: Citation `aftersecond' on page 2 undefined on input line 7.
+
+[2] (./ch/inc.tex
+
+LaTeX Warning: Citation `ininc' on page 3 undefined on input line 1.
+
+
+Overfull \hbox (63.90358pt too wide) in paragraph at lines 1--3
+[]\OT1/cmr/m/n/10 [[]] In-clude ends over-full Supercalifragilisticexpialidocious-Supercalifragil
+[3])
+
+LaTeX Warning: Citation `afterinc' on page 4 undefined on input line 9.
+
+[4]
+Overfull \hbox (177.43654pt too wide) detected at line 11
+\OT1/cmr/m/n/10 Smith) overfull in a box at the very end of a page
+
+Underfull \vbox (badness 10000) detected at line 11
+[5] (./ch/tail.tex [6] (./ch/tail2.tex
+
+LaTeX Warning: Citation `intail2' on page 7 undefined on input line 1.
+
+))
+
+LaTeX Warning: Citation `aftertail' on page 7 undefined on input line 14.
+
+"#;
+
     fn places(warnings: &[Problem]) -> Vec<String> {
         let place = |p: &Problem| format!("{}:{}", p.file, p.line);
         warnings.iter().map(place).collect()
@@ -580,6 +704,23 @@ LaTeX Warning: Citation `afterrun' on page 1 undefined on input line 5.
     }
 
     #[test]
+    fn box_text_ends_where_the_next_record_starts_blank_line_or_not() {
+        let (_, warnings) = problems(REAL_TIGHT, "main.tex");
+        assert_eq!(
+            places(&warnings),
+            [
+                "main.tex:4",
+                "ch/endsbox.tex:1",
+                "main.tex:7",
+                "ch/inc.tex:1",
+                "main.tex:9",
+                "ch/tail2.tex:1",
+                "main.tex:14",
+            ]
+        );
+    }
+
+    #[test]
     fn a_stray_parenthesis_in_runaway_text_doesnt_end_the_file() {
         let (errors, warnings) = problems(REAL_RUNAWAY, "run.tex");
         assert_eq!(places(&warnings), ["ch/run.tex:2", "run.tex:5"]);
@@ -590,6 +731,51 @@ LaTeX Warning: Citation `afterrun' on page 1 undefined on input line 5.
     fn a_box_with_nothing_to_show_doesnt_hide_the_next_line() {
         let output = "(./a.tex\nUnderfull \\vbox (badness 10000) has occurred while \\output is active []\n(./ch.tex\nLaTeX Warning: Citation `x' on page 1 undefined on input line 2.\n";
         assert_eq!(places(&problems(output, "a.tex").1), ["ch.tex:2"]);
+    }
+
+    #[test]
+    fn a_warning_is_checked_against_the_source() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("ch")).unwrap();
+        std::fs::write(dir.path().join("main.tex"), "one\ntwo\nthree\nfour\n").unwrap();
+        std::fs::write(dir.path().join("ch/my a.tex"), "x\ny\nz\nw\n\\cite{key}\n").unwrap();
+        // A stray `)` from `\typeout` closes the chapter early.
+        let output = "This is pdfTeX\n(./main.tex\n(./ch/my a.tex\na stray)\nLaTeX Warning: Citation `key' on page 1 undefined on input line 5.\n)\n)\n";
+        let (_, mut warnings) = problems(output, "main.tex");
+        assert_eq!(warnings[0].file, "main.tex", "what the parentheses say");
+        check_against_source(&mut warnings, output, dir.path());
+        assert_eq!(places(&warnings), ["ch/my a.tex:5"]);
+    }
+
+    #[test]
+    fn a_key_on_the_lines_before_counts_and_a_key_found_nowhere_stays() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.tex"), "\\cite{%\nkey\n}\n").unwrap();
+        std::fs::write(dir.path().join("b.tex"), "key\n").unwrap();
+        let warning = |line, key: &str| Problem {
+            file: "a.tex".to_string(),
+            line,
+            text: format!("Citation `{key}' on page 1 undefined"),
+        };
+        let output = "(./a.tex (./b.tex";
+        let mut kept = [warning(3, "key"), warning(3, "gone"), warning(99, "key")];
+        check_against_source(&mut kept, output, dir.path());
+        assert_eq!(kept.map(|w| w.file), ["a.tex", "a.tex", "a.tex"]);
+    }
+
+    #[test]
+    fn a_source_that_isnt_a_plain_file_isnt_read() {
+        let dir = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink("/dev/zero", dir.path().join("z.tex")).unwrap();
+        assert!(source_lines(&dir.path().join("z.tex")).is_none());
+        assert!(source_lines(&dir.path().join("none.tex")).is_none());
+        let mut w = [Problem {
+            file: "z.tex".to_string(),
+            line: 1,
+            text: "Citation `k' on page 1 undefined".to_string(),
+        }];
+        check_against_source(&mut w, "(./z.tex", dir.path());
+        assert_eq!(w[0].file, "z.tex");
     }
 
     #[test]
