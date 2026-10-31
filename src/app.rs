@@ -2247,6 +2247,9 @@ impl App {
         self.doc.outside_change = false;
         if self.doc.buffer.to_string() == *run.theirs {
             self.doc.buffer.mark_clean();
+        } else {
+            // What's kept here is no longer what's on disk.
+            self.doc.buffer.set_dirty();
         }
         if !run.changes.is_empty() {
             let (took, all) = (run.accepted, run.changes.len());
@@ -2375,8 +2378,15 @@ impl App {
         if self.place_of(&target).is_some() {
             return Err("That file is open here; close it first".to_string());
         }
-        if let Ok(SwapStatus::LiveLock { pid }) = swap::inspect(&target, b"") {
-            return Err(format!("Open in another kyte (PID {pid})"));
+        let current = std::fs::read(&target).unwrap_or_default();
+        match swap::inspect(&target, &current) {
+            Ok(SwapStatus::LiveLock { pid }) => {
+                return Err(format!("Open in another kyte (PID {pid})"));
+            }
+            Ok(SwapStatus::Recoverable(_) | SwapStatus::Stale) => {
+                return Err("That file has edits from a crash; open it first".to_string());
+            }
+            _ => {}
         }
         self.mode = Mode::Insert;
         if meta.is_some() {
@@ -2414,6 +2424,13 @@ impl App {
     }
 
     fn write_file(&mut self, path: &std::path::Path, then: After) {
+        // A symlink can move after a file is opened, so check again here: a
+        // save takes over the swap of the file it lands on.
+        let target = fileio::resolve_target(path).ok();
+        if target.is_some_and(|t| self.place_of(&t).is_some_and(|p| p != self.at)) {
+            self.set_error("That file is open here; close it first");
+            return;
+        }
         let text = self.doc.buffer.to_string();
         let overwritten = self.outside_version(path);
         match fileio::save_atomic(path, &text) {

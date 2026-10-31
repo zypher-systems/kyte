@@ -3700,3 +3700,84 @@ fn a_change_to_a_file_not_on_screen_shows_up_when_you_look() {
     wait_status(&p, "changed on disk");
     quit_clean(&mut p);
 }
+
+#[test]
+fn two_spellings_of_a_new_file_open_once() {
+    let env = Env::new();
+    let dir = env.path("w");
+    fs::create_dir_all(dir.join("sub")).unwrap();
+    let link = dir.join("link");
+    std::os::unix::fs::symlink("sub/../new.txt", &link).unwrap();
+    let new = dir.join("new.txt");
+    let mut p = env.open(&link);
+    open_from_prompt(&mut p, new.to_str().unwrap());
+    p.wait_for("Already open", TIMEOUT);
+    assert_eq!(swap_files(&env).len(), 1);
+    quit_clean(&mut p);
+}
+
+#[test]
+fn a_symlink_moved_onto_an_open_file_cant_save_over_its_swap() {
+    let env = Env::new();
+    let a = work_file(&env, "a.txt", "aaa\n");
+    let b = work_file(&env, "b.txt", "bbb\n");
+    let link = a.parent().unwrap().join("link.txt");
+    std::os::unix::fs::symlink(&a, &link).unwrap();
+    let mut p = open_all(&env, &[&link, &b]);
+    p.wait_for("1 │ aaa", TIMEOUT);
+    esc_then(&mut p, ".");
+    p.wait_for("1 │ bbb", TIMEOUT);
+    type_text(&mut p, "precious ");
+    esc_then(&mut p, ",");
+    p.wait_for("1 │ aaa", TIMEOUT);
+    type_text(&mut p, "other ");
+    fs::remove_file(&link).unwrap();
+    std::os::unix::fs::symlink(&b, &link).unwrap();
+    p.send_keys(&["C-s"]);
+    p.wait_for("changed on disk", TIMEOUT);
+    p.send_str("y");
+    p.wait_for("That file is open here", TIMEOUT);
+    assert_eq!(fs::read_to_string(&b).unwrap(), "bbb\n");
+    p.kill9();
+    assert_eq!(print_swap(&env, &b), (0, "precious bbb\n".to_string()));
+}
+
+#[test]
+fn save_as_wont_overwrite_edits_left_by_a_crash() {
+    let env = Env::new();
+    let notes = env.path("work/notes.txt");
+    fs::create_dir_all(notes.parent().unwrap()).unwrap();
+    let a = work_file(&env, "a.txt", "aaa\n");
+    let mut p = env.open(&notes);
+    type_text(&mut p, "precious work");
+    p.kill9();
+    let mut p = env.open(&a);
+    save_as(&mut p, notes.to_str().unwrap());
+    p.wait_for("edits from a crash", TIMEOUT);
+    p.send_keys(&["Esc"]);
+    wait_insert(&p);
+    assert!(!notes.exists());
+    assert_eq!(print_swap(&env, &notes), (0, "precious work".to_string()));
+    quit_clean(&mut p);
+    assert_eq!(print_swap(&env, &notes), (0, "precious work".to_string()));
+}
+
+#[test]
+fn keeping_your_side_of_a_review_counts_as_unsaved() {
+    let env = Env::new();
+    let a = work_file(&env, "a.txt", "aaa\n");
+    let mut p = env.open(&a);
+    p.wait_for("1 │ aaa", TIMEOUT);
+    fs::write(&a, "theirs\n").unwrap();
+    wait_status(&p, "changed on disk");
+    open_overlay(&mut p);
+    p.send_str("c");
+    p.wait_for("Keep yours", TIMEOUT);
+    p.send_str("n");
+    p.wait_gone("Keep yours", TIMEOUT);
+    wait_status(&p, "a.txt [+]");
+    p.send_keys(&["C-w"]);
+    p.wait_for("Unsaved changes", TIMEOUT);
+    p.send_str("n");
+    assert_eq!(p.wait_exit(TIMEOUT), 0);
+}
