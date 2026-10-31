@@ -39,7 +39,7 @@ These replace the matching parts of `ARCHITECTURE`. `docs/ROADMAP.md` holds the 
 - A LaTeX word count needs to know what's prose, so it walks the parse tree: only `text` nodes in the document body, stepping around citations nested in them. It runs when typing pauses. Text and Markdown just split on spaces, at 0.4 ms for 500 KB, so they stay live.
 - LaTeX's grammar takes about 1.4 ms per KB, some fourteen times the others, because of its huge token list. Parsing the whole file made a 10,000-word paper cost 145 ms a key. `highlight` now parses only a window around the lines it's asked for: 4 KB before, from a blank line where there is one, and 1 KB after. That's about 4 ms a key at any length, so LaTeX also has no size limit. The price is that a block longer than the window can color wrongly when you're inside it.
 - Spell check uses `spellbook` with a compiled-in SCOWL en_US dictionary. Loading takes about 4 ms and a word about 50 ns, so visible lines are simply checked on every draw, and there's no background thread. The dictionary adds about 0.6 MB, and a system dictionary would have left SSH sessions and servers with nothing.
-- What isn't prose comes from the highlighter: anything colored is skipped, except keywords, which is how headings color. That one rule covers LaTeX math, commands, citations and comments, and code in Markdown, with no second parser. A build without highlighting checks everything except `\\commands`.
+- What isn't prose comes from the highlighter: anything colored is skipped, except keywords, which is how headings color. That one rule covers LaTeX math, commands, citations and comments, and code in Markdown, with no second parser. A build without highlighting checks everything except `\commands`.
 - Words with a digit, or written in capitals or mixed case, are skipped. In technical writing they're nearly always names, and flagging each one teaches people to ignore the underline.
 - Misspellings use the error color and an underline. An underline color would be better, but `SGR 58` makes a terminal that doesn't know it blink instead.
 - `words.txt` is plain text beside the settings, so it can be edited, copied and kept in a dotfiles repo. Adding a word still works for the session if the file can't be written.
@@ -48,11 +48,11 @@ These replace the matching parts of `ARCHITECTURE`. `docs/ROADMAP.md` holds the 
 
 ## Citations
 
-- The box opens by itself on `\\cite{`, because that's the moment the key is wanted and few people remember keys. It's centered like every other list, and stays quiet if there's nothing to offer, because someone with no `.bib` file isn't asking for one.
+- The box opens by itself on `\cite{`, because that's the moment the key is wanted and few people remember keys. It's centered like every other list, and stays quiet if there's nothing to offer, because someone with no `.bib` file isn't asking for one.
 - Any command with `cite` in its name counts, which covers natbib and biblatex without a list to keep up to date.
 - `.bib` files are read by a small scanner rather than the grammar, so a half-written entry doesn't cost the others, and it works in builds without highlighting. They're read each time the box opens, so a new entry shows at once. An open copy wins over the one on disk.
 - Works are filtered on key, author and title and ranked best first, because the title is what people remember.
-- A comma keeps the box open, since `\\cite{a,b}` is common and a comma can't be part of what you're searching for.
+- A comma keeps the box open, since `\cite{a,b}` is common and a comma can't be part of what you're searching for.
 - A named bibliography wins over one that merely sits beside the paper, because a folder can hold several.
 - Only LaTeX gets this. Pandoc's `[@key]` in Markdown could use the same box.
 
@@ -132,7 +132,7 @@ These replace the matching parts of `ARCHITECTURE`. `docs/ROADMAP.md` holds the 
 - Each grammar was tried on a real sample before it went in, because a query can load and still leave a file mostly plain. That found three problems, all from queries written for Neovim:
   - `@comment @spell` left comments uncolored, because the second capture won. `adapted` strips `@spell` and `@nospell`.
   - `#lua-match?` isn't a predicate here, and an unknown predicate doesn't filter, so it's mapped to `#match?`. SQL and CMake also needed their Lua patterns rewritten as regex.
-  - Older names such as `conditional`, `repeat` and `boolean` weren't Kyte colors, so `if` in Lua stayed plain. They're mapped now, along with `constructor`, `escape` and `variable.builtin`, which also adds color to `self` and `\\n` in the earlier languages.
+  - Older names such as `conditional`, `repeat` and `boolean` weren't Kyte colors, so `if` in Lua stayed plain. They're mapped now, along with `constructor`, `escape` and `variable.builtin`, which also adds color to `self` and `\n` in the earlier languages.
 - `tests` in `highlight.rs` check named tokens in a whole sample for each language, so a query update that drops comments will fail.
 - Left out, and why:
   - `tree-sitter-dockerfile`: it needs an old tree-sitter. `tree-sitter-containerfile` covers Dockerfiles instead.

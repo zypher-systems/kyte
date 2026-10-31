@@ -252,9 +252,9 @@ Spell check uses a built-in American English dictionary, so it needs nothing ins
 
 ### Citations
 
-In a LaTeX file, finishing `\\cite{` opens a box of the works in your bibliography. So do `\\citep{`, `\\autocite{`, `\\parencite[p. 3]{` and any other citation command. Type to filter by key, author or title. Enter puts in the key and closes the braces, a comma puts it in and stays open for the next, and Esc leaves what you typed. Esc `q` (**Insert citation**) does the same from anywhere: it fills in the braces at the cursor, or starts a `\\cite{`.
+In a LaTeX file, finishing `\cite{` opens a box of the works in your bibliography. So do `\citep{`, `\autocite{`, `\parencite[p. 3]{` and any other citation command. Type to filter by key, author or title. Enter puts in the key and closes the braces, a comma puts it in and stays open for the next, and Esc leaves what you typed. Esc `q` (**Insert citation**) does the same from anywhere: it fills in the braces at the cursor, or starts a `\cite{`.
 
-The works come from the files named by `\\bibliography{}` or `\\addbibresource{}`, and failing that from every `.bib` beside the paper. A `.bib` file open in Kyte counts as it stands, saved or not.
+The works come from the files named by `\bibliography{}` or `\addbibresource{}`, and failing that from every `.bib` beside the paper. A `.bib` file open in Kyte counts as it stands, saved or not.
 
 ### Building the PDF
 
@@ -262,7 +262,7 @@ Ctrl-B (**Build PDF**) saves a LaTeX file and builds it with `latexmk`, in the f
 
 If it fails, a box lists the errors, and Enter goes to the line, opening the file if it's another one. If it works but left citations or labels undefined, Kyte says so, and **Show build problems** lists them. Esc `o` (**Open PDF**) shows the result with `xdg-open`.
 
-A chapter builds its whole document. Kyte goes by a `% !TEX root = ../thesis.tex` comment in the first ten lines, and failing that, for a file with no `\\documentclass`, a `main.tex` beside it or a folder up.
+A chapter builds its whole document. Kyte goes by a `% !TEX root = ../thesis.tex` comment in the first ten lines, and failing that, for a file with no `\documentclass`, a `main.tex` beside it or a folder up.
 
 Open files other than the one you build aren't saved first.
 
