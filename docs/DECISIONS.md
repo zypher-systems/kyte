@@ -52,6 +52,7 @@ These replace the matching parts of `ARCHITECTURE`. `docs/ROADMAP.md` holds the 
 - What isn't prose comes from the highlighter: anything colored is skipped, except keywords, which is how headings color. That one rule covers LaTeX math, commands, citations and comments, and code in Markdown, with no second parser. A build without highlighting checks everything except `\commands`.
 - Words with a digit, or written in capitals or mixed case, are skipped. In technical writing they're nearly always names, and flagging each one teaches people to ignore the underline.
 - Misspellings use the error color and an underline. An underline color would be better, but `SGR 58` makes a terminal that doesn't know it blink instead.
+- Next misspelling searches a LaTeX file 200 lines at a time and stops at the first hit, because parsing it is slow and the next one is usually close.
 - `words.txt` is plain text beside the settings, so it can be edited, copied and kept in a dotfiles repo. Adding a word still works for the session if the file can't be written.
 - `tests/fixtures/settings.toml` keeps the writing setup off for the end-to-end tests, which are about editing and mostly use `.txt` files. The writing tests turn it back on.
 - BibTeX files aren't spell checked. They're mostly names and titles, in a format that isn't prose.
@@ -64,6 +65,7 @@ These replace the matching parts of `ARCHITECTURE`. `docs/ROADMAP.md` holds the 
 - Works are filtered on key, author and title and ranked best first, because the title is what people remember.
 - A comma keeps the box open, since `\cite{a,b}` is common and a comma can't be part of what you're searching for.
 - A named bibliography wins over one that merely sits beside the paper, because a folder can hold several.
+- A bibliography is read on a keypress, so only a regular file of at most 32 MB is read. A named path can be a pipe or a device, and reading those never ends. What's left out is reported. Absolute and `..` paths stay, because real bibliographies use them.
 - Only LaTeX gets this. Pandoc's `[@key]` in Markdown could use the same box.
 
 ## Building PDFs
@@ -80,6 +82,8 @@ These replace the matching parts of `ARCHITECTURE`. `docs/ROADMAP.md` holds the 
 - Errors only open the box from plain editing, so a build ending can't take over a question or a search.
 - Being LaTeX is separate from showing for writing, so `writing = false` keeps citations and Ctrl-B. A test caught them disappearing together.
 - A chapter finds its root from `% !TEX root`, the convention other LaTeX editors use, and then from a `main.tex`.
+- A warning's file comes from following TeX's `(` and `)` as it enters and leaves files, so a citation undefined in a chapter opens that chapter. Ordinary text has parentheses too, so all of them are tracked, and the document text TeX echoes around an error is skipped because it needn't balance.
+- Problems keep the folder that was built, because the file on screen can change before someone picks one. A file that has since gone is reported, not opened as a new empty one.
 - Unsaved files other than the one on screen aren't saved first. Saving can ask questions, and asking about several files before a build is more than a keypress should do.
 
 ## File tree

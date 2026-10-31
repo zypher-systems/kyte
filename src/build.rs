@@ -45,12 +45,42 @@ pub struct Outcome {
     pub took: Duration,
 }
 
+/// Whether `name` is a file a person might have to fix.
+fn is_source(name: &str) -> bool {
+    let tex = [".tex", ".ltx", ".sty", ".cls", ".bib", ".bbl"];
+    tex.iter().any(|t| name.ends_with(t))
+}
+
+/// Follows which file TeX is reading. It prints `(` and a name on entering a
+/// file and `)` on leaving, and other text has parentheses too, so all of them
+/// are tracked, with a name only where there is one.
+fn track_files(line: &str, open: &mut Vec<Option<String>>) {
+    // Where an error is shown, TeX echoes the document, which needn't balance.
+    let echoed = line.starts_with("l.") || line.starts_with(' ') || line.starts_with('<');
+    if echoed {
+        return;
+    }
+    for (i, c) in line.char_indices() {
+        match c {
+            '(' => {
+                let rest = &line[i + 1..];
+                let name = rest.split([' ', '(', ')']).next().unwrap_or_default();
+                let local = name.starts_with("./") || name.starts_with("../");
+                open.push((local && is_source(name)).then(|| name.to_string()));
+            }
+            ')' => {
+                open.pop();
+            }
+            _ => {}
+        }
+    }
+}
+
 /// A `file:line: message` line, the form `-file-line-error` gives.
 fn error_line(line: &str) -> Option<Problem> {
     let (file, rest) = line.split_once(':')?;
     let (number, text) = rest.split_once(':')?;
-    let tex = [".tex", ".ltx", ".sty", ".cls", ".bib", ".bbl"];
-    if !tex.iter().any(|t| file.ends_with(t)) {
+    if !is_source(file) {
         return None;
     }
     Some(Problem {
@@ -62,7 +92,7 @@ fn error_line(line: &str) -> Option<Problem> {
 
 /// A warning worth acting on: a citation or label that isn't defined. LaTeX's
 /// closing `There were undefined references` adds nothing to those.
-fn undefined(line: &str, root: &str) -> Option<Problem> {
+fn undefined(line: &str, file: &str) -> Option<Problem> {
     if !line.contains("Warning") || !line.contains("undefined") || !line.contains('`') {
         return None;
     }
@@ -75,7 +105,7 @@ fn undefined(line: &str, root: &str) -> Option<Problem> {
         .unwrap_or(0);
     let text = text.split(" on input line").next().unwrap_or(text);
     Some(Problem {
-        file: root.to_string(),
+        file: file.to_string(),
         line: number,
         text: text.to_string(),
     })
@@ -88,10 +118,20 @@ pub fn problems(output: &str, root: &str) -> (Vec<Problem>, Vec<Problem>) {
     // A `!` error, such as a missing package, gives its place on a later line.
     let mut placeless: Option<usize> = None;
     let last_pass = output.rfind("This is ").unwrap_or(0);
+    let mut open = Vec::new();
     for line in output.lines() {
+        if line.starts_with("This is ") {
+            open.clear();
+        }
+        let file = open
+            .iter()
+            .rev()
+            .flatten()
+            .next()
+            .map_or(root, |f: &String| f.strip_prefix("./").unwrap_or(f));
         if let Some(text) = line.strip_prefix("! ") {
             let p = Problem {
-                file: root.to_string(),
+                file: file.to_string(),
                 line: 0,
                 text: text.trim().to_string(),
             };
@@ -114,13 +154,14 @@ pub fn problems(output: &str, root: &str) -> (Vec<Problem>, Vec<Problem>) {
                     }
                 }
             }
-        } else if let Some(p) = undefined(line, root) {
+        } else if let Some(p) = undefined(line, file) {
             // A first pass warns about every citation; later ones settle them.
             let from = line.as_ptr() as usize - output.as_ptr() as usize;
             if from >= last_pass && !warnings.contains(&p) {
                 warnings.push(p);
             }
         }
+        track_files(line, &mut open);
     }
     (errors, warnings)
 }
@@ -362,6 +403,72 @@ Transcript written on missing.log.
 Collected error summary (may duplicate other messages):
   pdflatex: Command for 'pdflatex' gave return code 1
 "#;
+
+    /// From real `latexmk` output: a paper with chapters, one nested, one
+    /// `\\include`d, and parentheses in ordinary text.
+    const REAL_CHAPTERS: &str = r#"This is pdfTeX, Version 3.141592653-2.6-1.40.29 (TeX Live 2026) (preloaded format=pdflatex)
+ restricted \write18 enabled.
+entering extended mode
+(./main.tex
+LaTeX2e <2026-06-01>
+(/usr/local/texlive/2026/texmf-dist/tex/latex/base/article.cls
+Document Class: article 2025/01/22 v1.4n Standard LaTeX document class
+(/usr/local/texlive/2026/texmf-dist/tex/latex/base/size10.clo)) (/usr/local/texlive/2026/texmf-dist/tex/latex/l3backend/l3backend-pdftex.def) (./main.aux (./chapters/two.aux))
+
+LaTeX Warning: Citation `inroot' on page 1 undefined on input line 4.
+
+(./chapters/intro.tex
+
+LaTeX Warning: Citation `inchapter' on page 1 undefined on input line 3.
+
+
+LaTeX Warning: Reference `nolabel' on page 1 undefined on input line 3.
+
+(./chapters/deep.tex
+
+LaTeX Warning: Citation `indeep' on page 1 undefined on input line 2.
+
+))
+
+LaTeX Warning: Citation `afterch' on page 1 undefined on input line 6.
+
+[1{/usr/local/texlive/2026/texmf-var/fonts/map/pdftex/updmap/pdftex.map}] (./chapters/two.tex
+
+LaTeX Warning: Citation `intwo' on page 2 undefined on input line 3.
+
+./chapters/two.tex:4: Undefined control sequence.
+l.4 \notacommand (unbalanced
+                 
+) [2] (./main.aux (./chapters/two.aux))
+
+LaTeX Warning: Citation `atend' on page 2 undefined on input line 9.
+
+"#;
+
+    #[test]
+    fn a_warning_belongs_to_the_file_tex_was_reading() {
+        let (errors, warnings) = problems(REAL_CHAPTERS, "main.tex");
+        let found: Vec<String> = warnings
+            .iter()
+            .map(|p| format!("{}:{}", p.file, p.line))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                "main.tex:4",
+                "chapters/intro.tex:3",
+                "chapters/intro.tex:3",
+                "chapters/deep.tex:2",
+                "main.tex:6",
+                "chapters/two.tex:3",
+                "main.tex:9",
+            ]
+        );
+        assert_eq!(
+            errors[0].label(),
+            "chapters/two.tex:4  Undefined control sequence."
+        );
+    }
 
     #[test]
     fn real_errors_and_warnings_are_read() {

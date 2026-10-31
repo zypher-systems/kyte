@@ -4664,3 +4664,131 @@ fn esc_o_shows_the_pdf_once_there_is_one() {
     quit_clean(&mut p);
     assert_eq!(fs::read_to_string(&shown).unwrap().trim(), "paper.pdf");
 }
+
+#[test]
+fn a_build_problem_goes_to_the_paper_that_was_built_whatever_is_on_screen() {
+    let env = Env::new();
+    let script = "echo './paper.tex:2: Boom.'; exit 1\n";
+    let settings = "build_command = \"sh build.sh %f\"\n";
+    let root = env.path("papers");
+    let (a, b) = (root.join("a"), root.join("b"));
+    fs::create_dir_all(&a).unwrap();
+    fs::create_dir_all(&b).unwrap();
+    fs::write(a.join("paper.tex"), "a1\nright project\n").unwrap();
+    fs::write(b.join("paper.tex"), "b1\nwrong project\n").unwrap();
+    fs::write(a.join("build.sh"), script).unwrap();
+    let notes = root.join("notes.rs");
+    fs::write(&notes, "fn notes() {}\n").unwrap();
+    let mut p = open_writing(&env, &a.join("paper.tex"), settings);
+    p.send_keys(&["C-b"]);
+    p.wait_for("▸ paper.tex:2  Boom.", TIMEOUT);
+    p.send_keys(&["Esc"]);
+    wait_insert(&p);
+    open_from_prompt(&mut p, b.join("paper.tex").to_str().unwrap());
+    p.wait_for("wrong project", TIMEOUT);
+    run_from_palette(&mut p, "Show build problems");
+    p.wait_for("▸ paper.tex:2  Boom.", TIMEOUT);
+    p.send_keys(&["Enter"]);
+    p.wait_for("right project", TIMEOUT);
+    wait_status(&p, "Ln 2, Col 1");
+    assert!(!p.screen().contains("Already open"), "{}", p.dump());
+    open_from_prompt(&mut p, notes.to_str().unwrap());
+    p.wait_for("fn notes", TIMEOUT);
+    run_from_palette(&mut p, "Show build problems");
+    p.wait_for("▸ paper.tex:2  Boom.", TIMEOUT);
+    p.send_keys(&["Enter"]);
+    p.wait_for("right project", TIMEOUT);
+    quit_clean(&mut p);
+}
+
+#[test]
+fn a_build_problem_in_a_file_thats_gone_says_so_and_makes_nothing() {
+    let env = Env::new();
+    let script = "echo './gone.tex:2: Boom.'; exit 1\n";
+    let (paper, mut p) = open_build(&env, "x\n", script);
+    p.send_keys(&["C-b"]);
+    p.wait_for("▸ gone.tex:2  Boom.", TIMEOUT);
+    p.send_keys(&["Enter"]);
+    p.wait_for("gone.tex is gone", TIMEOUT);
+    assert!(!status(&p).contains("gone.tex"), "{}", status(&p));
+    assert!(!paper.parent().unwrap().join("gone.tex").exists());
+    quit_clean(&mut p);
+}
+
+#[test]
+fn a_warning_inside_a_chapter_opens_that_chapter() {
+    let env = Env::new();
+    let script = "cat log.txt\n";
+    let (paper, mut p) = open_build(&env, "root one\nroot two\n", script);
+    let dir = paper.parent().unwrap();
+    fs::create_dir(dir.join("ch")).unwrap();
+    fs::write(dir.join("ch/one.tex"), "a\nb\nchapter line\n").unwrap();
+    let log = "This is pdfTeX\n(./paper.tex\n(./ch/one.tex\n\nLaTeX Warning: Citation `x' on page 1 undefined on input line 3.\n\n))\n";
+    fs::write(dir.join("log.txt"), log).unwrap();
+    p.send_keys(&["C-b"]);
+    p.wait_for("with 1 warning", TIMEOUT);
+    run_from_palette(&mut p, "Show build problems");
+    p.wait_for("▸ ch/one.tex:3  Citation", TIMEOUT);
+    p.send_keys(&["Enter"]);
+    p.wait_for("chapter line", TIMEOUT);
+    wait_status(&p, "one.tex");
+    wait_status(&p, "Ln 3, Col 1");
+    quit_clean(&mut p);
+}
+
+#[test]
+fn a_bibliography_that_isnt_a_plain_file_cant_hang_the_editor() {
+    let env = Env::new();
+    let paper = work_file(&env, "paper.tex", "x\n");
+    let dir = paper.parent().unwrap();
+    fs::write(dir.join("good.bib"), REFS).unwrap();
+    std::os::unix::fs::symlink("/dev/zero", dir.join("zero.bib")).unwrap();
+    let fifo = dir.join("pipe.bib");
+    assert!(Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .unwrap()
+        .success());
+    let huge = fs::File::create(dir.join("huge.bib")).unwrap();
+    huge.set_len(33 * 1024 * 1024).unwrap();
+    let mut p = open_writing(&env, &paper, "");
+    p.send_str("\\cite{");
+    p.wait_for(" Cite ", TIMEOUT);
+    p.wait_for("knuth84", TIMEOUT);
+    p.wait_for("Left out 3 bibliography files", TIMEOUT);
+    p.send_keys(&["Esc"]);
+    wait_insert(&p);
+    abandon(&mut p);
+}
+
+#[test]
+fn a_named_bibliography_outside_the_folder_still_works() {
+    let env = Env::new();
+    let refs = env.path("shared/lib.bib");
+    fs::create_dir_all(refs.parent().unwrap()).unwrap();
+    fs::write(&refs, "@misc{far, title = {Away}}\n").unwrap();
+    let tex = format!("\\bibliography{{{}}}\n", refs.display());
+    let paper = work_file(&env, "paper.tex", &tex);
+    let mut p = open_writing(&env, &paper, "");
+    esc_then_box(&mut p);
+    p.wait_for("far  Away", TIMEOUT);
+    p.send_keys(&["Esc"]);
+    wait_insert(&p);
+    abandon(&mut p);
+}
+
+#[cfg(all(feature = "spell", feature = "highlight"))]
+#[test]
+fn next_misspelling_walks_a_long_paper_in_batches_and_wraps() {
+    let env = Env::new();
+    let body = "A fine line of text.\n".repeat(450);
+    let tex = format!("wrongg top\n{body}$tehmath$ and wrongger there\n");
+    let f = env.write("paper.tex", &tex);
+    let mut p = open_writing(&env, &f, "");
+    wait_underlined(&p, "wrongg");
+    esc_then(&mut p, "m");
+    wait_status(&p, "Ln 452, Col 15");
+    esc_then(&mut p, "m");
+    wait_status(&p, "Ln 1, Col 1");
+    quit_clean(&mut p);
+}

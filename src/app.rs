@@ -414,8 +414,9 @@ pub struct App {
     speller: Option<Speller>,
     /// The PDF being built.
     build: Option<Build>,
-    /// What the last build reported.
+    /// What the last build reported, and the folder its paths start from.
     build_problems: Vec<Problem>,
+    build_dir: std::path::PathBuf,
     build_command: Option<String>,
     pdf_command: Option<String>,
     last_key: Option<Instant>,
@@ -432,6 +433,12 @@ fn plural(n: usize) -> &'static str {
         "s"
     }
 }
+
+/// A bibliography is read on a keypress, so past this it's left out.
+const MAX_BIBLIOGRAPHY_BYTES: u64 = 32 * 1024 * 1024;
+/// How many lines a LaTeX file is searched for misspellings at a time, because
+/// parsing it is slow and the next one is usually close.
+const SPELL_BATCH: usize = 200;
 
 /// Counting words reads the whole file on every key, so past this it stops.
 const MAX_COUNTED_BYTES: usize = 2 * 1024 * 1024;
@@ -473,6 +480,7 @@ impl App {
             last_key: None,
             build: None,
             build_problems: Vec::new(),
+            build_dir: std::path::PathBuf::new(),
             build_command: opts.build_command.clone(),
             pdf_command: opts.pdf_command.clone(),
             parked: Vec::new(),
@@ -2124,6 +2132,7 @@ impl App {
         let failed = !outcome.ok;
         let errors = outcome.errors.len();
         self.build_problems = outcome.errors.into_iter().chain(outcome.warnings).collect();
+        self.build_dir = b.dir.clone();
         if failed && errors == 0 {
             self.set_error(format!("Build failed: {}", outcome.last_line));
         } else if failed {
@@ -2156,18 +2165,20 @@ impl App {
         self.mode = Mode::Palette(PaletteState::problems(title, rows.collect()));
     }
 
-    /// Goes to where a build problem is, opening the file if it has to.
+    /// Goes to where a build problem is, opening the file if it has to. Its
+    /// path starts from the folder that was built, wherever the screen is now.
     fn go_to_problem(&mut self, problem: &Problem) {
-        let Some(dir) = self
-            .build_root()
-            .and_then(|r| r.parent().map(|d| d.to_path_buf()))
-        else {
+        let path = self.build_dir.join(&problem.file);
+        if !path.is_file() {
+            self.set_message(format!("{} is gone", path.display()));
             return;
-        };
-        let path = dir.join(&problem.file);
+        }
         match self.submit_open(&path.display().to_string()) {
-            Ok(()) if self.mode == Mode::Insert && problem.line > 0 => {
-                self.go_to_line(problem.line);
+            Ok(()) if self.mode == Mode::Insert => {
+                if problem.line > 0 {
+                    self.go_to_line(problem.line);
+                }
+                self.message = None;
             }
             Ok(()) => {}
             Err(e) => self.set_error(e),
@@ -2200,24 +2211,32 @@ impl App {
         bib::in_citation(&b.slice_string(upto))
     }
 
-    /// The text of the file at `path`, from the open copy if there is one, so
-    /// a reference added a moment ago counts before it's saved.
-    fn text_of(&self, path: &std::path::Path) -> Option<String> {
+    /// The text of the bibliography at `path`, from the open copy if there is
+    /// one, so a reference added a moment ago counts before it's saved. This
+    /// runs on a keypress, so it reads only a regular file of a sensible size:
+    /// a path can be a pipe or a device, and reading those never ends.
+    fn bibliography_text(&self, path: &std::path::Path) -> Option<String> {
         let target = fileio::resolve_target(path).ok();
         let open = std::iter::once(&self.doc)
             .chain(&self.parked)
             .find(|d| d.swap_target.is_some() && d.swap_target == target);
-        match open {
-            Some(d) => Some(d.buffer.to_string()),
-            None => std::fs::read_to_string(path).ok(),
+        if let Some(d) = open {
+            return Some(d.buffer.to_string());
         }
+        let meta = std::fs::metadata(path).ok()?;
+        if !meta.is_file() || meta.len() > MAX_BIBLIOGRAPHY_BYTES {
+            return None;
+        }
+        let bytes = std::fs::read(path).ok()?;
+        Some(String::from_utf8_lossy(&bytes).into_owned())
     }
 
     /// The works this LaTeX file can cite: from the bibliographies it names,
     /// or failing that every `.bib` beside it.
-    fn references(&self) -> Vec<bib::Reference> {
+    /// Also says how many bibliographies couldn't be read.
+    fn references(&self) -> (Vec<bib::Reference>, usize) {
         let Some(dir) = self.doc.buffer.path().and_then(|p| p.parent()) else {
-            return Vec::new();
+            return (Vec::new(), 0);
         };
         let named = bib::named_files(&self.doc.buffer.to_string(), dir);
         let mut files: Vec<_> = named.into_iter().filter(|p| p.exists()).collect();
@@ -2229,19 +2248,29 @@ impl App {
             files.sort();
         }
         let mut seen = std::collections::HashSet::new();
-        let texts = files.iter().filter_map(|p| self.text_of(p));
-        let refs = texts.flat_map(|t| bib::parse(&t));
-        refs.filter(|r| seen.insert(r.key.clone())).collect()
+        let texts: Vec<String> = files
+            .iter()
+            .filter_map(|p| self.bibliography_text(p))
+            .collect();
+        let left_out = files.len() - texts.len();
+        let refs = texts.iter().flat_map(|t| bib::parse(t));
+        let refs = refs.filter(|r| seen.insert(r.key.clone())).collect();
+        (refs, left_out)
     }
 
     /// Opens the box of works to cite. It stays quiet when typing `\cite{` set
     /// it off, because a person who has no `.bib` file isn't asking for one.
     fn open_citations(&mut self, asked: bool) {
-        let refs = self.references();
+        let (refs, left_out) = self.references();
+        if left_out > 0 {
+            self.set_message(format!(
+                "Left out {left_out} bibliography file{}: not a plain file, or too large",
+                plural(left_out)
+            ));
+        } else if refs.is_empty() && asked {
+            self.set_message("No references: add a .bib file beside this one");
+        }
         if refs.is_empty() {
-            if asked {
-                self.set_message("No references: add a .bib file beside this one");
-            }
             return;
         }
         let rows = refs.iter().map(|r| Entry::Citation {
@@ -2253,7 +2282,7 @@ impl App {
 
     /// Inserts a citation at the cursor, starting the command if need be.
     fn insert_citation(&mut self) {
-        if !self.in_citation() && !self.references().is_empty() {
+        if !self.in_citation() && !self.references().0.is_empty() {
             self.doc.buffer.insert_str("\\cite{", GroupKind::Paste);
         }
         self.open_citations(true);
@@ -2307,17 +2336,37 @@ impl App {
             .collect()
     }
 
-    /// Every misspelling from line `from` on, as `(line, characters)`.
-    fn misspellings_from(&self, from: usize) -> Vec<(usize, std::ops::Range<usize>)> {
+    /// Where the first misspelling in `lines` starts, past `after` if given.
+    fn find_misspelling(
+        &self,
+        lines: std::ops::Range<usize>,
+        after: Option<usize>,
+    ) -> Option<usize> {
         let b = &self.doc.buffer;
-        let not_prose = self.not_prose(from..b.line_count());
-        let mut out = Vec::new();
-        for line in from..b.line_count() {
-            let skip = not_prose.get(line - from).map_or(&[][..], |s| &s[..]);
-            let wrong = self.misspelled(&b.line_text(line), skip);
-            out.extend(wrong.into_iter().map(|r| (line, r)));
+        let batch = if self.doc.prose == Some(Prose::Latex) {
+            SPELL_BATCH
+        } else {
+            lines.len().max(1)
+        };
+        let mut from = lines.start;
+        while from < lines.end {
+            let to = (from + batch).min(lines.end);
+            let not_prose = self.not_prose(from..to);
+            for line in from..to {
+                let skip = not_prose.get(line - from).map_or(&[][..], |s| &s[..]);
+                let start = b.line_start(line);
+                let wrong = self.misspelled(&b.line_text(line), skip);
+                let hit = wrong
+                    .into_iter()
+                    .map(|r| start + r.start)
+                    .find(|&at| after.is_none_or(|a| at > a));
+                if hit.is_some() {
+                    return hit;
+                }
+            }
+            from = to;
         }
-        out
+        None
     }
 
     /// Where `lines` hold something other than prose, per line, in bytes.
@@ -2395,19 +2444,10 @@ impl App {
             return;
         }
         let b = &self.doc.buffer;
-        let (line, at) = (b.cursor_line(), b.cursor());
-        let start_of =
-            |b: &Buffer, (l, r): (usize, std::ops::Range<usize>)| b.line_start(l) + r.start;
-        let after = self.misspellings_from(line);
-        let b = &self.doc.buffer;
-        let next = after
-            .into_iter()
-            .map(|m| start_of(b, m))
-            .find(|&s| s > at)
-            .or_else(|| {
-                let all = self.misspellings_from(0);
-                all.into_iter().map(|m| start_of(b, m)).next()
-            });
+        let (line, at, count) = (b.cursor_line(), b.cursor(), b.line_count());
+        let next = self
+            .find_misspelling(line..count, Some(at))
+            .or_else(|| self.find_misspelling(0..line + 1, None));
         match next {
             Some(to) => self.doc.buffer.move_to(to),
             None => self.set_message("No misspellings"),
