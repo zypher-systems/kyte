@@ -8,6 +8,45 @@ use std::path::Path;
 /// Code larger than this isn't parsed on every key, because that would lag.
 pub const MAX_LIVE_PARSE_BYTES: usize = 512 * 1024;
 
+/// A kind of file meant for reading rather than running.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Prose {
+    Text,
+    Markdown,
+    Latex,
+}
+
+/// What kind of writing a file is. A `.txt` that a language claims isn't, such
+/// as `CMakeLists.txt`, and a style file is LaTeX code rather than a paper.
+pub fn prose(path: &Path, head: &str) -> Option<Prose> {
+    let name = path.file_name()?.to_str()?;
+    if name == "CMakeLists.txt" || shebang_program(head).is_some() {
+        return None;
+    }
+    match path.extension()?.to_str()? {
+        "txt" | "text" | "rst" | "adoc" | "org" => Some(Prose::Text),
+        "md" | "markdown" => Some(Prose::Markdown),
+        "tex" | "ltx" | "latex" => Some(Prose::Latex),
+        _ => None,
+    }
+}
+
+/// Words in plain text: runs without spaces that hold a letter or digit, so a
+/// list dash or a table rule doesn't count.
+pub fn plain_words(text: &str) -> usize {
+    text.split_whitespace()
+        .filter(|w| w.chars().any(char::is_alphanumeric))
+        .count()
+}
+
+/// The words in a file of this kind.
+pub fn word_count(prose: Prose, text: &str) -> usize {
+    match prose {
+        Prose::Latex => latex_words(text),
+        Prose::Text | Prose::Markdown => plain_words(text),
+    }
+}
+
 /// The program a `#!` line runs, without its directory. `env` and its own
 /// flags are looked past. `#![...]` is a Rust attribute, not a `#!` line.
 pub fn shebang_program(head: &str) -> Option<&str> {
@@ -235,6 +274,74 @@ mod code {
         out
     }
 
+    /// The words a reader would count in a LaTeX file: what's in the document
+    /// body, without commands, math, comments, citations or labels.
+    pub fn latex_words(text: &str) -> usize {
+        let Some(tree) = parse(Lang::Latex, text) else {
+            return plain_words(text);
+        };
+        let root = tree.root_node();
+        let body = document_body(root, text).unwrap_or(root);
+        count_text(body, text)
+    }
+
+    fn is_document(node: Node, text: &str) -> bool {
+        node.kind() == "generic_environment"
+            && node
+                .child_by_field_name("begin")
+                .and_then(|b| b.child_by_field_name("name"))
+                .is_some_and(|n| &text[n.byte_range()] == "{document}")
+    }
+
+    fn document_body<'a>(node: Node<'a>, text: &str) -> Option<Node<'a>> {
+        let mut cursor = node.walk();
+        let found = node
+            .named_children(&mut cursor)
+            .find(|n| is_document(*n, text));
+        found
+    }
+
+    fn count_text(node: Node, text: &str) -> usize {
+        match node.kind() {
+            // A citation can sit inside a run of text, so it's stepped around.
+            "text" => {
+                let (mut words, mut from) = (0, node.start_byte());
+                let mut cursor = node.walk();
+                for child in node.named_children(&mut cursor) {
+                    if !matches!(child.kind(), "word" | "operator" | "delimiter") {
+                        words += plain_words(&text[from..child.start_byte()]);
+                        words += count_text(child, text);
+                        from = child.end_byte();
+                    }
+                }
+                words + plain_words(&text[from..node.end_byte()])
+            }
+            "inline_formula"
+            | "displayed_equation"
+            | "math_environment"
+            | "line_comment"
+            | "block_comment"
+            | "comment_environment"
+            | "verbatim_environment"
+            | "listing_environment"
+            | "minted_environment"
+            | "citation"
+            | "label_definition"
+            | "label_reference"
+            | "begin"
+            | "end"
+            | "package_include"
+            | "class_include"
+            | "graphics_include"
+            | "brack_group_key_value" => 0,
+            _ => {
+                let mut cursor = node.walk();
+                let children: Vec<_> = node.named_children(&mut cursor).collect();
+                children.into_iter().map(|c| count_text(c, text)).sum()
+            }
+        }
+    }
+
     /// The next larger piece of syntax around `range`.
     pub fn expand(path: &Path, text: &str, range: Range<usize>) -> Option<Range<usize>> {
         let lang = Lang::detect(path, text)?;
@@ -297,6 +404,10 @@ mod code {
 mod code {
     use super::*;
 
+    pub fn latex_words(text: &str) -> usize {
+        plain_words(text)
+    }
+
     pub fn supported(_: &Path, _: &str) -> bool {
         false
     }
@@ -327,7 +438,8 @@ mod code {
 }
 
 pub use code::{
-    breadcrumb, expand, function_at, has_functions, next_function, prev_function, supported,
+    breadcrumb, expand, function_at, has_functions, latex_words, next_function, prev_function,
+    supported,
 };
 
 #[cfg(all(test, feature = "highlight"))]
@@ -446,6 +558,29 @@ mod tests {
             assert!(!has_functions(Path::new(file), ""), "{file}");
             assert!(supported(Path::new(file), ""), "{file}");
         }
+    }
+
+    #[test]
+    fn latex_counts_what_a_reader_reads() {
+        let paper = concat!(
+            "\\documentclass{article}\n\\usepackage{amsmath}\n\\title{Not Counted}\n",
+            "\\begin{document}\n\\section{Two Words}\n",
+            "% a comment here\n",
+            "One \\textbf{two} three \\cite{knuth} four.\n",
+            "A sum $x + y = z$ five.\n",
+            "\\begin{equation}\n\\label{eq:a} a + b\n\\end{equation}\n",
+            "\\end{document}\n",
+            "After the end.\n",
+        );
+        assert_eq!(word_count(Prose::Latex, paper), 2 + 4 + 3);
+    }
+
+    #[test]
+    fn a_latex_fragment_with_no_document_counts_all_of_it() {
+        assert_eq!(
+            word_count(Prose::Latex, "Just some \\emph{text} here.\n"),
+            4
+        );
     }
 
     #[test]
@@ -613,6 +748,27 @@ mod tests {
 #[cfg(test)]
 mod prefix_tests {
     use super::*;
+
+    #[test]
+    fn writing_is_told_from_code() {
+        let kind = |name| prose(Path::new(name), "");
+        assert_eq!(kind("notes.txt"), Some(Prose::Text));
+        assert_eq!(kind("README.md"), Some(Prose::Markdown));
+        assert_eq!(kind("paper.tex"), Some(Prose::Latex));
+        assert_eq!(kind("CMakeLists.txt"), None);
+        assert_eq!(kind("style.sty"), None);
+        assert_eq!(kind("a.rs"), None);
+        assert_eq!(kind("Makefile"), None);
+        assert_eq!(prose(Path::new("run.txt"), "#!/bin/sh\n"), None);
+    }
+
+    #[test]
+    fn plain_words_leave_out_marks_with_no_letters() {
+        assert_eq!(plain_words(""), 0);
+        assert_eq!(plain_words("  one two\n\nthree  "), 3);
+        assert_eq!(plain_words("# Title\n- item, here\n--- | ---\n"), 3);
+        assert_eq!(plain_words("don't state-of-the-art 3.5"), 3);
+    }
 
     #[test]
     fn comment_prefixes_by_extension() {

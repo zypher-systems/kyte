@@ -29,6 +29,8 @@ pub struct Options {
     pub indent_width: usize,
     pub line_numbers: bool,
     pub soft_wrap: bool,
+    /// Markdown, text and LaTeX get the writing setup.
+    pub writing: bool,
     pub theme: ThemeName,
     pub history_limit_mb: u64,
     /// What was wrong with the settings file, for the first screen.
@@ -50,6 +52,7 @@ impl Default for Options {
             indent_width: 4,
             line_numbers: true,
             soft_wrap: false,
+            writing: true,
             theme: ThemeName::Signal,
             history_limit_mb: 100,
             config_warning: None,

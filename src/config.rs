@@ -29,6 +29,10 @@ pub const TEMPLATE: &str = r#"# Kyte settings. Remove the # from a line to use i
 # Wrap long lines at the edge of the screen.
 # soft_wrap = false
 
+# Show Markdown, text and LaTeX files for writing: wrapped, with a word count
+# and, except in LaTeX, no line numbers.
+# writing = true
+
 # Colors: "signal", "harbor", "dusk", "ember", "moss" or "daybreak".
 # theme = "signal"
 
@@ -92,6 +96,7 @@ fn apply(opts: &mut Options, key: &str, value: &str) -> Option<Result<(), ()>> {
         }
         "line_numbers" => opts.line_numbers = boolean(value)?,
         "soft_wrap" => opts.soft_wrap = boolean(value)?,
+        "writing" => opts.writing = boolean(value)?,
         "theme" => opts.theme = ThemeName::parse(value)?,
         "esc_ms" => opts.esc_ms = number(value, 10_000)?,
         "history" => opts.no_history = !boolean(value)?,

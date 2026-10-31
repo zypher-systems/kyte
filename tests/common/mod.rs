@@ -109,7 +109,10 @@ impl Spawn {
             program: program.into(),
             args: Vec::new(),
             // Tests must never read the settings of whoever runs them.
-            env: vec![("KYTE_CONFIG".to_string(), "/dev/null".to_string())],
+            env: vec![(
+                "KYTE_CONFIG".to_string(),
+                concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/settings.toml").to_string(),
+            )],
             cwd: None,
             rows: ROWS,
             cols: COLS,

@@ -81,7 +81,7 @@ fn screen_rows(app: &App, height: usize, width: usize) -> Vec<ScreenRow> {
     let buf = app.view_buffer();
     let (top, _) = app.scroll();
     let count = buf.line_count();
-    if !app.soft_wrap {
+    if !app.doc.soft_wrap {
         let rows = top..(top + height).min(count);
         return rows
             .map(|line| ScreenRow {
@@ -119,7 +119,7 @@ fn screen_rows(app: &App, height: usize, width: usize) -> Vec<ScreenRow> {
 pub fn render(app: &App, area: Rect, cells: &mut Cells, theme: &Theme) -> Option<(u16, u16)> {
     let buf = app.view_buffer();
     let (_, left) = app.scroll();
-    let gw = gutter_width(buf.line_count(), app.show_line_numbers);
+    let gw = gutter_width(buf.line_count(), app.doc.line_numbers);
     let text_w = (area.width as usize).saturating_sub(gw);
     cells.set_style(area, theme.text);
     let rows = screen_rows(app, area.height as usize, text_w);
@@ -195,7 +195,7 @@ pub fn render(app: &App, area: Rect, cells: &mut Cells, theme: &Theme) -> Option
         }
         if line == buf.cursor_line() {
             let off = buf.cursor() - buf.line_start(line);
-            let here = if app.soft_wrap {
+            let here = if app.doc.soft_wrap {
                 off >= row.segment.chars.start && (off < row.segment.chars.end || row.last)
             } else {
                 true

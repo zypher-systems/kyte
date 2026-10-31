@@ -103,7 +103,10 @@ mod tests {
         App::new(
             Buffer::from_str(text, Some("/tmp/demo.txt".into())),
             None,
-            &Options::default(),
+            &Options {
+                writing: false,
+                ..Options::default()
+            },
         )
     }
 

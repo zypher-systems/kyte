@@ -18,7 +18,7 @@ use crate::review::{self, Change as ReviewChange};
 use crate::search;
 use crate::session::{self, Opened};
 use crate::swap::{self, RecoverInfo, SwapStatus, SwapWriter};
-use crate::syntax;
+use crate::syntax::{self, Prose};
 use crate::tree::FileTree;
 use crate::ui::theme::ThemeName;
 
@@ -188,6 +188,14 @@ enum EscTail {
     Ss3,
 }
 
+/// The settings that decide how a file shows.
+#[derive(Debug, Clone, Copy)]
+struct View {
+    line_numbers: bool,
+    soft_wrap: bool,
+    writing: bool,
+}
+
 /// One open file and everything tied to it.
 pub struct Doc {
     pub buffer: Buffer,
@@ -195,6 +203,11 @@ pub struct Doc {
     pub keep_swap: bool,
     /// While quitting, the answer was to discard this file's changes.
     discard: bool,
+    /// What kind of writing this is, if it isn't code.
+    pub prose: Option<Prose>,
+    pub line_numbers: bool,
+    /// Long lines wrap at the edge of the screen.
+    pub soft_wrap: bool,
     swap: Option<SwapWriter>,
     /// Canonical path the swap is keyed by.
     swap_target: Option<std::path::PathBuf>,
@@ -226,6 +239,9 @@ impl Doc {
             buffer,
             keep_swap: false,
             discard: false,
+            prose: None,
+            line_numbers: true,
+            soft_wrap: false,
             swap,
             swap_target,
             disk,
@@ -239,6 +255,25 @@ impl Doc {
             scroll_left: 0,
             scroll_row: 0,
         }
+    }
+
+    /// Sets how this file shows, from its kind and the settings.
+    fn with_view(mut self, view: View) -> Doc {
+        self.set_view(view);
+        self
+    }
+
+    fn set_view(&mut self, view: View) {
+        let head = self.buffer.head();
+        self.prose = self
+            .buffer
+            .path()
+            .and_then(|p| syntax::prose(p, &head))
+            .filter(|_| view.writing);
+        self.soft_wrap = view.soft_wrap || self.prose.is_some();
+        // LaTeX reports errors by line, so it keeps its numbers.
+        self.line_numbers =
+            view.line_numbers && !matches!(self.prose, Some(Prose::Text | Prose::Markdown));
     }
 
     fn name(&self) -> String {
@@ -333,7 +368,6 @@ pub struct App {
     pub message: Option<String>,
     /// The message is an error (drawn in the error style).
     pub message_is_error: bool,
-    pub show_line_numbers: bool,
     pub esc_window: Duration,
     pub quit: bool,
     /// Characters still to discard from a split key sequence.
@@ -360,12 +394,15 @@ pub struct App {
     /// Reader mode's state, while it's open.
     pub reader: Option<Reader>,
     last_fsync: Option<Instant>,
-    /// Long lines wrap at the edge of the screen.
-    pub soft_wrap: bool,
+    /// The settings a file starts with.
+    default_view: View,
     /// The column Up and Down hold to while moving by wrapped rows.
     visual_col: Option<usize>,
     view: (u16, u16),
 }
+
+/// Counting words reads the whole file on every key, so past this it stops.
+const MAX_COUNTED_BYTES: usize = 2 * 1024 * 1024;
 
 /// Shown on the message line only while the overlay is open (section 5.4).
 /// The Esc layer's core keys, shown on top of whatever the context adds.
@@ -389,8 +426,13 @@ const PALETTE_KEY: (&str, &str) = ("Esc Esc", "palette");
 impl App {
     pub fn new(mut buffer: Buffer, swap: Option<SwapWriter>, opts: &Options) -> App {
         buffer.default_indent_to(opts.default_indent);
+        let default_view = View {
+            line_numbers: opts.line_numbers,
+            soft_wrap: opts.soft_wrap,
+            writing: opts.writing,
+        };
         App {
-            doc: Doc::new(buffer, swap),
+            doc: Doc::new(buffer, swap).with_view(default_view),
             parked: Vec::new(),
             at: 0,
             queued: Default::default(),
@@ -411,10 +453,9 @@ impl App {
             mode: Mode::Insert,
             message: None,
             message_is_error: false,
-            show_line_numbers: opts.line_numbers,
             esc_window: Duration::from_millis(opts.esc_ms),
             quit: false,
-            soft_wrap: opts.soft_wrap,
+            default_view,
             visual_col: None,
             view: (0, 0),
         }
@@ -467,7 +508,7 @@ impl App {
     /// Columns of text beside the gutter.
     fn text_width(&self) -> usize {
         let buf = self.view_buffer();
-        let gw = crate::ui::text_view::gutter_width(buf.line_count(), self.show_line_numbers);
+        let gw = crate::ui::text_view::gutter_width(buf.line_count(), self.doc.line_numbers);
         (self.view.0 as usize).saturating_sub(gw).max(1)
     }
 
@@ -564,13 +605,13 @@ impl App {
     pub fn layout(&mut self, width: u16, height: u16) {
         self.view = (width, height);
         let h = (height as usize).saturating_sub(2).max(1);
-        if self.soft_wrap {
+        if self.doc.soft_wrap {
             let w = self.text_width();
             self.layout_wrapped(h, w);
             return;
         }
         let buf = self.view_buffer();
-        let gw = crate::ui::text_view::gutter_width(buf.line_count(), self.show_line_numbers);
+        let gw = crate::ui::text_view::gutter_width(buf.line_count(), self.doc.line_numbers);
         let w = (width as usize).saturating_sub(gw).max(1);
         let line = buf.cursor_line();
         let lines = buf.line_count();
@@ -900,7 +941,7 @@ impl App {
         match m {
             Motion::Left => b.move_left(),
             Motion::Right => b.move_right(),
-            Motion::Up | Motion::Down | Motion::PageUp | Motion::PageDown if self.soft_wrap => {
+            Motion::Up | Motion::Down | Motion::PageUp | Motion::PageDown if self.doc.soft_wrap => {
                 let steps = if matches!(m, Motion::Up | Motion::Down) {
                     1
                 } else {
@@ -1536,10 +1577,10 @@ impl App {
                     text: String::new(),
                 })
             }
-            Command::ToggleLineNumbers => self.show_line_numbers = !self.show_line_numbers,
+            Command::ToggleLineNumbers => self.doc.line_numbers = !self.doc.line_numbers,
             Command::ToggleIndent => self.toggle_indent(),
             Command::ToggleWrap => {
-                self.soft_wrap = !self.soft_wrap;
+                self.doc.soft_wrap = !self.doc.soft_wrap;
                 self.doc.scroll_row = 0;
                 self.doc.scroll_left = 0;
             }
@@ -1866,7 +1907,8 @@ impl App {
         };
         self.flush_edits();
         buffer.default_indent_to(self.default_indent);
-        let mut old = std::mem::replace(&mut self.doc, Doc::new(buffer, swap));
+        let doc = Doc::new(buffer, swap).with_view(self.default_view);
+        let mut old = std::mem::replace(&mut self.doc, doc);
         if old.is_blank() {
             old.close();
         } else {
@@ -1882,6 +1924,22 @@ impl App {
             let name = path.file_name().unwrap_or_default().to_string_lossy();
             self.set_message(format!("Opened {name}"));
         }
+    }
+
+    /// The words in the file on screen, for writing small enough to count on
+    /// every key.
+    pub fn word_count(&self) -> Option<usize> {
+        let buf = self.view_buffer();
+        let prose = self.doc.prose?;
+        (buf.rope().len_bytes() <= MAX_COUNTED_BYTES)
+            .then(|| syntax::word_count(prose, &buf.to_string()))
+    }
+
+    /// The words in the selection, in writing.
+    pub fn selected_words(&self) -> Option<usize> {
+        self.doc.prose?;
+        let r = self.doc.buffer.selection()?;
+        Some(syntax::plain_words(&self.doc.buffer.slice_string(r)))
     }
 
     /// How many files are open.
@@ -2522,6 +2580,7 @@ impl App {
                 if self.doc.buffer.path() != Some(path) {
                     self.doc.buffer.set_path(path.to_path_buf());
                     self.doc.swap_target = fileio::resolve_target(path).ok();
+                    self.doc.set_view(self.default_view);
                 }
                 self.doc.buffer.mark_clean();
                 self.note_save(path, overwritten);
@@ -3200,7 +3259,7 @@ mod tests {
         a.handle_key(Key::Ctrl('k'), t).unwrap();
         typ(&mut a, "toggle line");
         a.handle_key(Key::Enter, t).unwrap();
-        assert!(!a.show_line_numbers);
+        assert!(!a.doc.line_numbers);
         a.handle_key(Key::Ctrl('k'), t).unwrap();
         a.handle_key(Key::Esc, t).unwrap();
         assert_eq!(a.mode, Mode::Insert);
@@ -3237,9 +3296,9 @@ mod tests {
         let t = Instant::now();
         let mut a = app("x");
         a.run_command(Command::ToggleLineNumbers);
-        assert!(!a.show_line_numbers);
+        assert!(!a.doc.line_numbers);
         a.run_command(Command::ToggleLineNumbers);
-        assert!(a.show_line_numbers);
+        assert!(a.doc.line_numbers);
         a.run_command(Command::ShowKeyHelp);
         assert_eq!(a.mode, Mode::Help { top: 0 });
         a.handle_key(Key::Char('z'), t).unwrap();
@@ -3312,7 +3371,10 @@ mod tests {
         App::new(
             Buffer::from_str(text, Some(path.into())),
             None,
-            &Options::default(),
+            &Options {
+                writing: false,
+                ..Options::default()
+            },
         )
     }
 
@@ -3661,9 +3723,9 @@ mod tests {
     fn toggling_wrap_resets_the_view() {
         let mut a = wrapped(&"a".repeat(200));
         a.run_command(Command::ToggleWrap);
-        assert!(!a.soft_wrap);
+        assert!(!a.doc.soft_wrap);
         a.run_command(Command::ToggleWrap);
-        assert!(a.soft_wrap);
+        assert!(a.doc.soft_wrap);
         assert_eq!(a.scroll_row(), 0);
     }
 

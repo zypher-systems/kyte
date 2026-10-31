@@ -40,8 +40,10 @@ pub fn status_bar(app: &App, area: Rect, cells: &mut Cells, theme: &Theme) {
     let place = format!("Ln {l}, Col {c}");
     // In order of importance, because a narrow bar cuts from the end.
     let mut facts = vec![place.clone()];
-    if let Some(r) = app.doc.buffer.selection() {
-        facts.push(format!("{} selected", r.len()));
+    match (app.doc.buffer.selection(), app.selected_words()) {
+        (Some(_), Some(n)) => facts.push(format!("{} selected", plural(n, "word"))),
+        (Some(r), None) => facts.push(format!("{} selected", r.len())),
+        (None, _) => facts.extend(app.word_count().map(|n| plural(n, "word"))),
     }
     if let Indent::Spaces(n) = app.doc.buffer.indent() {
         facts.push(format!("Spaces {n}"));
@@ -117,9 +119,17 @@ pub fn status_bar(app: &App, area: Rect, cells: &mut Cells, theme: &Theme) {
     }
 }
 
-/// `3 things`, or `1 thing`.
+/// `1,234 things`, or `1 thing`.
 fn plural(n: usize, what: &str) -> String {
-    format!("{n} {what}{}", if n == 1 { "" } else { "s" })
+    let digits = n.to_string();
+    let mut number = String::new();
+    for (i, d) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            number.push(',');
+        }
+        number.push(d);
+    }
+    format!("{number} {what}{}", if n == 1 { "" } else { "s" })
 }
 
 /// Message line. Returns the cursor position when a prompt owns the cursor.

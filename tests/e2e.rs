@@ -2099,7 +2099,7 @@ fn resizing_rewraps() {
 /// Kyte on `file` with a settings file holding `settings`.
 fn open_with_settings(env: &Env, file: &Path, settings: &str, extra: &[&str]) -> Pty {
     let config = env.path("config.toml");
-    fs::write(&config, settings).unwrap();
+    fs::write(&config, format!("{settings}writing = false\n")).unwrap();
     let mut spawn = Spawn::new(bin())
         .env("KYTE_STATE_DIR", env.state.to_string_lossy())
         .env("KYTE_CONFIG", config.to_string_lossy())
@@ -3928,4 +3928,109 @@ fn a_file_the_tree_cant_open_is_reported_and_nothing_changes() {
     assert!(!status(&p).contains("file 1"), "{}", status(&p));
     assert_eq!(swap_files(&env).len(), 1);
     quit_clean(&mut p);
+}
+
+// ---------------------------------------------------------------- writing
+
+/// Starts Kyte on `file` with the settings a person would have.
+fn open_writing(env: &Env, file: &Path, settings: &str) -> Pty {
+    let config = env.path("writing.toml");
+    fs::write(&config, settings).unwrap();
+    let p = Pty::spawn(
+        Spawn::new(bin())
+            .env("KYTE_STATE_DIR", env.state.to_string_lossy())
+            .env("KYTE_CONFIG", config.to_string_lossy())
+            .arg("--no-kitty")
+            .arg(file.to_str().unwrap()),
+    );
+    p.wait_for("Ln 1, Col 1", TIMEOUT);
+    p
+}
+
+#[test]
+fn text_and_markdown_open_for_writing() {
+    let env = Env::new();
+    let long = "word ".repeat(40);
+    let f = env.write("notes.md", &format!("# Title\n{long}\n"));
+    let mut p = open_writing(&env, &f, "");
+    p.wait_for("# Title", TIMEOUT);
+    assert!(
+        !p.screen().contains("1 │ #"),
+        "no line numbers\n{}",
+        p.dump()
+    );
+    wait_status(&p, "41 words");
+    assert!(
+        p.screen().lines().nth(2).unwrap().contains("word"),
+        "wrapped"
+    );
+    quit_clean(&mut p);
+}
+
+#[cfg(feature = "highlight")]
+#[test]
+fn latex_keeps_its_line_numbers_and_counts_only_what_a_reader_reads() {
+    let env = Env::new();
+    let text =
+        "\\documentclass{article}\n\\begin{document}\nOne two \\cite{a} three.\n\\end{document}\n";
+    let f = env.write("paper.tex", text);
+    let mut p = open_writing(&env, &f, "");
+    p.wait_for("1 │", TIMEOUT);
+    wait_status(&p, "3 words");
+    quit_clean(&mut p);
+}
+
+#[test]
+fn code_shows_as_code_and_each_file_keeps_its_own_view() {
+    let env = Env::new();
+    let md = env.write("a.md", "one two\n");
+    let rs = env.write("b.rs", "fn main() {}\n");
+    let mut p = open_writing(&env, &md, "");
+    p.wait_for("one two", TIMEOUT);
+    wait_status(&p, "2 words");
+    open_from_prompt(&mut p, rs.to_str().unwrap());
+    p.wait_for("1 │ fn main", TIMEOUT);
+    assert!(!status(&p).contains("words"), "{}", status(&p));
+    esc_then(&mut p, ",");
+    p.wait_gone("1 │ fn", TIMEOUT);
+    assert!(!p.screen().contains("1 │ one"), "{}", p.dump());
+    wait_status(&p, "2 words");
+    quit_clean(&mut p);
+}
+
+#[test]
+fn the_writing_setting_turns_it_off() {
+    let env = Env::new();
+    let f = env.write("notes.md", "one two\n");
+    let mut p = open_writing(&env, &f, "writing = false\n");
+    p.wait_for("1 │ one two", TIMEOUT);
+    assert!(!status(&p).contains("words"), "{}", status(&p));
+    quit_clean(&mut p);
+}
+
+#[test]
+fn saving_under_a_writing_name_changes_the_view() {
+    let env = Env::new();
+    let a = work_file(&env, "a.rs", "one two\n");
+    let md = a.parent().unwrap().join("b.md");
+    let mut p = open_writing(&env, &a, "");
+    p.wait_for("1 │ one two", TIMEOUT);
+    save_as(&mut p, md.to_str().unwrap());
+    wait_status(&p, "2 words");
+    p.wait_gone("1 │ one", TIMEOUT);
+    quit_clean(&mut p);
+}
+
+#[test]
+fn selecting_text_counts_its_words() {
+    let env = Env::new();
+    let f = env.write("notes.md", "one two three\n");
+    let mut p = open_writing(&env, &f, "");
+    p.wait_for("one two", TIMEOUT);
+    for _ in 0..7 {
+        p.send(b"\x1b[1;2C");
+    }
+    wait_status(&p, "2 words selected");
+    p.send_keys(&["C-q"]);
+    assert_eq!(p.wait_exit(TIMEOUT), 0);
 }
