@@ -72,7 +72,7 @@ Kyte's pitch is an editor you can't lose work in and don't have to learn.
 - [x] Signal theme, centred boxes, and a redrawn status bar and cursor line
 - [x] Six themes, a `theme` setting and a theme picker
 - [x] Several files open at once
-- [ ] A file tree
+- [x] A file tree
 - [ ] Highlighting for more languages
 - [ ] A Writing setup for Markdown and text files: word count and spell check
 - [ ] Multiple cursors and mouse support

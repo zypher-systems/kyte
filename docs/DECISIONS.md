@@ -30,6 +30,15 @@ These replace the matching parts of `ARCHITECTURE`. `docs/ROADMAP.md` holds the 
   - Keeping your side of a review left a buffer that differed from disk marked clean, so closing it asked nothing. It's now marked unsaved.
   - With no edits, that buffer was also missing from the swap, which keeps no copy of its base until the first edit. Fuzzing the fix found this. `keep_base` now writes the copy and an empty edit, so a crash offers the text, and recovery says the file moved on.
 
+## File tree
+
+- The tree is a box in the middle of the screen, not a sidebar. It's something you pick from, so it follows the rule for menus, and it leaves the text its full width.
+- A folder is read when it's unfolded, so a huge project costs nothing to open. Rows stop at 5,000, so unfolding everything can't stall the editor.
+- `target` and `node_modules` are listed, unlike in Ctrl-K. Search skips them because they'd bury results. In the tree they're folded and out of the way, and you may have gone looking for them.
+- Symlinked folders can be unfolded. A loop only goes as deep as someone keeps unfolding it.
+- A name that isn't UTF-8 is listed but refused. Swap names come from the path as text, so two such files could share a swap.
+- The letter keys jump, and don't filter. Ctrl-K already searches every file by name.
+
 ## Soft wrap
 
 - `wrap.rs` is the only code that decides where rows break. Nothing is stored: rows are worked out from the text and the width each time, so edits and resizes can't leave them stale.

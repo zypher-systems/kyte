@@ -535,6 +535,65 @@ pub fn help(app: &App, text_area: Rect, cells: &mut Cells, theme: &Theme) -> Opt
     Some(area)
 }
 
+/// The file tree's box, in the middle of the screen like every other list.
+pub fn file_tree(app: &App, text_area: Rect, cells: &mut Cells, theme: &Theme) -> Option<Rect> {
+    let Mode::Tree(tree) = &app.mode else {
+        return None;
+    };
+    let w = 64.min(text_area.width.saturating_sub(2)).max(10);
+    let most = text_area.height.saturating_sub(6).clamp(1, 18) as usize;
+    let rows = tree.rows.len().clamp(1, most);
+    let hint = (text_area.height as usize >= rows + 4) as u16;
+    let h = (rows as u16 + 2 + hint).min(text_area.height);
+    let area = centered(text_area, w, h);
+    let folder = tree.root.file_name().unwrap_or_default().to_string_lossy();
+    let title = if tree.show_hidden {
+        format!("{folder}, hidden files shown")
+    } else {
+        folder.into_owned()
+    };
+    let inner = modal_box(area, text_area, cells, &title, theme);
+    let iw = inner.width as usize;
+    if tree.rows.is_empty() {
+        cells.set_stringn(inner.x, inner.y, "  Nothing here", iw, theme.popup_hint);
+    }
+    let off = tree.scroll_offset(rows);
+    for (i, row) in tree.rows.iter().enumerate().skip(off).take(rows) {
+        let y = inner.y + (i - off) as u16;
+        if y >= inner.y + inner.height {
+            break;
+        }
+        let sel = i == tree.selected;
+        let style = if sel { theme.selected } else { theme.palette };
+        let marker = if sel { "▸ " } else { "  " };
+        let fold = match (row.is_dir, row.open) {
+            (true, true) => "▾ ",
+            (true, false) => "▹ ",
+            _ => "  ",
+        };
+        let slash = if row.is_dir { "/" } else { "" };
+        let indent = "  ".repeat(row.depth);
+        let note = app.open_note(&row.path);
+        let left = 2 + indent.len() + 2 + note.len() + 1;
+        let name = fit_label(&format!("{}{slash}", row.name), iw.saturating_sub(left));
+        let label = format!("{marker}{indent}{fold}{name}");
+        let pad = iw.saturating_sub(label.chars().count() + note.len() + 1);
+        let line = format!("{label}{}{note} ", " ".repeat(pad));
+        cells.set_style(Rect::new(inner.x, y, inner.width, 1), style);
+        cells.set_stringn(inner.x, y, line, iw, style);
+        if !sel && !note.is_empty() {
+            let at = (inner.x + inner.width).saturating_sub(note.len() as u16 + 1);
+            cells.set_stringn(at.max(inner.x), y, note, iw, theme.popup_hint);
+        }
+    }
+    if hint == 1 {
+        let text = "  Enter open  Left Right fold  . hidden  Esc close";
+        let y = inner.y + inner.height - 1;
+        cells.set_stringn(inner.x, y, text, iw, theme.popup_hint);
+    }
+    Some(area)
+}
+
 /// The Recover (or Stale) modal shown at startup.
 pub fn recover(app: &App, text_area: Rect, cells: &mut Cells, theme: &Theme) {
     let Mode::Recover(info) = &app.mode else {

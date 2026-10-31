@@ -21,6 +21,7 @@ pub enum Command {
     ToggleIndent,
     ToggleWrap,
     ChooseTheme,
+    FileTree,
     OpenFiles,
     NextFile,
     PreviousFile,
@@ -52,6 +53,7 @@ pub const REGISTRY: &[Command] = &[
     Command::ToggleIndent,
     Command::ToggleWrap,
     Command::ChooseTheme,
+    Command::FileTree,
     Command::OpenFiles,
     Command::NextFile,
     Command::PreviousFile,
@@ -84,6 +86,7 @@ impl Command {
             Command::ToggleIndent => "Toggle tabs and spaces",
             Command::ToggleWrap => "Toggle soft wrap",
             Command::ChooseTheme => "Choose theme",
+            Command::FileTree => "File tree",
             Command::OpenFiles => "Open files",
             Command::NextFile => "Next file",
             Command::PreviousFile => "Previous file",
@@ -117,6 +120,7 @@ impl Command {
             Command::ToggleIndent => "",
             Command::ToggleWrap => "",
             Command::ChooseTheme => "",
+            Command::FileTree => "Ctrl-T",
             Command::OpenFiles => "Esc b",
             Command::NextFile => "Esc .",
             Command::PreviousFile => "Esc ,",
@@ -157,12 +161,13 @@ pub const KEY_HELP: &[(&str, &str)] = &[
     ("Ctrl-Z, Ctrl-Y", "undo, redo"),
     ("Ctrl-F, Ctrl-R", "search, replace"),
     ("Ctrl-K", "commands, files, :line, /text"),
+    ("Ctrl-T", "file tree"),
     ("Ctrl-P", "command palette"),
     ("Esc, Ctrl-Space, Alt-key", "operator layer:"),
     ("  w  d  k", "del word, del line, del to end"),
     ("  %  /", "matching bracket, search"),
     ("  u  r  s", "undo, redo, save"),
-    ("  h  v", "file history, reader mode"),
+    ("  h  v  t", "file history, reader mode, file tree"),
     ("  b  .  ,", "open files, next, previous"),
     ("  (more by context)", "the menu shows what fits"),
     ("  Esc (quickly)", "command palette"),
@@ -184,7 +189,7 @@ mod tests {
 
     #[test]
     fn every_command_has_a_label() {
-        assert_eq!(REGISTRY.len(), 27);
+        assert_eq!(REGISTRY.len(), 28);
         let labels: Vec<&str> = REGISTRY.iter().map(|c| c.label()).collect();
         assert_eq!(
             labels,
@@ -207,6 +212,7 @@ mod tests {
                 "Toggle tabs and spaces",
                 "Toggle soft wrap",
                 "Choose theme",
+                "File tree",
                 "Open files",
                 "Next file",
                 "Previous file",

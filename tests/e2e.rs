@@ -1083,7 +1083,7 @@ fn ac16_empty_query_does_nothing() {
 
 // ---------------------------------------------------------------- AC-17
 
-const COMMANDS: [&str; 27] = [
+const COMMANDS: [&str; 28] = [
     "Save",
     "Save as",
     "Open file",
@@ -1102,6 +1102,7 @@ const COMMANDS: [&str; 27] = [
     "Toggle tabs and spaces",
     "Toggle soft wrap",
     "Choose theme",
+    "File tree",
     "Open files",
     "Next file",
     "Previous file",
@@ -1146,7 +1147,7 @@ fn ac17_palette_lists_every_command() {
         .collect();
     assert!(first_result(&p).contains("▸ Save"), "{}", p.dump());
     // 8 rows are visible at once; scrolling down reveals the rest
-    for _ in 0..26 {
+    for _ in 0..27 {
         p.send_keys(&["Down"]);
         std::thread::sleep(Duration::from_millis(5));
         for c in COMMANDS {
@@ -3806,4 +3807,125 @@ fn a_crash_right_after_keeping_your_side_of_a_review_loses_nothing() {
     p.wait_for("Unsaved changes", TIMEOUT);
     p.send_str("n");
     assert_eq!(p.wait_exit(TIMEOUT), 0);
+}
+
+// ---------------------------------------------------------------- file tree
+
+/// A small project, and Kyte open on its README from inside it.
+fn in_project(env: &Env) -> (PathBuf, Pty) {
+    let project = env.path("proj");
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/lib.rs"), "fn lib() {}\n").unwrap();
+    fs::write(project.join("src/main.rs"), "fn main() {}\n").unwrap();
+    fs::write(project.join("README.md"), "# readme\n").unwrap();
+    let readme = project.join("README.md");
+    let p = open_in(env, &project, &readme);
+    p.wait_for("1 │ # readme", TIMEOUT);
+    (project, p)
+}
+
+fn selected(p: &Pty, name: &str) {
+    let name = name.to_string();
+    let what = format!("{name} to be selected");
+    p.wait_until(&what, TIMEOUT, move |s| {
+        s.lines().any(|l| l.contains("▸ ") && l.contains(&name))
+    });
+}
+
+#[test]
+fn the_tree_opens_on_the_current_file_and_a_file_from_it_stays_open_alongside() {
+    let env = Env::new();
+    let (_project, mut p) = in_project(&env);
+    p.send_keys(&["C-t"]);
+    p.wait_for("proj", TIMEOUT);
+    selected(&p, "README.md");
+    wait_status(&p, "FILES");
+    p.send_str("s");
+    selected(&p, "src/");
+    p.send_keys(&["Right"]);
+    p.wait_for("lib.rs", TIMEOUT);
+    p.send_keys(&["Down"]);
+    selected(&p, "lib.rs");
+    p.send_keys(&["Enter"]);
+    p.wait_for("1 │ fn lib() {}", TIMEOUT);
+    wait_status(&p, "lib.rs │ file 2 of 2");
+    open_overlay(&mut p);
+    p.send_str("t");
+    selected(&p, "lib.rs");
+    p.wait_for("open", TIMEOUT);
+    p.send_keys(&["Esc"]);
+    wait_insert(&p);
+    wait_status(&p, "lib.rs │ file 2 of 2");
+    quit_clean(&mut p);
+}
+
+#[test]
+fn choosing_an_open_file_in_the_tree_moves_to_it() {
+    let env = Env::new();
+    let (_project, mut p) = in_project(&env);
+    type_text(&mut p, "edit ");
+    p.send_keys(&["C-t"]);
+    selected(&p, "README.md");
+    p.wait_for("unsaved", TIMEOUT);
+    p.send_str("s");
+    selected(&p, "src/");
+    p.send_keys(&["Enter"]);
+    p.wait_for("main.rs", TIMEOUT);
+    p.send_keys(&["Down", "Down"]);
+    selected(&p, "main.rs");
+    p.send_keys(&["Enter"]);
+    p.wait_for("1 │ fn main() {}", TIMEOUT);
+    p.send_keys(&["C-t"]);
+    selected(&p, "main.rs");
+    p.send_str("r");
+    selected(&p, "README.md");
+    p.send_keys(&["Enter"]);
+    p.wait_for("1 │ edit # readme", TIMEOUT);
+    wait_status(&p, "README.md [+] │ file 1 of 2");
+    assert_eq!(swap_files(&env).len(), 2);
+    p.send_keys(&["C-q"]);
+    p.wait_for("Unsaved changes in README.md", TIMEOUT);
+    p.send_str("n");
+    assert_eq!(p.wait_exit(TIMEOUT), 0);
+}
+
+#[test]
+fn the_tree_shows_hidden_files_on_request_and_folds_with_left() {
+    let env = Env::new();
+    let (project, mut p) = in_project(&env);
+    fs::write(project.join(".env"), "A=1\n").unwrap();
+    p.send_keys(&["C-t"]);
+    selected(&p, "README.md");
+    assert!(!p.screen().contains(".env"), "{}", p.dump());
+    p.send_str(".");
+    p.wait_for("hidden files shown", TIMEOUT);
+    p.wait_for(".env", TIMEOUT);
+    p.send_str(".");
+    p.wait_gone(".env", TIMEOUT);
+    p.send_str("s");
+    selected(&p, "src/");
+    p.send_keys(&["Right"]);
+    p.wait_for("lib.rs", TIMEOUT);
+    p.send_keys(&["Left"]);
+    p.wait_gone("lib.rs", TIMEOUT);
+    p.send_keys(&["Esc"]);
+    wait_insert(&p);
+    quit_clean(&mut p);
+}
+
+#[test]
+fn a_file_the_tree_cant_open_is_reported_and_nothing_changes() {
+    let env = Env::new();
+    let (project, mut p) = in_project(&env);
+    fs::write(project.join("bin.dat"), [0xff, 0xfe]).unwrap();
+    p.send_keys(&["C-t"]);
+    selected(&p, "README.md");
+    p.send_str("b");
+    selected(&p, "bin.dat");
+    p.send_keys(&["Enter"]);
+    p.wait_for("not valid UTF-8", TIMEOUT);
+    wait_insert(&p);
+    assert!(!status(&p).contains("file 1"), "{}", status(&p));
+    assert_eq!(swap_files(&env).len(), 1);
+    quit_clean(&mut p);
 }

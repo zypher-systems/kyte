@@ -19,6 +19,7 @@ use crate::search;
 use crate::session::{self, Opened};
 use crate::swap::{self, RecoverInfo, SwapStatus, SwapWriter};
 use crate::syntax;
+use crate::tree::FileTree;
 use crate::ui::theme::ThemeName;
 
 /// How soon after Esc a `[` or `O` counts as the rest of a split key sequence.
@@ -54,6 +55,8 @@ pub enum Mode {
         timeline: SharedTimeline,
         at: usize,
     },
+    /// The file tree.
+    Tree(FileTree),
     /// The "Show key help" modal, scrolled to row `top`; Esc closes it.
     Help {
         top: usize,
@@ -377,6 +380,7 @@ pub const LEGEND: &[(&str, &str)] = &[
     ("s", "save"),
     ("h", "history"),
     ("v", "reader mode"),
+    ("t", "file tree"),
 ];
 
 /// The double-tap key, listed last.
@@ -702,6 +706,7 @@ impl App {
             Mode::Insert => self.insert_key(key, now),
             Mode::Overlay { opened_at } => self.overlay_key(key, opened_at, now),
             Mode::Palette(state) => self.palette_key(key, state),
+            Mode::Tree(tree) => self.tree_key(key, tree),
             Mode::Prompt(Prompt::Search { query, origin }) => self.search_key(key, query, origin),
             Mode::Prompt(Prompt::GotoLine { text }) => self.goto_key(key, text),
             Mode::Prompt(Prompt::ReplaceFind { query }) => self.replace_find_key(key, query),
@@ -881,6 +886,7 @@ impl App {
             Key::Ctrl('o') => self.open_prompt(),
             Key::Ctrl('q') => self.request_quit(),
             Key::Ctrl('w') => self.close_file(),
+            Key::Ctrl('t') => self.open_tree(),
             Key::Ctrl('z') => self.undo(),
             Key::Ctrl('y') => self.redo(),
             _ => {}
@@ -1112,6 +1118,7 @@ impl App {
             's' => self.save(),
             'h' => self.open_history(),
             'v' => self.open_reader(),
+            't' => self.open_tree(),
             'b' => self.open_files_list(),
             '.' => self.next_file(1),
             ',' => self.next_file(self.open_count() - 1),
@@ -1537,6 +1544,7 @@ impl App {
                 self.doc.scroll_left = 0;
             }
             Command::ChooseTheme => self.mode = Mode::Palette(PaletteState::themes(self.theme)),
+            Command::FileTree => self.open_tree(),
             Command::OpenFiles => self.open_files_list(),
             Command::NextFile => self.next_file(1),
             Command::PreviousFile => self.next_file(self.open_count() - 1),
@@ -1676,6 +1684,7 @@ impl App {
             }
             Mode::Prompt(_)
             | Mode::Help { .. }
+            | Mode::Tree(_)
             | Mode::Recover(_)
             | Mode::History { .. }
             | Mode::Review(_)
@@ -1904,6 +1913,72 @@ impl App {
             self.set_message("Only one file is open");
         } else {
             self.show_file((self.at + step) % self.open_count());
+        }
+    }
+
+    /// Opens the file tree on the directory Kyte started in.
+    fn open_tree(&mut self) {
+        match std::env::current_dir() {
+            Ok(root) => {
+                let tree = FileTree::new(root, self.doc.buffer.path());
+                self.mode = Mode::Tree(tree);
+            }
+            Err(e) => self.set_error(format!("Can't read this directory: {e}")),
+        }
+    }
+
+    fn tree_key(&mut self, key: Key, mut tree: FileTree) {
+        match key {
+            Key::Esc => {
+                self.mode = Mode::Insert;
+                return;
+            }
+            Key::Enter => match tree.selected_row() {
+                Some(r) if r.is_dir && r.open => tree.fold(),
+                Some(r) if r.is_dir => {
+                    if let Err(e) = tree.unfold() {
+                        self.set_error(e);
+                    }
+                }
+                Some(r) => {
+                    let name = r.path.to_str().map(str::to_string);
+                    self.mode = Mode::Insert;
+                    let opened = name
+                        .ok_or("Kyte can't open a file whose name isn't UTF-8".to_string())
+                        .and_then(|name| self.submit_open(&name));
+                    if let Err(e) = opened {
+                        self.set_error(e);
+                    }
+                    return;
+                }
+                None => {}
+            },
+            Key::Up => tree.up(1),
+            Key::Down => tree.down(1),
+            Key::PageUp => tree.page_up(),
+            Key::PageDown => tree.page_down(),
+            Key::Home => tree.up(usize::MAX),
+            Key::End => tree.down(usize::MAX),
+            Key::Left => tree.fold(),
+            Key::Right => {
+                if let Err(e) = tree.unfold() {
+                    self.set_error(e);
+                }
+            }
+            Key::Char('.') => tree.toggle_hidden(),
+            Key::Char(c) => tree.jump(c),
+            _ => {}
+        }
+        self.mode = Mode::Tree(tree);
+    }
+
+    /// What the file tree says about a file: whether it's open, and unsaved.
+    pub fn open_note(&self, path: &std::path::Path) -> &'static str {
+        let mut docs = std::iter::once(&self.doc).chain(&self.parked);
+        match docs.find(|d| d.buffer.path() == Some(path)) {
+            Some(d) if d.buffer.is_dirty() => "unsaved",
+            Some(_) => "open",
+            None => "",
         }
     }
 
@@ -2537,6 +2612,7 @@ impl App {
             Mode::Insert => "INSERT",
             Mode::Overlay { .. } => "ESC",
             Mode::Palette(_) => "PALETTE",
+            Mode::Tree(_) => "FILES",
             Mode::Prompt(Prompt::Search { .. }) => "SEARCH",
             Mode::Prompt(Prompt::GotoLine { .. }) => "GOTO",
             Mode::Prompt(Prompt::ReplaceFind { .. })

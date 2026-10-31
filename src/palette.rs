@@ -296,7 +296,7 @@ mod tests {
     #[test]
     fn empty_query_keeps_registry_order() {
         assert_eq!(filter(""), REGISTRY.to_vec());
-        assert_eq!(PaletteState::default().results.len(), 27);
+        assert_eq!(PaletteState::default().results.len(), 28);
     }
 
     #[test]
@@ -464,13 +464,13 @@ mod tests {
         for _ in 0..40 {
             s.down();
         }
-        assert_eq!(s.selected, 26);
+        assert_eq!(s.selected, 27);
         assert_eq!(s.selected_command(), Some(Command::ShowKeyHelp));
-        assert_eq!(s.scroll_offset(), 19);
+        assert_eq!(s.scroll_offset(), 20);
         s.push('s');
         assert_eq!(s.selected, 0);
         assert_eq!(s.selected_command(), Some(Command::Save));
         s.pop();
-        assert_eq!(s.results.len(), 27);
+        assert_eq!(s.results.len(), 28);
     }
 }

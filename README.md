@@ -96,6 +96,7 @@ Environment variables: `KYTE_STATE_DIR` (where swap files go; overrides the defa
 | Esc, Ctrl-Space | Open the operator layer |
 | Alt-*key* | Same as Esc then *key* |
 | Ctrl-K | Open the universal palette |
+| Ctrl-T | Open the file tree |
 | Ctrl-P | Open the command palette |
 
 Pasted text (bracketed paste) is inserted as one block and undone with a single Ctrl-Z.
@@ -118,6 +119,7 @@ The next key runs one operator and closes the layer:
 | `u`, `r` | Undo, redo |
 | `s` | Save |
 | `h` | Open the file's history |
+| `t` | Open the file tree |
 | Esc, within 300 ms of the first Esc | Open the command palette |
 | Esc, later | Close the layer |
 | Any other key | Close the layer; the key is discarded, nothing is inserted |
@@ -154,7 +156,7 @@ Under tmux, set `tmux set -g escape-time 10`. tmux's default of 500 ms delays ev
 
 Esc Esc (or Ctrl-P) opens a fuzzy-filtered list. Type to filter, Up and Down to select, Enter to run, Esc to close without running anything.
 
-Commands: Save, Save as, Open file, Quit, Quit without saving, Undo, Redo, Cut, Copy, Paste, Select all, Find, Replace, Go to line, Toggle line numbers, Toggle tabs and spaces, Toggle soft wrap, Choose theme, Open files, Next file, Previous file, Close file, Show key help.
+Commands: Save, Save as, Open file, Quit, Quit without saving, Undo, Redo, Cut, Copy, Paste, Select all, Find, Replace, Go to line, Toggle line numbers, Toggle tabs and spaces, Toggle soft wrap, Choose theme, File tree, Open files, Next file, Previous file, Close file, Show key help.
 
 Kyte works out whether a file indents with tabs or spaces, and how many, from its first 10,000 lines. A file with no indent uses tabs. The status bar shows `Spaces N` for space-indented files. **Toggle tabs and spaces** changes what new indent uses until the file is closed; it doesn't rewrite existing lines.
 
@@ -165,6 +167,8 @@ Kyte works out whether a file indents with tabs or spaces, and how many, from it
 **Open files** (Esc `b`) lists what's open, marked `unsaved` or `changed` where that applies. Type to filter, Up and Down to select, Enter to go there. **Next file** and **Previous file** (Esc `.` and Esc `,`) move through them in order, and the status bar shows which you're in, such as `file 2 of 3`. Each file keeps its own cursor, undo, swap and history. **Close file** (Ctrl-W) closes the one on screen. Kyte can also start with several: `kyte a.txt b.txt`.
 
 **Quit without saving** asks first if a file not on screen has unsaved changes.
+
+**File tree** (Ctrl-T) opens the directory you started Kyte in, in a box in the middle of the screen, unfolded down to the file you're in. Up and Down move, PageUp, PageDown, Home and End move further, and a letter jumps to the next name starting with it. Right opens a folder and Left closes it, Enter opens the file or folder, `.` shows or hides hidden files, and Esc closes the box. Files already open are marked `open` or `unsaved`.
 
 **Go to line** asks for a 1-based line number. Numbers past the end go to the last line, and anything that is not a number shows an error. **Show key help** shows the key table; Up and Down scroll it, and Esc closes it.
 
@@ -336,7 +340,7 @@ These Docker files have not been run yet, because the build machine had no Docke
 - Files over 512 KiB aren't syntax highlighted, because each keystroke re-parses the file. Typing takes under about 25 ms per key at 100 KB, and 60 to 115 ms near the limit, depending on the language.
 - Search takes under about 30 ms per key on a 38 MB ASCII file. On a file that size with non-ASCII text, ignoring case takes about 240 ms per key.
 - A very long single line costs more per keystroke, depending on what's in it. At the end of a 5 MB line on the build machine, plain ASCII takes about 8 ms, a line full of tabs about 45 ms, and CJK text about 170 ms.
-- Not in this version: file tree, mouse, splits, LSP, plugins, CRLF conversion, non-UTF-8 files, RPM/COPR packaging, and use as the default `$EDITOR`.
+- Not in this version: mouse, splits, LSP, plugins, CRLF conversion, non-UTF-8 files, RPM/COPR packaging, and use as the default `$EDITOR`.
 
 ## Documentation
 

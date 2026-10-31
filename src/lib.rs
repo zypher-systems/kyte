@@ -23,6 +23,7 @@ pub mod session;
 pub mod swap;
 pub mod syntax;
 pub mod term;
+pub mod tree;
 pub mod ui;
 pub mod wrap;
 

@@ -48,12 +48,13 @@ pub fn render(app: &App, frame: &mut Frame, theme: &Theme) {
     let prompt_cursor = chrome::message_line(app, msg_area, cells, theme);
     let popup_cursor = chrome::palette(app, text_area, cells, theme);
     let help_box = chrome::help(app, text_area, cells, theme);
+    let tree_box = chrome::file_tree(app, text_area, cells, theme);
     let menu_box = chrome::menu(app, text_area, text_cursor, cells, theme);
     chrome::completions(app, text_area, cells, theme);
     chrome::recover(app, text_area, cells, theme);
     // A cursor under a box would blink through its text.
     let text_cursor = text_cursor.filter(|&c| {
-        ![help_box, menu_box]
+        ![help_box, tree_box, menu_box]
             .iter()
             .flatten()
             .any(|b| b.contains(Position::from(c)))
@@ -257,6 +258,15 @@ two");
         let all = screen(&t, 6);
         for (k, _) in a.layer_rows() {
             assert!(all.contains(k), "{k} missing\n{all}");
+        }
+    }
+
+    #[test]
+    fn the_file_tree_sits_in_the_middle() {
+        let mut a = app("abc");
+        a.run_command(crate::command::Command::FileTree);
+        for (w, h) in [(80, 24), (100, 30), (40, 12)] {
+            assert_centered(box_of(&draw(&mut a, w, h)), w, h - 2);
         }
     }
 
