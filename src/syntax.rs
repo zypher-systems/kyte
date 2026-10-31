@@ -35,6 +35,7 @@ fn extension_prefix(extension: &str) -> Option<&'static str> {
         | "conf" | "ini" | "cfg" | "mk" | "r" | "ex" | "exs" | "rake" | "gemspec" | "nix"
         | "cmake" | "dockerfile" | "desktop" | "service" | "timer" | "socket" => Some("#"),
         "lua" | "sql" | "hs" => Some("--"),
+        "tex" | "ltx" | "latex" | "sty" | "cls" | "bib" | "bibtex" => Some("%"),
         "vim" => Some("\""),
         _ => None,
     }
@@ -100,7 +101,7 @@ mod code {
             }
             Lang::Php => matches!(kind, "function_definition" | "method_declaration"),
             Lang::Ruby => matches!(kind, "method" | "singleton_method"),
-            Lang::Lua | Lang::Zig => kind == "function_declaration",
+            Lang::Lua | Lang::Zig | Lang::Swift => kind == "function_declaration",
             _ => false,
         }
     }
@@ -132,6 +133,7 @@ mod code {
                     | Lang::Lua
                     | Lang::Fish
                     | Lang::Zig
+                    | Lang::Swift
             )
         )
     }
@@ -207,6 +209,8 @@ mod code {
             (Lang::Lua, "function_declaration") => ("function", "name"),
             (Lang::Fish, "function_definition") => ("function", "name"),
             (Lang::Zig, "function_declaration") => ("fn", "name"),
+            (Lang::Swift, "function_declaration") => ("func", "name"),
+            (Lang::Swift, "class_declaration") => ("class", "name"),
             _ => return None,
         };
         Some(format!("{word} {}", name(field)?))
@@ -397,6 +401,13 @@ mod tests {
             "echo",
             "function one",
             "function one",
+        ),
+        (
+            "a.swift",
+            "class A {\n  func one() -> Int {\n    return 1\n  }\n}\n",
+            "return",
+            "func one",
+            "func one",
         ),
         (
             "a.zig",
@@ -612,6 +623,7 @@ mod prefix_tests {
         assert_eq!(comment_prefix(Path::new("Makefile"), ""), Some("#"));
         assert_eq!(comment_prefix(Path::new("Dockerfile.dev"), ""), Some("#"));
         assert_eq!(comment_prefix(Path::new("a.php"), ""), Some("//"));
+        assert_eq!(comment_prefix(Path::new("paper.tex"), ""), Some("%"));
         assert_eq!(
             comment_prefix(Path::new("tool"), "#!/usr/bin/lua\n"),
             Some("--")

@@ -296,3 +296,39 @@ fn the_reader_and_function_keys_work_in_ruby() {
     p.send_keys(&["C-q"]);
     p.wait_exit(TIMEOUT);
 }
+
+#[test]
+fn a_latex_paper_and_its_bibliography_are_colored() {
+    let text = "% draft\n\\section{Introduction}\nAs \\cite{knuth} showed.\n";
+    let (_dir, mut p) = open_named("paper.tex", text);
+    p.wait_for("Introduction", TIMEOUT);
+    let col = col_of(&p, 0, "draft");
+    assert_eq!(p.fg(0, col), Some(vt100::Color::Idx(247)), "{}", p.dump());
+    let col = col_of(&p, 1, "section");
+    assert_eq!(p.fg(1, col), Some(vt100::Color::Idx(205)), "{}", p.dump());
+    let col = col_of(&p, 2, "showed");
+    assert_eq!(p.fg(2, col), Some(vt100::Color::Idx(255)), "{}", p.dump());
+    p.send_keys(&["C-q"]);
+    p.wait_exit(TIMEOUT);
+    let (_dir, mut p) = open_named("refs.bib", "@book{a,\n  title = {Hi},\n}\n");
+    p.wait_for("book", TIMEOUT);
+    let col = col_of(&p, 0, "book");
+    assert_eq!(p.fg(0, col), Some(vt100::Color::Idx(205)), "{}", p.dump());
+    p.send_keys(&["C-q"]);
+    p.wait_exit(TIMEOUT);
+}
+
+#[test]
+fn swift_is_colored_and_its_function_keys_work() {
+    let text = "func one() -> Int {\n  return 1\n}\n\nfunc two() {}\n";
+    let (_dir, mut p) = open_named("a.swift", text);
+    p.wait_for("func one", TIMEOUT);
+    let col = col_of(&p, 0, "func");
+    assert_eq!(p.fg(0, col), Some(vt100::Color::Idx(205)), "{}", p.dump());
+    p.send_keys(&["Esc"]);
+    p.wait_for("next function", TIMEOUT);
+    p.send_str("n");
+    p.wait_for("Ln 5,", TIMEOUT);
+    p.send_keys(&["C-q"]);
+    p.wait_exit(TIMEOUT);
+}

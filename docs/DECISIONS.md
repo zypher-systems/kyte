@@ -93,13 +93,16 @@ These replace the matching parts of `ARCHITECTURE`. `docs/ROADMAP.md` holds the 
   - Older names such as `conditional`, `repeat` and `boolean` weren't Kyte colors, so `if` in Lua stayed plain. They're mapped now, along with `constructor`, `escape` and `variable.builtin`, which also adds color to `self` and `\\n` in the earlier languages.
 - `tests` in `highlight.rs` check named tokens in a whole sample for each language, so a query update that drops comments will fail.
 - Left out, and why:
-  - LaTeX: `tree-sitter-latex` 0.1.0 ships without its scanner and doesn't link. A working one would mean keeping a grammar in this repo.
   - `tree-sitter-dockerfile`: it needs an old tree-sitter. `tree-sitter-containerfile` covers Dockerfiles instead.
   - Kotlin: one crate needs an old tree-sitter and the other has no highlight query.
   - Protobuf and HCL: no highlight query in the crate.
   - Perl: it doesn't resolve against tree-sitter 0.27.
-  - Swift, Scala, Haskell, Dart and Elixir: they work, but each adds megabytes for languages seldom edited in a Linux terminal. They can go in later.
+  - Scala, Haskell, Dart and Elixir: they work, but each adds megabytes for languages seldom edited in a Linux terminal. They can go in later.
 - The binary grows from about 15 MB to about 26 MB. C#, Ruby, SQL and PHP are most of that.
+- Swift followed, along with LaTeX and BibTeX, because research papers are something Kyte should be good for. They took the binary to about 33 MB.
+- LaTeX: `tree-sitter-latex` 0.1.0 publishes its parser without `scanner.c`, so it doesn't link. The upstream scanner is 141 lines with the same twelve tokens, so `vendor/` keeps that one file and `build.rs` compiles it, rather than keeping a 37 MB grammar. The crate has no query, so `queries/latex.scm` is Kyte's own. A `section` node holds the whole section, so only the title is colored. Prose stays plain, which is what you read most.
+- BibTeX: the crate needs tree-sitter 0.22, which can't sit beside 0.27 in one build, but its 56 KB parser uses a format 0.27 still reads. `vendor/` keeps the parser, and the crate isn't a dependency.
+- GNU ld resolves symbols in order and failed on the scanner, though rust-lld didn't. `highlight.rs` names the scanner to fix the order, and both linkers were checked.
 - Measured on a release build, mid-file on repeated samples: the first highlight of a language in a session takes 21 ms at most, for building its query. A keystroke costs 5 to 20 ms at 100 KB and 23 to 103 ms at 500 KB, so nothing is slower than C++ was, and the 512 KiB cap stays.
 
 ## CI

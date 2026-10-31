@@ -14,6 +14,20 @@ use tree_sitter_highlight::{HighlightConfiguration, HighlightEvent, Highlighter}
 
 use crate::ui::theme::Theme;
 
+// `build.rs` compiles the scanner `tree-sitter-latex` needs. Naming it here puts
+// it ahead of that crate for linkers that resolve symbols in order, like GNU ld.
+extern "C" {
+    fn tree_sitter_latex_external_scanner_create() -> *mut std::ffi::c_void;
+    fn tree_sitter_bibtex() -> *const ();
+}
+#[used]
+static LATEX_SCANNER: unsafe extern "C" fn() -> *mut std::ffi::c_void =
+    tree_sitter_latex_external_scanner_create;
+
+/// Compiled from `vendor/` by `build.rs`.
+const BIBTEX: tree_sitter_language::LanguageFn =
+    unsafe { tree_sitter_language::LanguageFn::from_raw(tree_sitter_bibtex) };
+
 /// Documents larger than this are not highlighted (every redraw re-parses).
 pub const MAX_BYTES: usize = 512 * 1024;
 
@@ -49,11 +63,14 @@ pub enum Lang {
     Fish,
     Nix,
     Zig,
+    Swift,
+    Latex,
+    Bibtex,
 }
 
 impl Lang {
     /// Every language, in the order of the `CONFIGS` table.
-    pub const ALL: [Lang; 30] = [
+    pub const ALL: [Lang; 33] = [
         Lang::Rust,
         Lang::Python,
         Lang::Bash,
@@ -84,6 +101,9 @@ impl Lang {
         Lang::Fish,
         Lang::Nix,
         Lang::Zig,
+        Lang::Swift,
+        Lang::Latex,
+        Lang::Bibtex,
     ];
 
     /// Picks the grammar from the file's name, or failing that the `#!` line
@@ -151,6 +171,9 @@ impl Lang {
             "fish" => Lang::Fish,
             "nix" => Lang::Nix,
             "zig" => Lang::Zig,
+            "swift" => Lang::Swift,
+            "tex" | "ltx" | "latex" | "sty" | "cls" => Lang::Latex,
+            "bib" | "bibtex" => Lang::Bibtex,
             _ => return None,
         })
     }
@@ -188,6 +211,9 @@ impl Lang {
             Lang::Fish => tree_sitter_fish::language(),
             Lang::Nix => tree_sitter_nix::LANGUAGE.into(),
             Lang::Zig => tree_sitter_zig::LANGUAGE.into(),
+            Lang::Swift => tree_sitter_swift::LANGUAGE.into(),
+            Lang::Latex => tree_sitter_latex::LANGUAGE.into(),
+            Lang::Bibtex => BIBTEX.into(),
         }
     }
 
@@ -234,6 +260,9 @@ impl Lang {
             Lang::Fish => tree_sitter_fish::HIGHLIGHTS_QUERY.to_string(),
             Lang::Nix => tree_sitter_nix::HIGHLIGHTS_QUERY.to_string(),
             Lang::Zig => tree_sitter_zig::HIGHLIGHTS_QUERY.to_string(),
+            Lang::Swift => tree_sitter_swift::HIGHLIGHTS_QUERY.to_string(),
+            Lang::Latex => include_str!("../queries/latex.scm").to_string(),
+            Lang::Bibtex => include_str!("../queries/bibtex.scm").to_string(),
         }
     }
 }
@@ -525,6 +554,15 @@ mod tests {
     }
 
     #[test]
+    fn the_prose_of_a_latex_section_stays_plain() {
+        let src =
+            "\\section{Title}\nThe body of the section.\n\\begin{verbatim}\nraw\n\\end{verbatim}\n";
+        let k = kinds_of(src, &highlight(Lang::Latex, src, 0..6));
+        assert!(!k.iter().any(|(t, _)| t.contains("body")), "{k:?}");
+        assert!(k.contains(&("\nraw\n", HighlightKind::String)), "{k:?}");
+    }
+
+    #[test]
     fn every_grammar_loads_with_its_query() {
         for lang in Lang::ALL {
             assert!(config(lang).is_some(), "{lang:?}");
@@ -683,8 +721,51 @@ mod tests {
                 ],
             ),
         ];
+        let paper = "% draft\n\\documentclass{article}\n\\usepackage{amsmath}\n\\begin{document}\n\\section{Introduction}\nAs \\cite{knuth} showed, $x + 1$ holds.\n\\label{sec:intro}\n\\end{document}\n";
+        let cases = [
+            cases,
+            &[
+                (
+                    Lang::Swift,
+                    "// note\nclass Foo {\n  func hello() -> Int { return 1 }\n}\n",
+                    &[
+                        ("// note", K::Comment),
+                        ("class", K::Keyword),
+                        ("func", K::Keyword),
+                        ("hello", K::Function),
+                        ("1", K::Number),
+                    ][..],
+                ),
+                (
+                    Lang::Latex,
+                    paper,
+                    &[
+                        ("% draft", K::Comment),
+                        ("documentclass", K::Keyword),
+                        ("amsmath", K::String),
+                        ("begin", K::Keyword),
+                        ("document", K::Type),
+                        ("Introduction", K::Keyword),
+                        ("cite", K::Function),
+                        ("knuth", K::Constant),
+                        ("x + 1", K::String),
+                        ("sec:intro", K::Constant),
+                    ][..],
+                ),
+            ][..],
+        ]
+        .concat();
+        let bib = "@article{knuth84,\n  title = {Literate Programming},\n  year = 1984,\n}\n";
+        let want = [
+            ("@article", K::Keyword),
+            ("title", K::Keyword),
+            ("Literate", K::String),
+            ("1984", K::Number),
+        ];
+        let extra = [(Lang::Bibtex, bib, &want[..])];
+        let cases = [&cases[..], &extra[..]].concat();
         let mut wrong = Vec::new();
-        for (lang, src, want) in cases {
+        for (lang, src, want) in &cases {
             let spans = highlight(*lang, src, 0..20);
             let k = kinds_of(src, &spans);
             for (token, kind) in *want {
