@@ -82,7 +82,7 @@ Kyte's pitch is an editor you can't lose work in and don't have to learn.
 - [x] Releases with an installer, `.deb`, `.rpm` and signed checksums
 - [ ] Multiple cursors and mouse support
 - [ ] Code intelligence (LSP)
-- [ ] Re-record the demo, which still shows the footer legend (needs `agg`)
+- [x] Re-record the demo with the current look
 
 Keep using Kyte for real work along the way, on actual terminals with the kitty keyboard protocol, and over SSH and tmux.
 

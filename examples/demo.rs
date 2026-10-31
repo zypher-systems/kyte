@@ -111,6 +111,7 @@ fn main() {
         };
         Pty::spawn(
             s.env("KYTE_STATE_DIR", state.to_string_lossy())
+                .env("COLORTERM", "truecolor")
                 .cwd(tmp.path())
                 .size(ROWS, COLS)
                 .recorder(rec.clone()),

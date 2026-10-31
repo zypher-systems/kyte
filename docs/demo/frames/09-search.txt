@@ -26,5 +26,5 @@
 ~
 ~
 ~
- SEARCH │ demo.txt [+] │ Ln 10, Col 30
+ SEARCH  demo.txt [+]                                                      Ln 10, Col 30 │ Spaces 2
  Search: swap

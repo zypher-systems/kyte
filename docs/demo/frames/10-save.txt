@@ -26,5 +26,5 @@
 ~
 ~
 ~
- INSERT │ demo.txt │ Ln 10, Col 30
+ INSERT  demo.txt                                                          Ln 10, Col 30 │ Spaces 2
  Saved 12 lines

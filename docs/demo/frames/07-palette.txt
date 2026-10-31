@@ -9,11 +9,12 @@
   9 │ }
  10 │ Unsaved work is written to a swap file,
  11 │ so a crash never loses your edits.
- 12 │ Try the palette: Go to line, Find, Save.
- 13 │                  ┌ Command palette ───────────────────────────────────┐
-~                      │> go                                                │
+ 12 │ Try the palette: ╭───────────────── Command palette ──────────────────╮
+ 13 │                  │> go                                                │
+~                      ├────────────────────────────────────────────────────┤
 ~                      │▸ Go to line                                        │
-~                      └────────────────────────────────────────────────────┘
+~                      │  Toggle soft wrap                                  │
+~                      ╰────────────────────────────────────────────────────╯
 ~
 ~
 ~
@@ -25,6 +26,5 @@
 ~
 ~
 ~
-~
- PALETTE │ demo.txt [+] │ Ln 4, Col 42
+ PALETTE  demo.txt [+]                                                      Ln 4, Col 42 │ Spaces 2
 
