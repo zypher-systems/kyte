@@ -292,9 +292,7 @@ fn the_reader_and_function_keys_work_in_ruby() {
     p.send_str("v");
     p.wait_for("class Foo › def one", TIMEOUT);
     p.send_keys(&["Esc"]);
-    p.wait_gone("read on", TIMEOUT);
-    p.send_keys(&["Esc"]);
-    p.wait_for(" INSERT ", TIMEOUT);
+    p.wait_gone(" READER ", TIMEOUT);
     p.send_keys(&["C-q"]);
     p.wait_exit(TIMEOUT);
 }
