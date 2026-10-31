@@ -427,7 +427,7 @@ Environment: `KYTE_STATE_DIR` (swap directory override, used by tests), `KYTE_ES
 - The bottom two rows are always the status bar and the message line, so opening the legend never shifts the text.
 - Palette: centered popup, up to 8 result rows plus the input line, drawn over the text.
 - Tabs render to the next multiple of 4 columns; wide characters use `unicode-width`; the terminal cursor is placed at the cursor's display position.
-- Theme: one dark theme, defined as a `Theme` struct with constants. Use indexed 256-color values only (no truecolor), so it looks right in tmux and in the pty demo. Provide fields for text, gutter, status bar, message, legend, palette box, selected row, error. Later themes are just more constants.
+- Theme: Signal, a near-black theme defined as a `Theme` built from a set of colors, once in 24-bit color and once in indexed 256-color values. `COLORTERM=truecolor` or `24bit` picks the first; anything else, including the pty tests and demo, gets the second. Provide fields for text, gutter, status bar, message, legend, palette box, selected row, error. Later themes are just more sets of colors.
 - Minimum terminal size 20x5; below that, draw "terminal too small" instead of panicking.
 - No animation, no timers that repaint: the screen only changes on input, resize or message expiry on the next key. This keeps recordings and screenshots deterministic.
 
@@ -597,7 +597,7 @@ On SELinux-enforcing hosts bind mounts need the `:Z` suffix: `-v "$PWD":/src:Z`.
 
 ### Why the demo is feasible headlessly
 
-Kyte draws only on input or resize, uses 256-color indexed colors, needs no mouse, and works without the kitty protocol. Its entire behavior is therefore reachable from raw bytes written to a pty, and its entire output is a byte stream a terminal emulator can replay. The pty harness from T5 already does both, so the demo reuses it.
+Kyte draws only on input or resize, uses 256-color indexed colors unless the terminal says it takes 24-bit color, needs no mouse, and works without the kitty protocol. Its entire behavior is therefore reachable from raw bytes written to a pty, and its entire output is a byte stream a terminal emulator can replay. The pty harness from T5 already does both, so the demo reuses it.
 
 ### Demo pipeline (T11)
 

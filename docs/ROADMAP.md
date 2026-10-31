@@ -69,9 +69,10 @@ Kyte's pitch is an editor you can't lose work in and don't have to learn.
 
 ## Next
 
+- [x] Signal theme, centred boxes, and a redrawn status bar and cursor line
 - [ ] Re-record the demo, which still shows the footer legend (needs `agg`)
 
-Looks are still open too, with details to be decided. Keep using Kyte for real work along the way, on actual terminals with the kitty keyboard protocol, and over SSH and tmux.
+Keep using Kyte for real work along the way, on actual terminals with the kitty keyboard protocol, and over SSH and tmux.
 
 ## Later
 

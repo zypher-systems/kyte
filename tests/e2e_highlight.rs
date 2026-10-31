@@ -48,7 +48,7 @@ fn selection_shows_on_a_highlighted_line() {
     assert_ne!(p.bg(0, col), plain, "selected text looks selected");
     assert_eq!(
         p.fg(0, col).unwrap(),
-        vt100::Color::Idx(176),
+        vt100::Color::Idx(205),
         "and keeps its color"
     );
     assert_eq!(p.bg(0, col + 3), plain, "the rest doesn't");
@@ -117,7 +117,7 @@ fn reader_focuses_on_a_function_and_shows_where_you_are() {
     let col = col_of(&p, 6, "other");
     assert_eq!(
         p.fg(6, col),
-        Some(vt100::Color::Idx(240)),
+        Some(vt100::Color::Idx(244)),
         "other functions are dimmed, syntax colors included"
     );
     p.send_str("n");
@@ -140,7 +140,7 @@ fn new_languages_are_colored_in_the_terminal() {
         let col = col_of(&p, 0, token);
         assert_ne!(
             p.fg(0, col),
-            Some(vt100::Color::Idx(252)),
+            Some(vt100::Color::Idx(255)),
             "{name} should be colored"
         );
         p.send_keys(&["C-q"]);
@@ -172,7 +172,7 @@ fn a_script_with_no_extension_is_colored_from_its_first_line() {
     let (_dir, mut p) = open_named("deploy", "#!/bin/bash\nif true; then echo hi; fi\n");
     p.wait_for("then echo", TIMEOUT);
     let col = col_of(&p, 1, "if");
-    assert_ne!(p.fg(1, col), Some(vt100::Color::Idx(252)), "{}", p.dump());
+    assert_ne!(p.fg(1, col), Some(vt100::Color::Idx(255)), "{}", p.dump());
     p.send_keys(&["Esc"]);
     p.wait_for("select function", TIMEOUT);
     p.send_str("z");
@@ -202,7 +202,7 @@ fn colors_follow_text_onto_wrapped_rows() {
     let first = p.fg(0, 10);
     let col = col_of(&p, 1, "comment");
     assert_eq!(p.fg(1, col), first, "the comment's color carries on");
-    assert_ne!(first, Some(vt100::Color::Idx(252)));
+    assert_ne!(first, Some(vt100::Color::Idx(255)));
     p.send_keys(&["C-q"]);
     p.wait_exit(TIMEOUT);
 }
@@ -238,7 +238,7 @@ fn t13_rust_keyword_has_non_default_foreground() {
     let kw = p.fg(0, col).unwrap();
     let space = p.fg(0, col + 2).unwrap();
     assert_ne!(kw, space, "keyword `fn` should be colored, got {kw:?}");
-    assert_eq!(kw, vt100::Color::Idx(176), "keyword color");
+    assert_eq!(kw, vt100::Color::Idx(205), "keyword color");
     p.send_keys(&["C-q"]);
     p.wait_exit(TIMEOUT);
 }
@@ -257,7 +257,7 @@ fn t13_plain_text_file_is_not_highlighted() {
     );
     p.wait_for("fn main", TIMEOUT);
     let col = col_of(&p, 0, "fn");
-    assert_eq!(p.fg(0, col).unwrap(), vt100::Color::Idx(252));
+    assert_eq!(p.fg(0, col).unwrap(), vt100::Color::Idx(255));
     p.send_keys(&["C-q"]);
     p.wait_exit(TIMEOUT);
 }

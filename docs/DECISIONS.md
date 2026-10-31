@@ -109,6 +109,10 @@ These replace the matching parts of `ARCHITECTURE`. `docs/ROADMAP.md` holds the 
 - The cursor's line has its own background, and its number lights up. Only the number does: a bright gutter bar read as a glitch.
 - The status bar keeps the file on the left and the facts (position, selection, indent, line endings) on the right. When the bar is tight, only position stays, and warnings are cut before position is.
 - Theme candidates were judged as real screens, rendered by Kyte's own code and dumped cell by cell, not as drawings.
+- Signal won from six candidates: near black with vivid color, 17.9:1 for text and 7.6:1 for comments. It replaced the old 256-color dark theme, whose comments fell short at 4.4:1.
+- The selection, added-line and faint colors moved slightly after the pick, because comments on a selection measured 3.3:1 and line numbers 4.1:1. Tests in `src/ui/theme.rs` hold code and chrome to 4.5:1 on every background they land on.
+- 24-bit color is used only when `COLORTERM` says `truecolor` or `24bit`. Anything else gets a hand-matched 256-color palette, since ratatui doesn't downsample and a wrong guess shows garbled colors. SSH and sudo usually drop `COLORTERM`, so those sessions get the 256-color palette, and `COLORTERM=truecolor kyte` overrides it.
+- The one known gap: the darkest green in 256 colors leaves code colors on added lines in change review under the minimum (keywords at 2.8:1). Plain text there reaches it.
 
 ## File history
 
@@ -331,6 +335,6 @@ The versioning rule makes any release with a new feature a MINOR bump, and 0.1.1
 - Every AC passed first, and the grammars resolved against tree-sitter 0.27, so T13 was built. Resolved versions: tree-sitter 0.27.x, tree-sitter-highlight 0.27.1, tree-sitter-rust 0.24.2, tree-sitter-python 0.25.0, tree-sitter-bash 0.25.1 (all grammar ABI 15). All are optional dependencies behind the `highlight` feature, which is off by default. `cargo tree -e normal` for the default build lists no tree-sitter crate.
 - `src/highlight.rs`: `Lang::from_path` picks the grammar by extension (`.rs`; `.py`/`.pyi`; `.sh`/`.bash`). `highlight(lang, text, lines) -> Vec<(Range<usize>, HighlightKind)>` returns byte ranges of the whole text that overlap the visible line range. It uses each grammar's bundled `highlights.scm` through `tree-sitter-highlight`; the capture names keyword, string, comment, function, type, constant and number map to `HighlightKind`, and the innermost capture wins. Query configurations are compiled once per language (`OnceLock`).
 - The function takes the whole text (not just the visible lines) so multi-line strings and comments are parsed correctly. Each redraw re-parses, so documents over 512 KiB are not highlighted. Incremental parsing is a later improvement.
-- Colors are 256-color indexed values on the text background: keyword 176 (bold), string 150, comment 245 (italic), function 111, type 180, constant/number 209.
+- Colors sit on the text background: keyword (bold), string, comment (italic), function, type and constant/number. `src/ui/theme.rs` has the values.
 - The text view uses a styled per-grapheme path only for lines that have spans; other lines take the unchanged `render_line` path. Without the feature, none of this code is compiled.
 - Tests: four unit tests in `highlight.rs` (a Rust snippet is tokenized into comment, keyword, function and string; only the requested lines are returned; the Python and Bash grammars load; extension mapping) and `tests/e2e_highlight.rs` (`fn` in a `.rs` file is drawn with foreground index 176 in the vt100 screen; a `.txt` file stays at the default 252).

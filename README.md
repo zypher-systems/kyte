@@ -250,6 +250,10 @@ With soft wrap on, a long line continues on the next screen row, breaking after 
 
 Environment variables and command-line options override the file. A line Kyte can't use is skipped and reported on the first screen, and never stops Kyte from opening.
 
+## Colors
+
+Kyte's theme is Signal, near black with vivid color. It uses 24-bit color when the terminal says it can, through `COLORTERM=truecolor` or `COLORTERM=24bit`, and a close 256-color match otherwise. SSH and sudo usually drop that variable, so to get 24-bit color there, start Kyte with `COLORTERM=truecolor kyte`.
+
 ## Swap files and recovery
 
 - When you open a file, Kyte creates a swap file under `$XDG_STATE_HOME/kyte/swap/` (default `~/.local/state/kyte/swap/`; `KYTE_STATE_DIR` overrides it). It is never placed next to your file. It has mode 0600 and is named after the escaped absolute path, for example `%2Fhome%2Fme%2Fnotes.txt.kyteswp`. A name that would be too long keeps the end of the path and adds a hash.

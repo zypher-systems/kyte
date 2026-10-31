@@ -925,6 +925,29 @@ fn ac14_esc_ms_800_opens_palette_after_500ms() {
 }
 
 #[test]
+fn a_terminal_that_says_it_takes_24_bit_color_gets_it() {
+    let env = Env::new();
+    let f = env.write("colors.txt", "text\n");
+    for (colorterm, expected) in [
+        (Some("truecolor"), vt100::Color::Rgb(0x0b, 0x0c, 0x10)),
+        (Some("24bit"), vt100::Color::Rgb(0x0b, 0x0c, 0x10)),
+        (None, vt100::Color::Idx(232)),
+    ] {
+        let mut spawn = Spawn::new(bin())
+            .env("KYTE_STATE_DIR", env.state.to_string_lossy())
+            .arg("--no-kitty")
+            .arg(f.to_string_lossy());
+        if let Some(value) = colorterm {
+            spawn = spawn.env("COLORTERM", value);
+        }
+        let mut p = Pty::spawn(spawn);
+        p.wait_for("Ln 1, Col 1", TIMEOUT);
+        assert_eq!(p.bg(5, 40), Some(expected), "{colorterm:?}\n{}", p.dump());
+        quit_clean(&mut p);
+    }
+}
+
+#[test]
 fn ac14_kyte_esc_ms_env_is_honoured() {
     let env = Env::new();
     let f = env.write("pal.txt", "text\n");
