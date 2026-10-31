@@ -447,7 +447,8 @@ pub fn palette(app: &App, text_area: Rect, cells: &mut Cells, theme: &Theme) -> 
         return None;
     };
     let rows = state.results.len().clamp(1, VISIBLE_ROWS) as u16;
-    let w = 54.min(text_area.width.saturating_sub(2)).max(10);
+    let wide = if state.is_citations() { 76 } else { 54 };
+    let w = wide.min(text_area.width.saturating_sub(2)).max(10);
     let rule = (text_area.height >= rows + 4) as u16;
     let area = centered(text_area, w, rows + 3 + rule);
     let title = if state.is_universal() {
@@ -456,6 +457,8 @@ pub fn palette(app: &App, text_area: Rect, cells: &mut Cells, theme: &Theme) -> 
         "Choose theme"
     } else if state.is_open_files() {
         "Open files"
+    } else if state.is_citations() {
+        "Cite"
     } else {
         "Command palette"
     };
@@ -492,7 +495,12 @@ pub fn palette(app: &App, text_area: Rect, cells: &mut Cells, theme: &Theme) -> 
             let style = if sel { theme.selected } else { theme.palette };
             let marker = if sel { "▸ " } else { "  " };
             let hint = entry.hint();
-            let label = fit_label(&entry.label(), iw.saturating_sub(hint.len() + 4));
+            let room = iw.saturating_sub(hint.len() + 4);
+            let label = if state.is_citations() {
+                entry.label().chars().take(room).collect()
+            } else {
+                fit_label(&entry.label(), room)
+            };
             let label = format!("{marker}{label}");
             let pad = iw.saturating_sub(label.chars().count() + hint.len() + 1);
             let line = format!("{label}{}{hint} ", " ".repeat(pad));

@@ -1083,7 +1083,7 @@ fn ac16_empty_query_does_nothing() {
 
 // ---------------------------------------------------------------- AC-17
 
-const COMMANDS: [&str; 31] = [
+const COMMANDS: [&str; 32] = [
     "Save",
     "Save as",
     "Open file",
@@ -1103,6 +1103,7 @@ const COMMANDS: [&str; 31] = [
     "Toggle soft wrap",
     "Choose theme",
     "File tree",
+    "Insert citation",
     "Fix spelling",
     "Next misspelling",
     "Toggle spell check",
@@ -1150,7 +1151,7 @@ fn ac17_palette_lists_every_command() {
         .collect();
     assert!(first_result(&p).contains("▸ Save"), "{}", p.dump());
     // 8 rows are visible at once; scrolling down reveals the rest
-    for _ in 0..30 {
+    for _ in 0..31 {
         p.send_keys(&["Down"]);
         std::thread::sleep(Duration::from_millis(5));
         for c in COMMANDS {
@@ -2276,7 +2277,7 @@ fn standard_terminal_shows_the_legend_and_help_in_full() {
     p.wait_for("▸ Show key help", TIMEOUT);
     p.send_keys(&["Enter"]);
     p.wait_for("Up, Down scroll", TIMEOUT);
-    for _ in 0..30 {
+    for _ in 0..31 {
         p.send_keys(&["Down"]);
     }
     p.wait_for("Esc (quickly)", TIMEOUT);
@@ -4255,4 +4256,170 @@ fn a_latex_word_count_catches_up_when_typing_pauses() {
     p.wait_for("Unsaved changes", TIMEOUT);
     p.send_str("n");
     assert_eq!(p.wait_exit(TIMEOUT), 0);
+}
+
+// ---------------------------------------------------------------- citations
+
+const REFS: &str = "@article{knuth84,\n  author = {Knuth, Donald},\n  title = {Literate Programming},\n  year = 1984,\n}\n@book{lamport94,\n  author = {Lamport, Leslie},\n  title = {LaTeX: A Document Preparation System},\n  year = 1994,\n}\n";
+
+/// A folder with `refs.bib`, and Kyte open on a paper in it.
+fn open_paper(env: &Env, tex: &str) -> (PathBuf, Pty) {
+    let paper = work_file(env, "paper.tex", tex);
+    fs::write(paper.parent().unwrap().join("refs.bib"), REFS).unwrap();
+    let p = open_writing(env, &paper, "");
+    p.wait_for("Ln 1, Col 1", TIMEOUT);
+    (paper, p)
+}
+
+/// Quits without saving and asks nothing more.
+fn abandon(p: &mut Pty) {
+    p.send_keys(&["C-q"]);
+    p.wait_for("Unsaved changes", TIMEOUT);
+    p.send_str("n");
+    assert_eq!(p.wait_exit(TIMEOUT), 0);
+}
+
+#[test]
+fn typing_a_citation_offers_the_bibliography_and_inserts_the_key() {
+    let env = Env::new();
+    let (_paper, mut p) = open_paper(&env, "As shown.\n");
+    p.send_str("\\cite{");
+    p.wait_for(" Cite ", TIMEOUT);
+    p.wait_for("knuth84  Knuth, Literate Programming (1984)", TIMEOUT);
+    p.wait_for("lamport94  Lamport", TIMEOUT);
+    p.send_str("lamport");
+    p.wait_for("▸ lamport94", TIMEOUT);
+    p.send_keys(&["Enter"]);
+    p.wait_for("\\cite{lamport94}As shown.", TIMEOUT);
+    p.wait_gone(" Cite ", TIMEOUT);
+    p.send_str(" more");
+    p.wait_for("\\cite{lamport94} moreAs shown.", TIMEOUT);
+    abandon(&mut p);
+}
+
+#[test]
+fn a_citation_can_be_found_by_author_or_title_and_holds_several_works() {
+    let env = Env::new();
+    let (_paper, mut p) = open_paper(&env, "x\n");
+    p.send_str("\\citep[p. 3]{");
+    p.wait_for(" Cite ", TIMEOUT);
+    p.send_str("Literate");
+    p.wait_for("▸ knuth84", TIMEOUT);
+    p.send_str(",");
+    p.wait_for("\\citep[p. 3]{knuth84,x", TIMEOUT);
+    p.send_str("Preparation");
+    p.wait_for("▸ lamport94", TIMEOUT);
+    p.send_keys(&["Enter"]);
+    p.wait_for("\\citep[p. 3]{knuth84,lamport94}x", TIMEOUT);
+    abandon(&mut p);
+}
+
+#[test]
+fn esc_leaves_the_citation_as_typed() {
+    let env = Env::new();
+    let (_paper, mut p) = open_paper(&env, "x\n");
+    p.send_str("\\cite{");
+    p.wait_for(" Cite ", TIMEOUT);
+    p.send_keys(&["Esc"]);
+    p.wait_gone(" Cite ", TIMEOUT);
+    p.wait_for("\\cite{x", TIMEOUT);
+    abandon(&mut p);
+}
+
+#[test]
+fn esc_q_starts_a_citation_or_fills_in_the_one_at_the_cursor() {
+    let env = Env::new();
+    let (_paper, mut p) = open_paper(&env, "\\cite{}\n");
+    p.send_keys(&["End"]);
+    open_overlay(&mut p);
+    p.wait_for("insert citation", TIMEOUT);
+    p.send_str("q");
+    p.wait_for(" Cite ", TIMEOUT);
+    p.send_keys(&["Enter"]);
+    p.wait_for("\\cite{}\\cite{knuth84}", TIMEOUT);
+    p.send_keys(&["Left"]);
+    p.send_keys(&["Home"]);
+    for _ in 0..6 {
+        p.send_keys(&["Right"]);
+    }
+    wait_status(&p, "Col 7");
+    open_overlay(&mut p);
+    p.send_str("q");
+    p.wait_for(" Cite ", TIMEOUT);
+    p.send_str("lamport");
+    p.wait_for("▸ lamport94", TIMEOUT);
+    p.send_keys(&["Enter"]);
+    p.wait_for("\\cite{lamport94}\\cite{knuth84}", TIMEOUT);
+    wait_status(&p, "Col 17");
+    abandon(&mut p);
+}
+
+#[test]
+fn with_no_bibliography_typing_is_left_alone_and_asking_says_so() {
+    let env = Env::new();
+    let paper = work_file(&env, "paper.tex", "x\n");
+    let mut p = open_writing(&env, &paper, "");
+    p.send_str("\\cite{");
+    p.wait_for("\\cite{x", TIMEOUT);
+    assert!(!p.screen().contains(" Cite "), "{}", p.dump());
+    esc_then(&mut p, "q");
+    p.wait_for("No references", TIMEOUT);
+    abandon(&mut p);
+}
+
+#[test]
+fn the_bibliography_the_paper_names_wins_over_one_beside_it() {
+    let env = Env::new();
+    let paper = work_file(&env, "paper.tex", "\\bibliography{lib/mine}\n");
+    let dir = paper.parent().unwrap();
+    fs::write(dir.join("other.bib"), "@misc{ignored, title = {No}}\n").unwrap();
+    fs::create_dir(dir.join("lib")).unwrap();
+    fs::write(dir.join("lib/mine.bib"), "@misc{chosen, title = {Yes}}\n").unwrap();
+    let mut p = open_writing(&env, &paper, "");
+    esc_then_box(&mut p);
+    p.wait_for("chosen  Yes", TIMEOUT);
+    assert!(!p.screen().contains("ignored"), "{}", p.dump());
+    p.send_keys(&["Esc"]);
+    wait_insert(&p);
+    abandon(&mut p);
+}
+
+fn esc_then_box(p: &mut Pty) {
+    open_overlay(p);
+    p.send_str("q");
+    p.wait_for(" Cite ", TIMEOUT);
+}
+
+#[test]
+fn a_reference_added_but_not_yet_saved_can_be_cited() {
+    let env = Env::new();
+    let (paper, mut p) = open_paper(&env, "x\n");
+    let refs = paper.parent().unwrap().join("refs.bib");
+    open_from_prompt(&mut p, refs.to_str().unwrap());
+    p.wait_for("@article{knuth84", TIMEOUT);
+    p.send_str("@misc{fresh, title = {New}}");
+    p.send_keys(&["Enter"]);
+    p.wait_for("@misc{fresh", TIMEOUT);
+    esc_then(&mut p, ",");
+    wait_status(&p, "paper.tex");
+    esc_then_box(&mut p);
+    p.wait_for("fresh  New", TIMEOUT);
+    p.send_keys(&["Esc"]);
+    wait_insert(&p);
+    run_from_palette(&mut p, "Quit without saving");
+    p.wait_for("Discard unsaved changes", TIMEOUT);
+    p.send_str("y");
+    assert_eq!(p.wait_exit(TIMEOUT), 0);
+}
+
+#[test]
+fn other_files_type_cite_as_plain_text() {
+    let env = Env::new();
+    let f = work_file(&env, "notes.md", "x\n");
+    fs::write(f.parent().unwrap().join("refs.bib"), REFS).unwrap();
+    let mut p = open_writing(&env, &f, "");
+    p.send_str("\\cite{");
+    p.wait_for("\\cite{x", TIMEOUT);
+    assert!(!p.screen().contains(" Cite "), "{}", p.dump());
+    abandon(&mut p);
 }

@@ -3,6 +3,7 @@
 //! The binary in `main.rs` parses options and calls [`run`].
 
 pub mod app;
+pub mod bib;
 pub mod buffer;
 pub mod cli;
 pub mod clipboard;

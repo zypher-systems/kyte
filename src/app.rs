@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 
+use crate::bib;
 use crate::buffer::{Buffer, Edit, GroupKind, Indent};
 use crate::cli::Options;
 use crate::command::{self, Command};
@@ -909,7 +910,12 @@ impl App {
             Key::Ctrl('k') => self.open_universal(),
             Key::Ctrl('f') => self.open_search(),
             Key::Ctrl('r') => self.open_replace(),
-            Key::Char(c) => b.insert_str(&c.to_string(), GroupKind::Typing),
+            Key::Char(c) => {
+                b.insert_str(&c.to_string(), GroupKind::Typing);
+                if c == '{' && self.in_citation() {
+                    self.open_citations(false);
+                }
+            }
             Key::Enter => b.insert_newline(),
             Key::Tab => b.insert_tab(),
             Key::BackTab => b.shift_lines(true),
@@ -1142,6 +1148,9 @@ impl App {
             return rows;
         }
         rows.extend_from_slice(LEGEND);
+        if self.doc.prose == Some(Prose::Latex) {
+            rows.push(("q", "insert citation"));
+        }
         if self.checks_spelling() {
             if self.misspelled_at_cursor().is_some() {
                 rows.push(("z", "fix spelling"));
@@ -1191,6 +1200,7 @@ impl App {
             'h' => self.open_history(),
             'v' => self.open_reader(),
             't' => self.open_tree(),
+            'q' if self.doc.prose == Some(Prose::Latex) => self.insert_citation(),
             'z' => self.fix_spelling(),
             'm' => self.next_misspelling(),
             'b' => self.open_files_list(),
@@ -1542,6 +1552,7 @@ impl App {
             }
             Entry::Line(n) => self.go_to_line(n),
             Entry::OpenFile { at, .. } => self.show_file(at),
+            Entry::Citation { key, .. } => self.finish_citation(&key),
             Entry::Spelling { with, range } => {
                 let b = &mut self.doc.buffer;
                 b.move_to(range.end);
@@ -1587,6 +1598,14 @@ impl App {
 
     fn palette_key(&mut self, key: Key, mut state: PaletteState) {
         match key {
+            // A comma cites this work and leaves the box open for the next.
+            Key::Char(',') if state.is_citations() => {
+                if let Some(Entry::Citation { key, .. }) = state.selected_entry() {
+                    let text = format!("{key},");
+                    self.doc.buffer.insert_str(&text, GroupKind::Paste);
+                    state.set_query(String::new());
+                }
+            }
             Key::Esc => {
                 self.theme = state.theme_before().unwrap_or(self.theme);
                 self.mode = Mode::Insert;
@@ -1639,6 +1658,7 @@ impl App {
             }
             Command::ChooseTheme => self.mode = Mode::Palette(PaletteState::themes(self.theme)),
             Command::FileTree => self.open_tree(),
+            Command::InsertCitation => self.insert_citation(),
             Command::FixSpelling => self.fix_spelling(),
             Command::NextMisspelling => self.next_misspelling(),
             Command::ToggleSpelling => {
@@ -1990,6 +2010,92 @@ impl App {
         } else if self.mode == Mode::Insert {
             let name = path.file_name().unwrap_or_default().to_string_lossy();
             self.set_message(format!("Opened {name}"));
+        }
+    }
+
+    /// Whether the cursor is inside the braces of a citation command.
+    fn in_citation(&self) -> bool {
+        let b = &self.doc.buffer;
+        if self.doc.prose != Some(Prose::Latex) {
+            return false;
+        }
+        let line = b.cursor_line();
+        let upto = b.line_start(line)..b.cursor();
+        bib::in_citation(&b.slice_string(upto))
+    }
+
+    /// The text of the file at `path`, from the open copy if there is one, so
+    /// a reference added a moment ago counts before it's saved.
+    fn text_of(&self, path: &std::path::Path) -> Option<String> {
+        let target = fileio::resolve_target(path).ok();
+        let open = std::iter::once(&self.doc)
+            .chain(&self.parked)
+            .find(|d| d.swap_target.is_some() && d.swap_target == target);
+        match open {
+            Some(d) => Some(d.buffer.to_string()),
+            None => std::fs::read_to_string(path).ok(),
+        }
+    }
+
+    /// The works this LaTeX file can cite: from the bibliographies it names,
+    /// or failing that every `.bib` beside it.
+    fn references(&self) -> Vec<bib::Reference> {
+        let Some(dir) = self.doc.buffer.path().and_then(|p| p.parent()) else {
+            return Vec::new();
+        };
+        let named = bib::named_files(&self.doc.buffer.to_string(), dir);
+        let mut files: Vec<_> = named.into_iter().filter(|p| p.exists()).collect();
+        if files.is_empty() {
+            files = std::fs::read_dir(dir)
+                .map(|d| d.flatten().map(|e| e.path()).collect())
+                .unwrap_or_default();
+            files.retain(|p| p.extension().is_some_and(|e| e == "bib"));
+            files.sort();
+        }
+        let mut seen = std::collections::HashSet::new();
+        let texts = files.iter().filter_map(|p| self.text_of(p));
+        let refs = texts.flat_map(|t| bib::parse(&t));
+        refs.filter(|r| seen.insert(r.key.clone())).collect()
+    }
+
+    /// Opens the box of works to cite. It stays quiet when typing `\cite{` set
+    /// it off, because a person who has no `.bib` file isn't asking for one.
+    fn open_citations(&mut self, asked: bool) {
+        let refs = self.references();
+        if refs.is_empty() {
+            if asked {
+                self.set_message("No references: add a .bib file beside this one");
+            }
+            return;
+        }
+        let rows = refs.iter().map(|r| Entry::Citation {
+            key: r.key.clone(),
+            line: r.line(),
+        });
+        self.mode = Mode::Palette(PaletteState::citations(rows.collect()));
+    }
+
+    /// Inserts a citation at the cursor, starting the command if need be.
+    fn insert_citation(&mut self) {
+        if !self.in_citation() && !self.references().is_empty() {
+            self.doc.buffer.insert_str("\\cite{", GroupKind::Paste);
+        }
+        self.open_citations(true);
+    }
+
+    /// Puts in the last key of a citation and closes its braces.
+    fn finish_citation(&mut self, key: &str) {
+        let b = &mut self.doc.buffer;
+        let closed = b.rope().get_char(b.cursor()) == Some('}');
+        let text = if closed {
+            key.to_string()
+        } else {
+            format!("{key}}}")
+        };
+        b.insert_str(&text, GroupKind::Paste);
+        if closed {
+            let past = b.cursor() + 1;
+            b.move_to(past);
         }
     }
 

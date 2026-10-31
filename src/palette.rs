@@ -60,6 +60,11 @@ pub enum Entry {
     Find(String),
     /// A row of the theme picker.
     Theme(ThemeName),
+    /// A work to cite, shown as `line`.
+    Citation {
+        key: String,
+        line: String,
+    },
     /// A spelling to put in place of the characters at `range`.
     Spelling {
         with: String,
@@ -86,6 +91,7 @@ impl Entry {
             Entry::Find(q) => format!("Find {q}"),
             Entry::Theme(t) => t.label().to_string(),
             Entry::OpenFile { name, .. } => name.clone(),
+            Entry::Citation { line, .. } => line.clone(),
             Entry::Spelling { with, .. } => with.clone(),
             Entry::AddWord(word) => format!("Add {word} to my words"),
             Entry::IgnoreWord(word) => format!("Ignore {word} for now"),
@@ -98,6 +104,7 @@ impl Entry {
             Entry::File(_) => "file",
             Entry::Line(_)
             | Entry::Find(_)
+            | Entry::Citation { .. }
             | Entry::Spelling { .. }
             | Entry::AddWord(_)
             | Entry::IgnoreWord(_) => "",
@@ -167,6 +174,8 @@ enum Source {
     },
     /// The open files.
     OpenFiles(Arc<Vec<Entry>>),
+    /// The works to cite.
+    Citations(Arc<Vec<Entry>>),
     /// What to do about a misspelled word.
     Spelling {
         word: String,
@@ -219,6 +228,20 @@ impl PaletteState {
         state.set_query(String::new());
         state.selected = current;
         state
+    }
+
+    /// The works to cite.
+    pub fn citations(rows: Vec<Entry>) -> PaletteState {
+        let mut state = PaletteState {
+            source: Source::Citations(Arc::new(rows)),
+            ..PaletteState::default()
+        };
+        state.set_query(String::new());
+        state
+    }
+
+    pub fn is_citations(&self) -> bool {
+        matches!(self.source, Source::Citations(_))
     }
 
     /// What to do about the misspelled `word`.
@@ -279,12 +302,12 @@ impl PaletteState {
                 .filter(|t| score(&self.query, t.label()).is_some())
                 .map(Entry::Theme)
                 .collect(),
-            Source::OpenFiles(files) => {
+            Source::OpenFiles(files) | Source::Citations(files) => {
                 let mut scored: Vec<(i64, &Entry)> = files
                     .iter()
                     .filter_map(|f| file_score(&self.query, &f.label()).map(|s| (s, f)))
                     .collect();
-                // A stable sort, so an empty query keeps the files in order.
+                // A stable sort, so an empty query keeps the rows in order.
                 scored.sort_by_key(|(s, _)| std::cmp::Reverse(*s));
                 scored.into_iter().map(|(_, f)| f.clone()).collect()
             }
@@ -343,7 +366,7 @@ mod tests {
     #[test]
     fn empty_query_keeps_registry_order() {
         assert_eq!(filter(""), REGISTRY.to_vec());
-        assert_eq!(PaletteState::default().results.len(), 31);
+        assert_eq!(PaletteState::default().results.len(), 32);
     }
 
     #[test]
@@ -511,13 +534,13 @@ mod tests {
         for _ in 0..40 {
             s.down();
         }
-        assert_eq!(s.selected, 30);
+        assert_eq!(s.selected, 31);
         assert_eq!(s.selected_command(), Some(Command::ShowKeyHelp));
-        assert_eq!(s.scroll_offset(), 23);
+        assert_eq!(s.scroll_offset(), 24);
         s.push('s');
         assert_eq!(s.selected, 0);
         assert_eq!(s.selected_command(), Some(Command::Save));
         s.pop();
-        assert_eq!(s.results.len(), 31);
+        assert_eq!(s.results.len(), 32);
     }
 }

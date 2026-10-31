@@ -22,6 +22,7 @@ pub enum Command {
     ToggleWrap,
     ChooseTheme,
     FileTree,
+    InsertCitation,
     FixSpelling,
     NextMisspelling,
     ToggleSpelling,
@@ -57,6 +58,7 @@ pub const REGISTRY: &[Command] = &[
     Command::ToggleWrap,
     Command::ChooseTheme,
     Command::FileTree,
+    Command::InsertCitation,
     Command::FixSpelling,
     Command::NextMisspelling,
     Command::ToggleSpelling,
@@ -93,6 +95,7 @@ impl Command {
             Command::ToggleWrap => "Toggle soft wrap",
             Command::ChooseTheme => "Choose theme",
             Command::FileTree => "File tree",
+            Command::InsertCitation => "Insert citation",
             Command::FixSpelling => "Fix spelling",
             Command::NextMisspelling => "Next misspelling",
             Command::ToggleSpelling => "Toggle spell check",
@@ -130,6 +133,7 @@ impl Command {
             Command::ToggleWrap => "",
             Command::ChooseTheme => "",
             Command::FileTree => "Ctrl-T",
+            Command::InsertCitation => "Esc q",
             Command::FixSpelling => "Esc z",
             Command::NextMisspelling => "Esc m",
             Command::ToggleSpelling => "",
@@ -202,7 +206,7 @@ mod tests {
 
     #[test]
     fn every_command_has_a_label() {
-        assert_eq!(REGISTRY.len(), 31);
+        assert_eq!(REGISTRY.len(), 32);
         let labels: Vec<&str> = REGISTRY.iter().map(|c| c.label()).collect();
         assert_eq!(
             labels,
@@ -226,6 +230,7 @@ mod tests {
                 "Toggle soft wrap",
                 "Choose theme",
                 "File tree",
+                "Insert citation",
                 "Fix spelling",
                 "Next misspelling",
                 "Toggle spell check",

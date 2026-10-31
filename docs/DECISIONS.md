@@ -46,6 +46,16 @@ These replace the matching parts of `ARCHITECTURE`. `docs/ROADMAP.md` holds the 
 - `tests/fixtures/settings.toml` keeps the writing setup off for the end-to-end tests, which are about editing and mostly use `.txt` files. The writing tests turn it back on.
 - BibTeX files aren't spell checked. They're mostly names and titles, in a format that isn't prose.
 
+## Citations
+
+- The box opens by itself on `\\cite{`, because that's the moment the key is wanted and few people remember keys. It's centered like every other list, and stays quiet if there's nothing to offer, because someone with no `.bib` file isn't asking for one.
+- Any command with `cite` in its name counts, which covers natbib and biblatex without a list to keep up to date.
+- `.bib` files are read by a small scanner rather than the grammar, so a half-written entry doesn't cost the others, and it works in builds without highlighting. They're read each time the box opens, so a new entry shows at once. An open copy wins over the one on disk.
+- Works are filtered on key, author and title and ranked best first, because the title is what people remember.
+- A comma keeps the box open, since `\\cite{a,b}` is common and a comma can't be part of what you're searching for.
+- A named bibliography wins over one that merely sits beside the paper, because a folder can hold several.
+- Only LaTeX gets this. Pandoc's `[@key]` in Markdown could use the same box.
+
 ## File tree
 
 - The tree is a box in the middle of the screen, not a sidebar. It's something you pick from, so it follows the rule for menus, and it leaves the text its full width.

@@ -129,6 +129,7 @@ The menu changes with where you are, and only lists what works there:
 | Where | Extra keys |
 | --- | --- |
 | On a bracket with a partner | `i` select inside |
+| In LaTeX | `q` insert citation |
 | In writing | `m` next misspelling, and `z` fix spelling on a misspelled word |
 | With more than one file open | `b` open files, `.` next file, `,` previous file |
 | In a file with a line comment syntax | `#` comment or uncomment the line |
@@ -157,7 +158,7 @@ Under tmux, set `tmux set -g escape-time 10`. tmux's default of 500 ms delays ev
 
 Esc Esc (or Ctrl-P) opens a fuzzy-filtered list. Type to filter, Up and Down to select, Enter to run, Esc to close without running anything.
 
-Commands: Save, Save as, Open file, Quit, Quit without saving, Undo, Redo, Cut, Copy, Paste, Select all, Find, Replace, Go to line, Toggle line numbers, Toggle tabs and spaces, Toggle soft wrap, Choose theme, File tree, Fix spelling, Next misspelling, Toggle spell check, Open files, Next file, Previous file, Close file, Show key help.
+Commands: Save, Save as, Open file, Quit, Quit without saving, Undo, Redo, Cut, Copy, Paste, Select all, Find, Replace, Go to line, Toggle line numbers, Toggle tabs and spaces, Toggle soft wrap, Choose theme, File tree, Insert citation, Fix spelling, Next misspelling, Toggle spell check, Open files, Next file, Previous file, Close file, Show key help.
 
 Kyte works out whether a file indents with tabs or spaces, and how many, from its first 10,000 lines. A file with no indent uses tabs. The status bar shows `Spaces N` for space-indented files. **Toggle tabs and spaces** changes what new indent uses until the file is closed; it doesn't rewrite existing lines.
 
@@ -247,6 +248,12 @@ Markdown, text and LaTeX files open for writing. Long lines wrap, the status bar
 The word count in LaTeX covers what a reader reads: the document body, without commands, math, comments, citations or labels. It catches up when you stop typing for a moment. In other files it's live. Files over 2 MiB don't show one.
 
 Spell check uses a built-in American English dictionary, so it needs nothing installed. Esc `m` moves to the next misspelling. On a misspelled word, Esc `z` opens a box of suggestions. It can also add the word to your words, or ignore it until Kyte closes. Your words are kept in `words.txt` beside the settings file, one per line, so you can edit them. Kyte leaves alone what isn't prose, such as LaTeX commands, math and citation keys, code in Markdown, and web addresses. It also skips words with a digit or written in capitals or mixed case, such as `LSTM` and `arXiv`.
+
+### Citations
+
+In a LaTeX file, finishing `\\cite{` opens a box of the works in your bibliography. So do `\\citep{`, `\\autocite{`, `\\parencite[p. 3]{` and any other citation command. Type to filter by key, author or title. Enter puts in the key and closes the braces, a comma puts it in and stays open for the next, and Esc leaves what you typed. Esc `q` (**Insert citation**) does the same from anywhere: it fills in the braces at the cursor, or starts a `\\cite{`.
+
+The works come from the files named by `\\bibliography{}` or `\\addbibresource{}`, and failing that from every `.bib` beside the paper. A `.bib` file open in Kyte counts as it stands, saved or not.
 
 ## Soft wrap
 
