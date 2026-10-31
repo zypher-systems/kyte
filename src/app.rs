@@ -105,6 +105,10 @@ pub enum Prompt {
         path: std::path::PathBuf,
         then: After,
     },
+    /// "Quit without saving" with `count` other files unsaved.
+    ConfirmDiscardOthers {
+        count: usize,
+    },
 }
 
 /// What a save was for.
@@ -112,7 +116,8 @@ pub enum Prompt {
 pub enum After {
     Stay,
     Quit,
-    Open(std::path::PathBuf),
+    /// Close the file on screen.
+    Close,
 }
 
 /// A review of outside changes in progress.
@@ -185,6 +190,8 @@ pub struct Doc {
     pub buffer: Buffer,
     /// Leave the swap on disk at exit (Recover modal `q`).
     pub keep_swap: bool,
+    /// While quitting, the answer was to discard this file's changes.
+    discard: bool,
     swap: Option<SwapWriter>,
     /// Canonical path the swap is keyed by.
     swap_target: Option<std::path::PathBuf>,
@@ -215,6 +222,7 @@ impl Doc {
         Doc {
             buffer,
             keep_swap: false,
+            discard: false,
             swap,
             swap_target,
             disk,
@@ -229,10 +237,94 @@ impl Doc {
             scroll_row: 0,
         }
     }
+
+    fn name(&self) -> String {
+        self.buffer
+            .path()
+            .and_then(|p| p.file_name())
+            .map_or("Untitled".to_string(), |n| n.to_string_lossy().into_owned())
+    }
+
+    /// Whether this is the empty file Kyte starts with when given none. It
+    /// gives way to the first file opened.
+    fn is_blank(&self) -> bool {
+        self.buffer.path().is_none()
+            && !self.buffer.is_dirty()
+            && self.buffer.rope().len_chars() == 0
+    }
+
+    /// Whether a crash now could lose this file's edits.
+    fn unprotected(&self) -> bool {
+        self.swap.is_none() || self.swap_failed
+    }
+
+    /// Whether quitting has to ask about this file.
+    fn needs_answer(&self) -> bool {
+        self.buffer.is_dirty() && !self.discard
+    }
+
+    /// Syncs the swap and history to disk. Returns what went wrong.
+    fn sync(&mut self) -> Option<String> {
+        if let Some(w) = self.swap.as_mut() {
+            if let Err(e) = w.fsync_if_pending() {
+                self.swap_failed = true;
+                return Some(format!("Swap fsync failed: {e}"));
+            }
+        }
+        if let Some(h) = self.history.as_mut() {
+            if let Err(e) = h.fsync_if_pending() {
+                self.history = None;
+                self.history_failed = true;
+                return Some(format!("History write failed: {e}"));
+            }
+        }
+        None
+    }
+
+    /// Looks for a change on disk. Returns whether the answer moved.
+    fn check_disk(&mut self) -> bool {
+        let Some(path) = self.buffer.path().map(|p| p.to_path_buf()) else {
+            return false;
+        };
+        let Ok(meta) = std::fs::metadata(&path) else {
+            return false;
+        };
+        let stamp = meta.modified().ok().map(|t| (meta.len(), t));
+        if stamp == self.disk_stamp {
+            return false;
+        }
+        self.disk_stamp = stamp;
+        let changed = matches!(fileio::disk_state(&path), Ok(Some(s)) if Some(s) != self.disk);
+        let moved = changed != self.outside_change;
+        self.outside_change = changed;
+        moved
+    }
+
+    /// Ends this file's session: closes its history and removes its swap,
+    /// unless the swap must stay.
+    fn close(&mut self) {
+        let text = self.buffer.rope().clone();
+        if let Some(h) = self.history.as_mut() {
+            let _ = h.close(&text);
+        }
+        self.history = None;
+        if let Some(w) = self.swap.take() {
+            if self.keep_swap {
+                let _ = { w }.fsync_if_pending();
+            } else {
+                let _ = w.remove();
+            }
+        }
+    }
 }
 
 pub struct App {
     pub doc: Doc,
+    /// The other open files, in order. The file on screen sits before `parked[at]`.
+    parked: Vec<Doc>,
+    at: usize,
+    /// Files from the command line still to open.
+    queued: std::collections::VecDeque<std::path::PathBuf>,
     pub mode: Mode,
     /// Shown on the message line until the next key.
     pub message: Option<String>,
@@ -295,6 +387,9 @@ impl App {
         buffer.default_indent_to(opts.default_indent);
         App {
             doc: Doc::new(buffer, swap),
+            parked: Vec::new(),
+            at: 0,
+            queued: Default::default(),
             esc_tail: None,
             clipboard: String::new(),
             clipboard_whole_line: false,
@@ -581,17 +676,10 @@ impl App {
         self.doc.swap.as_ref().map(|w| w.path())
     }
 
-    /// Called once after the event loop: removes the swap unless it must be kept.
+    /// Called once after the event loop: removes the swaps unless they must be kept.
     pub fn finish(&mut self) {
-        let text = self.doc.buffer.rope().clone();
-        self.with_history(|h| h.close(&text));
-        if let Some(w) = self.doc.swap.take() {
-            if self.doc.keep_swap {
-                let _ = { w }.fsync_if_pending();
-            } else {
-                let _ = w.remove();
-            }
-        }
+        self.doc.close();
+        self.parked.iter_mut().for_each(Doc::close);
     }
 
     fn key_inner(&mut self, key: Key, now: Instant) {
@@ -659,9 +747,15 @@ impl App {
                 }
                 Key::Char('n') => {
                     self.mode = Mode::Insert;
+                    self.doc.discard = then == After::Quit;
                     self.after_save(then);
                 }
                 Key::Esc => self.mode = Mode::Insert,
+                _ => {}
+            },
+            Mode::Prompt(Prompt::ConfirmDiscardOthers { .. }) => match key {
+                Key::Char('y') => self.quit = true,
+                Key::Char('n') | Key::Esc => self.mode = Mode::Insert,
                 _ => {}
             },
             Mode::Prompt(Prompt::ConfirmSave { risk, path, then }) => match key {
@@ -729,7 +823,8 @@ impl App {
             }
             Key::Char('q') | Key::Esc => {
                 self.doc.keep_swap = true;
-                self.quit = true;
+                self.mode = Mode::Insert;
+                self.close_file_now();
             }
             _ => {}
         }
@@ -785,6 +880,7 @@ impl App {
             Key::Ctrl('s') => self.save(),
             Key::Ctrl('o') => self.open_prompt(),
             Key::Ctrl('q') => self.request_quit(),
+            Key::Ctrl('w') => self.close_file(),
             Key::Ctrl('z') => self.undo(),
             Key::Ctrl('y') => self.redo(),
             _ => {}
@@ -974,6 +1070,13 @@ impl App {
             return rows;
         }
         rows.extend_from_slice(LEGEND);
+        if self.open_count() > 1 {
+            rows.extend([
+                ("b", "open files"),
+                (".", "next file"),
+                (",", "previous file"),
+            ]);
+        }
         if self.doc.outside_change {
             rows.push(("c", "review outside changes"));
         }
@@ -1009,6 +1112,9 @@ impl App {
             's' => self.save(),
             'h' => self.open_history(),
             'v' => self.open_reader(),
+            'b' => self.open_files_list(),
+            '.' => self.next_file(1),
+            ',' => self.next_file(self.open_count() - 1),
             'c' if self.doc.outside_change => self.open_review(),
             'i' if self.on_bracket() => self.select_inside_brackets(),
             '#' => self.toggle_comment(),
@@ -1354,6 +1460,7 @@ impl App {
                 }
             }
             Entry::Line(n) => self.go_to_line(n),
+            Entry::OpenFile { at, .. } => self.show_file(at),
             Entry::Theme(t) => {
                 self.theme = t;
                 let name = t.label();
@@ -1430,6 +1537,10 @@ impl App {
                 self.doc.scroll_left = 0;
             }
             Command::ChooseTheme => self.mode = Mode::Palette(PaletteState::themes(self.theme)),
+            Command::OpenFiles => self.open_files_list(),
+            Command::NextFile => self.next_file(1),
+            Command::PreviousFile => self.next_file(self.open_count() - 1),
+            Command::CloseFile => self.close_file(),
             Command::History => self.open_history(),
             Command::Reader => self.open_reader(),
             Command::Settings => self.open_settings(),
@@ -1581,13 +1692,16 @@ impl App {
             .last_fsync
             .is_none_or(|t| now.saturating_duration_since(t) >= Duration::from_secs(1));
         if due {
-            if let Some(w) = self.doc.swap.as_mut() {
-                if let Err(e) = w.fsync_if_pending() {
-                    self.doc.swap_failed = true;
-                    self.set_error(format!("Swap fsync failed: {e}"));
-                }
+            if let Some(e) = self.doc.sync() {
+                self.set_error(e);
             }
-            self.with_history(|h| h.fsync_if_pending());
+            for i in 0..self.parked.len() {
+                if let Some(e) = self.parked[i].sync() {
+                    let name = self.parked[i].name();
+                    self.set_error(format!("{name}: {e}"));
+                }
+                self.parked[i].check_disk();
+            }
             self.check_disk();
             self.last_fsync = Some(now);
         }
@@ -1691,30 +1805,37 @@ impl App {
         }
         let path = fileio::absolute(&fileio::expand_tilde(text)).map_err(|e| e.to_string())?;
         let target = fileio::resolve_target(&path).map_err(|e| e.to_string())?;
-        if Some(&target) != self.doc.swap_target.as_ref() {
+        if self.place_of(&target).is_none() {
             session::check(&path)?;
         }
         self.mode = Mode::Insert;
-        if self.doc.buffer.is_dirty() {
-            self.mode = Mode::Prompt(Prompt::ConfirmLeave {
-                then: After::Open(path),
-            });
-        } else {
-            self.switch_to(&path);
-        }
+        self.open_file(&path, &target);
         Ok(())
     }
 
-    /// Leaves the current buffer for `path`. Anything unsaved in it is gone.
-    fn switch_to(&mut self, path: &std::path::Path) {
-        let same = fileio::resolve_target(path).ok() == self.doc.swap_target
-            && self.doc.swap_target.is_some();
-        if same {
-            // Its swap holds what was just discarded.
-            if let Some(old) = self.doc.swap.take() {
-                let _ = old.remove();
-            }
+    /// Shows the file at `path`, opening it if it isn't open. A file is never
+    /// open twice: Kyte doesn't guard against itself, so a second copy would
+    /// take over the first one's swap.
+    fn open_file(&mut self, path: &std::path::Path, target: &std::path::Path) {
+        match self.place_of(target) {
+            Some(place) if place == self.at => self.set_message("Already open"),
+            Some(place) => self.show_file(place),
+            None => self.add_doc(path),
         }
+    }
+
+    /// Where the file with this canonical path is among the open files.
+    fn place_of(&self, target: &std::path::Path) -> Option<usize> {
+        let held = |d: &Doc| d.swap_target.as_deref() == Some(target);
+        if held(&self.doc) {
+            return Some(self.at);
+        }
+        let i = self.parked.iter().position(held)?;
+        Some(if i < self.at { i } else { i + 1 })
+    }
+
+    /// Opens `path` as a new file, next to the one on screen, which stays open.
+    fn add_doc(&mut self, path: &std::path::Path) {
         let opened = match session::open(path, false) {
             Ok(o) => o,
             Err(e) => {
@@ -1722,7 +1843,7 @@ impl App {
                 return;
             }
         };
-        let (buffer, swap, recover, warning) = match opened {
+        let (mut buffer, swap, recover, warning) = match opened {
             Opened::Ready {
                 buffer,
                 swap,
@@ -1734,31 +1855,159 @@ impl App {
                 return;
             }
         };
-        if let Some(old) = self.doc.swap.take() {
-            let _ = old.remove();
-        }
-        self.doc.swap_target = buffer.path().and_then(|p| fileio::resolve_target(p).ok());
-        self.doc.disk = Some(DiskState::of_rope(buffer.rope()));
-        self.doc.disk_text = Some(buffer.rope().clone());
-        self.doc.disk_stamp = None;
-        self.doc.outside_change = false;
-        let mut buffer = buffer;
+        self.flush_edits();
         buffer.default_indent_to(self.default_indent);
-        let closing = self.doc.buffer.rope().clone();
-        self.with_history(|h| h.close(&closing));
-        self.doc.buffer = buffer;
-        self.doc.swap = swap;
-        self.doc.swap_failed = false;
+        let mut old = std::mem::replace(&mut self.doc, Doc::new(buffer, swap));
+        if old.is_blank() {
+            old.close();
+        } else {
+            self.parked.insert(self.at, old);
+            self.at += 1;
+        }
+        self.visual_col = None;
         self.start_history();
-        self.doc.scroll_top = 0;
-        self.doc.scroll_left = 0;
-        self.doc.scroll_row = 0;
         self.mode = recover.map_or(Mode::Insert, Mode::Recover);
         if let Some(w) = warning {
             self.set_error(w);
         } else if self.mode == Mode::Insert {
             let name = path.file_name().unwrap_or_default().to_string_lossy();
             self.set_message(format!("Opened {name}"));
+        }
+    }
+
+    /// How many files are open.
+    pub fn open_count(&self) -> usize {
+        self.parked.len() + 1
+    }
+
+    /// Puts the file at `place` on screen. The one there stays open.
+    fn show_file(&mut self, place: usize) {
+        if place == self.at || place >= self.open_count() {
+            return;
+        }
+        self.flush_edits();
+        let (from, back) = if place < self.at {
+            (place, self.at - 1)
+        } else {
+            (place - 1, self.at)
+        };
+        let next = self.parked.remove(from);
+        let old = std::mem::replace(&mut self.doc, next);
+        self.parked.insert(back, old);
+        self.at = place;
+        self.visual_col = None;
+    }
+
+    /// Moves `step` files on, wrapping around.
+    fn next_file(&mut self, step: usize) {
+        if self.open_count() == 1 {
+            self.set_message("Only one file is open");
+        } else {
+            self.show_file((self.at + step) % self.open_count());
+        }
+    }
+
+    /// Opens the list of open files.
+    fn open_files_list(&mut self) {
+        let row = |at, d: &Doc| {
+            let name = d.buffer.path().map_or("Untitled".to_string(), |p| {
+                let cwd = std::env::current_dir().unwrap_or_default();
+                p.strip_prefix(cwd).unwrap_or(p).display().to_string()
+            });
+            let note = if d.buffer.is_dirty() {
+                "unsaved"
+            } else if d.outside_change {
+                "changed"
+            } else {
+                ""
+            };
+            Entry::OpenFile { at, name, note }
+        };
+        let (before, after) = self.parked.split_at(self.at);
+        let docs = before.iter().chain([&self.doc]).chain(after);
+        let rows = docs.enumerate().map(|(i, d)| row(i, d)).collect();
+        self.mode = Mode::Palette(PaletteState::open_files(rows, self.at));
+    }
+
+    /// Ctrl-W: closes the file on screen, asking first if it's unsaved.
+    fn close_file(&mut self) {
+        if self.doc.buffer.is_dirty() {
+            self.mode = Mode::Prompt(Prompt::ConfirmLeave { then: After::Close });
+        } else {
+            self.close_file_now();
+        }
+    }
+
+    /// Closes the file on screen. Closing the last one quits.
+    fn close_file_now(&mut self) {
+        if self.parked.is_empty() {
+            self.quit = true;
+            return;
+        }
+        self.at = self.at.min(self.parked.len() - 1);
+        let mut old = std::mem::replace(&mut self.doc, self.parked.remove(self.at));
+        old.close();
+        self.visual_col = None;
+    }
+
+    /// Queues files from the command line, opened once the first is settled.
+    pub fn queue_files(&mut self, files: Vec<std::path::PathBuf>) {
+        self.queued = files.into();
+    }
+
+    /// Opens queued files, stopping for any that has a question to answer.
+    /// The first file named is the one on screen at the end.
+    pub fn open_queued(&mut self) {
+        if self.queued.is_empty() || self.mode != Mode::Insert {
+            return;
+        }
+        let before = self.message.take();
+        let before_is_error = self.message_is_error;
+        let mut trouble = None;
+        while self.mode == Mode::Insert {
+            self.message_is_error = false;
+            let Some(file) = self.queued.pop_front() else {
+                self.show_file(0);
+                break;
+            };
+            match fileio::absolute(&file).and_then(|p| Ok((fileio::resolve_target(&p)?, p))) {
+                Ok((target, path)) => self.open_file(&path, &target),
+                Err(e) => self.set_error(format!("Can't open {}: {e}", file.display())),
+            }
+            if self.message_is_error {
+                trouble = trouble.or(self.message.take());
+            }
+            self.message = None;
+        }
+        self.message_is_error = trouble.is_some() || before_is_error;
+        self.message = trouble.or(before);
+    }
+
+    /// The status bar's word on the other files, when there are any.
+    pub fn files_summary(&self) -> Option<String> {
+        if self.parked.is_empty() {
+            return None;
+        }
+        let unsaved = self.parked.iter().filter(|d| d.buffer.is_dirty()).count();
+        let place = format!("file {} of {}", self.at + 1, self.open_count());
+        Some(if unsaved > 0 {
+            format!("{place}, {unsaved} more unsaved")
+        } else {
+            place
+        })
+    }
+
+    /// How many other open files have no working swap.
+    pub fn unprotected_others(&self) -> usize {
+        self.parked.iter().filter(|d| d.unprotected()).count()
+    }
+
+    /// The title of the unsaved changes question.
+    pub fn unsaved_title(&self) -> String {
+        if self.parked.is_empty() {
+            "Unsaved changes".to_string()
+        } else {
+            format!("Unsaved changes in {}", self.doc.name())
         }
     }
 
@@ -1848,20 +2097,7 @@ impl App {
         if matches!(self.mode, Mode::Recover(_) | Mode::Review(_)) {
             return;
         }
-        let Some(path) = self.doc.buffer.path().map(|p| p.to_path_buf()) else {
-            return;
-        };
-        let Ok(meta) = std::fs::metadata(&path) else {
-            return;
-        };
-        let stamp = meta.modified().ok().map(|t| (meta.len(), t));
-        if stamp == self.doc.disk_stamp {
-            return;
-        }
-        self.doc.disk_stamp = stamp;
-        let changed = matches!(fileio::disk_state(&path), Ok(Some(s)) if Some(s) != self.doc.disk);
-        if changed != self.doc.outside_change {
-            self.doc.outside_change = changed;
+        if self.doc.check_disk() {
             self.needs_redraw = true;
         }
     }
@@ -2115,8 +2351,8 @@ impl App {
     fn after_save(&mut self, then: After) {
         match then {
             After::Stay => {}
-            After::Quit => self.quit = true,
-            After::Open(path) => self.switch_to(&path),
+            After::Quit => self.quit_next(),
+            After::Close => self.close_file_now(),
         }
     }
 
@@ -2135,6 +2371,9 @@ impl App {
             self.mode = Mode::Insert;
             self.save_after(path, None, then);
             return Ok(());
+        }
+        if self.place_of(&target).is_some() {
+            return Err("That file is open here; close it first".to_string());
         }
         if let Ok(SwapStatus::LiveLock { pid }) = swap::inspect(&target, b"") {
             return Err(format!("Open in another kyte (PID {pid})"));
@@ -2241,16 +2480,34 @@ impl App {
 
     /// Ctrl-Q: quit now when clean, otherwise ask.
     pub fn request_quit(&mut self) {
-        if self.doc.buffer.is_dirty() {
-            self.mode = Mode::Prompt(Prompt::ConfirmLeave { then: After::Quit });
+        self.doc.discard = false;
+        self.parked.iter_mut().for_each(|d| d.discard = false);
+        self.quit_next();
+    }
+
+    /// Asks about the next unsaved file, or quits once none is left.
+    fn quit_next(&mut self) {
+        if !self.doc.needs_answer() {
+            match self.parked.iter().position(Doc::needs_answer) {
+                Some(i) => self.show_file(if i < self.at { i } else { i + 1 }),
+                None => {
+                    self.quit = true;
+                    return;
+                }
+            }
+        }
+        self.mode = Mode::Prompt(Prompt::ConfirmLeave { then: After::Quit });
+    }
+
+    /// Quits discarding changes ("Quit without saving"). Asks first if that
+    /// would lose changes in files not on screen.
+    pub fn discard_and_quit(&mut self) {
+        let count = self.parked.iter().filter(|d| d.buffer.is_dirty()).count();
+        if count > 0 {
+            self.mode = Mode::Prompt(Prompt::ConfirmDiscardOthers { count });
         } else {
             self.quit = true;
         }
-    }
-
-    /// Quits discarding changes ("Quit without saving").
-    pub fn discard_and_quit(&mut self) {
-        self.quit = true;
     }
 
     /// Label for the status bar mode field.
@@ -2272,6 +2529,7 @@ impl App {
             Mode::Reader => "READER",
             Mode::Review(_) => "REVIEW",
             Mode::Prompt(Prompt::ConfirmDeleteHistory) => "DELETE?",
+            Mode::Prompt(Prompt::ConfirmDiscardOthers { .. }) => "DISCARD?",
             Mode::Help { .. } => "HELP",
             Mode::Recover(_) => "RECOVER",
         }

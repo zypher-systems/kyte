@@ -46,7 +46,7 @@ Kyte makes no network connections and sends no telemetry.
 ## Usage
 
 ```
-kyte [OPTIONS] [FILE]
+kyte [OPTIONS] [FILE]...
 ```
 
 | Option | Meaning |
@@ -88,7 +88,8 @@ Environment variables: `KYTE_STATE_DIR` (where swap files go; overrides the defa
 | Ctrl-X, Ctrl-C, Ctrl-V | Cut, copy, paste. With nothing selected, cut and copy take the whole line, and a whole line pastes above the current one |
 | Ctrl-S | Save. With no file name, Kyte asks for one |
 | Ctrl-O | Open another file |
-| Ctrl-Q | Quit. With unsaved changes, Kyte asks first: `y` saves and quits, `n` discards, Esc cancels |
+| Ctrl-W | Close the file. With unsaved changes, Kyte asks first. Closing the last file quits |
+| Ctrl-Q | Quit. Kyte asks about each file with unsaved changes: `y` saves it, `n` discards it, Esc cancels |
 | Ctrl-Z, Ctrl-Y | Undo, redo |
 | Ctrl-F | Search |
 | Ctrl-R | Replace |
@@ -126,6 +127,7 @@ The menu changes with where you are, and only lists what works there:
 | Where | Extra keys |
 | --- | --- |
 | On a bracket with a partner | `i` select inside |
+| With more than one file open | `b` open files, `.` next file, `,` previous file |
 | In a file with a line comment syntax | `#` comment or uncomment the line |
 | In any language Kyte highlights | `e` select the syntax under the cursor |
 | In Rust, Python, Bash, JavaScript, TypeScript, C, C++ or Go | `f` select function, `n` and `p` next and previous function |
@@ -152,13 +154,17 @@ Under tmux, set `tmux set -g escape-time 10`. tmux's default of 500 ms delays ev
 
 Esc Esc (or Ctrl-P) opens a fuzzy-filtered list. Type to filter, Up and Down to select, Enter to run, Esc to close without running anything.
 
-Commands: Save, Save as, Open file, Quit, Quit without saving, Undo, Redo, Cut, Copy, Paste, Select all, Find, Replace, Go to line, Toggle line numbers, Toggle tabs and spaces, Toggle soft wrap, Choose theme, Show key help.
+Commands: Save, Save as, Open file, Quit, Quit without saving, Undo, Redo, Cut, Copy, Paste, Select all, Find, Replace, Go to line, Toggle line numbers, Toggle tabs and spaces, Toggle soft wrap, Choose theme, Open files, Next file, Previous file, Close file, Show key help.
 
 Kyte works out whether a file indents with tabs or spaces, and how many, from its first 10,000 lines. A file with no indent uses tabs. The status bar shows `Spaces N` for space-indented files. **Toggle tabs and spaces** changes what new indent uses until the file is closed; it doesn't rewrite existing lines.
 
 **Save as** asks for a file name, starting from the current one; `~/` means your home directory, and Tab completes the path. It asks before overwriting a file, and refuses a file another Kyte has open. The buffer then belongs to the new file, and the old file stays as it was.
 
-**Open file** (Ctrl-O) asks for a path, starting in the current file's directory. Tab completes it, and lists the matches in a floating box when there's more than one. A path that doesn't exist yet opens as a new file. Kyte holds one file at a time, so opening another replaces the current one, and if you have unsaved changes it asks first: `y` saves them, `n` discards them, Esc cancels. If the new file left a crashed session behind, Kyte offers to recover it; quitting that offer closes Kyte.
+**Open file** (Ctrl-O) asks for a path, starting in the current file's directory. Tab completes it, and lists the matches in a floating box when there's more than one. A path that doesn't exist yet opens as a new file. The file you were in stays open, unsaved changes and all, and a file that's already open is shown rather than opened again. If the new file left a crashed session behind, Kyte offers to recover it; leaving that offer closes the new file, or quits if it's the only one.
+
+**Open files** (Esc `b`) lists what's open, marked `unsaved` or `changed` where that applies. Type to filter, Up and Down to select, Enter to go there. **Next file** and **Previous file** (Esc `.` and Esc `,`) move through them in order, and the status bar shows which you're in, such as `file 2 of 3`. Each file keeps its own cursor, undo, swap and history. **Close file** (Ctrl-W) closes the one on screen. Kyte can also start with several: `kyte a.txt b.txt`.
+
+**Quit without saving** asks first if a file not on screen has unsaved changes.
 
 **Go to line** asks for a 1-based line number. Numbers past the end go to the last line, and anything that is not a number shows an error. **Show key help** shows the key table; Up and Down scroll it, and Esc closes it.
 
@@ -326,10 +332,11 @@ These Docker files have not been run yet, because the build machine had no Docke
 - UTF-8 files only (others are refused and left untouched).
 - Kyte keeps each line's ending as it is. New lines use the ending most of the file uses, and the status bar shows `CRLF` for those files. It doesn't convert a file from one to the other. A `\r` that isn't part of a line ending shows as a control picture.
 - Linux only (the swap lock checks `/proc`).
+- After a crash, Kyte offers to recover each file when that file is opened again. It doesn't list them for you.
 - Files over 512 KiB aren't syntax highlighted, because each keystroke re-parses the file. Typing takes under about 25 ms per key at 100 KB, and 60 to 115 ms near the limit, depending on the language.
 - Search takes under about 30 ms per key on a 38 MB ASCII file. On a file that size with non-ASCII text, ignoring case takes about 240 ms per key.
 - A very long single line costs more per keystroke, depending on what's in it. At the end of a 5 MB line on the build machine, plain ASCII takes about 8 ms, a line full of tabs about 45 ms, and CJK text about 170 ms.
-- Not in this version: file tree, mouse, multiple buffers or splits, LSP, plugins, CRLF conversion, non-UTF-8 files, RPM/COPR packaging, and use as the default `$EDITOR`.
+- Not in this version: file tree, mouse, splits, LSP, plugins, CRLF conversion, non-UTF-8 files, RPM/COPR packaging, and use as the default `$EDITOR`.
 
 ## Documentation
 

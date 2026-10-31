@@ -12,6 +12,19 @@ These replace the matching parts of `ARCHITECTURE`. `docs/ROADMAP.md` holds the 
 - License: MIT. This settles section 16 and the section 4 note.
 - Kyte isn't tied to any one OS. It's meant to be open source for everyone.
 
+## Several open files
+
+- `App` holds the file on screen in `doc` and the rest in `parked`. Everything tied to one file moved into `Doc`, and what belongs to a modal screen stayed on `App`, because you can only change files from the editor itself.
+- A file is never open twice. Kyte's swap lock ignores its own process, so a second copy would take over the first one's swap and overwrite it. Every way in checks the canonical path first: Ctrl-O, Ctrl-K, the command line and Save As. Opening a file that's open shows it.
+- That ends one old behavior: opening the current file again used to reload it, discarding changes. It now says `Already open`. Discarding means Ctrl-W, then `n`, then opening it.
+- Ctrl-O no longer asks about unsaved changes, because nothing is lost: the file stays open. Quit does the asking. It walks every unsaved file, showing each, and Esc at any point keeps them all. Answers of `n` only take effect if the walk finishes.
+- **Quit without saving** used to quit unconditionally. It still does for the file on screen, but asks if another file has changes, since those aren't in view.
+- Swaps and histories of files not on screen are synced with the rest, and the status bar reports a file with no working swap even when it isn't the one showing.
+- The empty file Kyte starts with gives way to the first file opened, so the count stays honest. With text in it, it stays. That's why there's at most one untitled file, and no New file command yet: `SwapWriter::create_untitled_in` names swaps by process, so a second untitled file would need a different name.
+- Files on the command line open one at a time, stopping for any with crashed edits to recover. A later file that can't be opened is reported and skipped, and only the first decides the exit code.
+- Changing files uses Esc `b`, `.` and `,`. Ctrl-Tab doesn't reach programs in most terminals, and terminals with tabs take Ctrl-PageUp and Ctrl-PageDown.
+- After a crash, each file offers recovery when it's reopened. Nothing lists them all yet.
+
 ## Soft wrap
 
 - `wrap.rs` is the only code that decides where rows break. Nothing is stored: rows are worked out from the text and the width each time, so edits and resizes can't leave them stale.
@@ -166,7 +179,7 @@ These replace the matching parts of `ARCHITECTURE`. `docs/ROADMAP.md` holds the 
 
 ## 0.2.0 opening files
 
-- Ctrl-O opens a file, so it no longer saves. Kyte holds one buffer at a time; opening a file replaces it, and multiple buffers stay on the later list. The clipboard survives the switch, which makes it the way to move text between files.
+- Ctrl-O opens a file, so it no longer saves. In 0.2.0 Kyte held one buffer at a time; "Several open files" above replaced that, along with the unsaved prompt and the `q` behavior described here. The clipboard survives the switch, which makes it the way to move text between files.
 - Startup and Ctrl-O share `session.rs`, so a file opened either way gets the same swap checks, lock and recovery.
 - `session::check` runs when Enter is pressed and changes nothing, so a file that can't be opened leaves the buffer alone and the prompt open. Only then does Kyte ask about unsaved changes.
 - The unsaved prompt now says what it's for. `After` carries what a save was for through Save As and the save questions, so `y` while opening a file still reaches the file even if the buffer has no name yet.

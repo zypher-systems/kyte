@@ -60,6 +60,12 @@ pub enum Entry {
     Find(String),
     /// A row of the theme picker.
     Theme(ThemeName),
+    /// A file open in this Kyte, by its place among the open files.
+    OpenFile {
+        at: usize,
+        name: String,
+        note: &'static str,
+    },
 }
 
 impl Entry {
@@ -70,6 +76,7 @@ impl Entry {
             Entry::Line(n) => format!("Go to line {n}"),
             Entry::Find(q) => format!("Find {q}"),
             Entry::Theme(t) => t.label().to_string(),
+            Entry::OpenFile { name, .. } => name.clone(),
         }
     }
 
@@ -80,6 +87,7 @@ impl Entry {
             Entry::Line(_) | Entry::Find(_) => "",
             Entry::Theme(t) if t.is_light() => "light",
             Entry::Theme(_) => "dark",
+            Entry::OpenFile { note, .. } => note,
         }
     }
 }
@@ -141,6 +149,8 @@ enum Source {
     Themes {
         before: ThemeName,
     },
+    /// The open files.
+    OpenFiles(Arc<Vec<Entry>>),
 }
 
 impl Default for PaletteState {
@@ -179,6 +189,21 @@ impl PaletteState {
         state
     }
 
+    /// The open files, starting on the row at `current`.
+    pub fn open_files(files: Vec<Entry>, current: usize) -> PaletteState {
+        let mut state = PaletteState {
+            source: Source::OpenFiles(Arc::new(files)),
+            ..PaletteState::default()
+        };
+        state.set_query(String::new());
+        state.selected = current;
+        state
+    }
+
+    pub fn is_open_files(&self) -> bool {
+        matches!(self.source, Source::OpenFiles(_))
+    }
+
     pub fn is_universal(&self) -> bool {
         matches!(self.source, Source::Universal(_))
     }
@@ -212,6 +237,15 @@ impl PaletteState {
                 .filter(|t| score(&self.query, t.label()).is_some())
                 .map(Entry::Theme)
                 .collect(),
+            Source::OpenFiles(files) => {
+                let mut scored: Vec<(i64, &Entry)> = files
+                    .iter()
+                    .filter_map(|f| file_score(&self.query, &f.label()).map(|s| (s, f)))
+                    .collect();
+                // A stable sort, so an empty query keeps the files in order.
+                scored.sort_by_key(|(s, _)| std::cmp::Reverse(*s));
+                scored.into_iter().map(|(_, f)| f.clone()).collect()
+            }
         };
         self.selected = 0;
     }
@@ -262,7 +296,7 @@ mod tests {
     #[test]
     fn empty_query_keeps_registry_order() {
         assert_eq!(filter(""), REGISTRY.to_vec());
-        assert_eq!(PaletteState::default().results.len(), 23);
+        assert_eq!(PaletteState::default().results.len(), 27);
     }
 
     #[test]
@@ -277,6 +311,33 @@ mod tests {
         typed(&mut s, "zz");
         assert_eq!(s.theme_shown(), None);
         assert_eq!(s.theme_before(), Some(ThemeName::Ember));
+    }
+
+    #[test]
+    fn the_open_files_list_filters_and_keeps_each_files_place() {
+        let row = |at, name: &str| Entry::OpenFile {
+            at,
+            name: name.to_string(),
+            note: "",
+        };
+        let mut s = PaletteState::open_files(vec![row(0, "a.rs"), row(1, "src/b.rs")], 1);
+        assert_eq!(s.selected, 1);
+        assert!(s.is_open_files());
+        typed(&mut s, "b.rs");
+        assert_eq!(s.results, vec![row(1, "src/b.rs")]);
+    }
+
+    #[test]
+    fn the_open_files_list_puts_the_best_match_first() {
+        let row = |at, name: &str| Entry::OpenFile {
+            at,
+            name: name.to_string(),
+            note: "",
+        };
+        let files = vec![row(0, "/tmp/bx/a.txt"), row(1, "/tmp/bx/b.txt")];
+        let mut s = PaletteState::open_files(files, 0);
+        typed(&mut s, "b.txt");
+        assert_eq!(s.selected_entry(), Some(&row(1, "/tmp/bx/b.txt")));
     }
 
     #[test]
@@ -403,13 +464,13 @@ mod tests {
         for _ in 0..40 {
             s.down();
         }
-        assert_eq!(s.selected, 22);
+        assert_eq!(s.selected, 26);
         assert_eq!(s.selected_command(), Some(Command::ShowKeyHelp));
-        assert_eq!(s.scroll_offset(), 15);
+        assert_eq!(s.scroll_offset(), 19);
         s.push('s');
         assert_eq!(s.selected, 0);
         assert_eq!(s.selected_command(), Some(Command::Save));
         s.pop();
-        assert_eq!(s.results.len(), 23);
+        assert_eq!(s.results.len(), 27);
     }
 }

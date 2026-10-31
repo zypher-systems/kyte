@@ -1083,7 +1083,7 @@ fn ac16_empty_query_does_nothing() {
 
 // ---------------------------------------------------------------- AC-17
 
-const COMMANDS: [&str; 23] = [
+const COMMANDS: [&str; 27] = [
     "Save",
     "Save as",
     "Open file",
@@ -1102,6 +1102,10 @@ const COMMANDS: [&str; 23] = [
     "Toggle tabs and spaces",
     "Toggle soft wrap",
     "Choose theme",
+    "Open files",
+    "Next file",
+    "Previous file",
+    "Close file",
     "File history",
     "Delete file history",
     "Reader mode",
@@ -1142,7 +1146,7 @@ fn ac17_palette_lists_every_command() {
         .collect();
     assert!(first_result(&p).contains("▸ Save"), "{}", p.dump());
     // 8 rows are visible at once; scrolling down reveals the rest
-    for _ in 0..22 {
+    for _ in 0..26 {
         p.send_keys(&["Down"]);
         std::thread::sleep(Duration::from_millis(5));
         for c in COMMANDS {
@@ -2550,28 +2554,6 @@ fn ctrl_k_opens_a_file_by_name_from_the_working_directory() {
 }
 
 #[test]
-fn ctrl_k_with_unsaved_changes_asks_before_it_opens_a_file() {
-    let env = Env::new();
-    let project = env.path("proj");
-    fs::create_dir(&project).unwrap();
-    let a = project.join("a.txt");
-    fs::write(&a, "first\n").unwrap();
-    fs::write(project.join("other.txt"), "second\n").unwrap();
-    let mut p = open_in(&env, &project, &a);
-    type_text(&mut p, "edit ");
-    p.send_keys(&["C-k"]);
-    p.wait_for("Commands, files", TIMEOUT);
-    p.send_str("other");
-    p.wait_for("▸ other.txt", TIMEOUT);
-    p.send_keys(&["Enter"]);
-    p.wait_for("Unsaved changes", TIMEOUT);
-    p.send_str("y");
-    p.wait_for("1 │ second", TIMEOUT);
-    assert_eq!(fs::read_to_string(&a).unwrap(), "edit first\n");
-    quit_clean(&mut p);
-}
-
-#[test]
 fn ctrl_k_goes_to_a_line_and_finds_text() {
     let env = Env::new();
     let f = env.write("k.txt", "one\ntwo\nthree\n");
@@ -2666,69 +2648,6 @@ fn open_from_prompt(p: &mut Pty, path: &str) {
     });
     p.send_str(path);
     p.send_keys(&["Enter"]);
-}
-
-#[test]
-fn ctrl_o_switches_files_and_moves_the_swap() {
-    let env = Env::new();
-    let a = work_file(&env, "a.txt", "first\n");
-    let b = work_file(&env, "b.txt", "second\n");
-    let mut p = env.open(&a);
-    open_from_prompt(&mut p, b.to_str().unwrap());
-    p.wait_for("Opened b.txt", TIMEOUT);
-    p.wait_for("1 │ second", TIMEOUT);
-    wait_status(&p, "b.txt");
-    let swaps = swap_files(&env);
-    assert_eq!(swaps.len(), 1);
-    assert!(swaps[0].to_string_lossy().contains("b.txt"));
-    type_text(&mut p, "more ");
-    save_and_wait(&mut p);
-    quit_clean(&mut p);
-    assert_eq!(fs::read_to_string(&b).unwrap(), "more second\n");
-    assert_eq!(fs::read_to_string(&a).unwrap(), "first\n");
-}
-
-#[test]
-fn ctrl_o_with_unsaved_changes_asks_first() {
-    let env = Env::new();
-    let a = work_file(&env, "a.txt", "first\n");
-    let b = work_file(&env, "b.txt", "second\n");
-    let mut p = env.open(&a);
-    type_text(&mut p, "edit ");
-    open_from_prompt(&mut p, b.to_str().unwrap());
-    p.wait_for("Unsaved changes", TIMEOUT);
-    p.send_keys(&["Esc"]);
-    p.wait_gone("Unsaved changes", TIMEOUT);
-    wait_status(&p, "a.txt [+]");
-    open_from_prompt(&mut p, b.to_str().unwrap());
-    p.wait_for("Unsaved changes", TIMEOUT);
-    p.send_str("y");
-    p.wait_for("1 │ second", TIMEOUT);
-    assert_eq!(fs::read_to_string(&a).unwrap(), "edit first\n");
-    type_text(&mut p, "gone ");
-    open_from_prompt(&mut p, a.to_str().unwrap());
-    p.wait_for("Unsaved changes", TIMEOUT);
-    p.send_str("n");
-    p.wait_for("1 │ edit first", TIMEOUT);
-    assert_eq!(fs::read_to_string(&b).unwrap(), "second\n");
-    quit_clean(&mut p);
-    assert!(swap_files(&env).is_empty());
-}
-
-#[test]
-fn ctrl_o_reopening_the_same_file_after_discarding_starts_clean() {
-    let env = Env::new();
-    let a = work_file(&env, "a.txt", "first\n");
-    let mut p = env.open(&a);
-    type_text(&mut p, "junk ");
-    open_from_prompt(&mut p, a.to_str().unwrap());
-    p.wait_for("Unsaved changes", TIMEOUT);
-    p.send_str("n");
-    p.wait_for("Opened a.txt", TIMEOUT);
-    p.wait_for("1 │ first", TIMEOUT);
-    assert!(!status(&p).contains("[+]"));
-    assert_eq!(swap_files(&env).len(), 1);
-    quit_clean(&mut p);
 }
 
 #[test]
@@ -3360,4 +3279,424 @@ fn ac24_save_through_symlink_updates_target_keeps_link() {
         .file_type()
         .is_symlink());
     assert_eq!(fs::read_link(&link).unwrap(), real);
+}
+
+// ---------------------------------------------------------------- several open files
+
+/// Starts kyte on `files` and waits for the first frame.
+fn open_all(env: &Env, files: &[&Path]) -> Pty {
+    let args: Vec<&str> = files.iter().map(|f| f.to_str().unwrap()).collect();
+    let pty = Pty::kyte(&bin(), &env.state, &args);
+    pty.wait_for("Ln 1, Col 1", TIMEOUT);
+    pty
+}
+
+/// Esc, then one key of the layer.
+fn esc_then(p: &mut Pty, key: &str) {
+    open_overlay(p);
+    p.send_str(key);
+    wait_insert(p);
+}
+
+fn run_from_palette(p: &mut Pty, command: &str) {
+    open_palette(p);
+    p.send_str(command);
+    p.wait_for(&format!("▸ {command}"), TIMEOUT);
+    p.send_keys(&["Enter"]);
+}
+
+#[test]
+fn ctrl_o_keeps_both_files_open_each_with_its_swap() {
+    let env = Env::new();
+    let a = work_file(&env, "a.txt", "first\n");
+    let b = work_file(&env, "b.txt", "second\n");
+    let mut p = env.open(&a);
+    assert!(!status(&p).contains("file 1"), "{}", status(&p));
+    open_from_prompt(&mut p, b.to_str().unwrap());
+    p.wait_for("Opened b.txt", TIMEOUT);
+    p.wait_for("1 │ second", TIMEOUT);
+    wait_status(&p, "b.txt │ file 2 of 2");
+    assert_eq!(swap_files(&env).len(), 2);
+    type_text(&mut p, "more ");
+    save_and_wait(&mut p);
+    esc_then(&mut p, ",");
+    p.wait_for("1 │ first", TIMEOUT);
+    wait_status(&p, "a.txt │ file 1 of 2");
+    quit_clean(&mut p);
+    assert_eq!(fs::read_to_string(&b).unwrap(), "more second\n");
+    assert_eq!(fs::read_to_string(&a).unwrap(), "first\n");
+    assert!(swap_files(&env).is_empty());
+}
+
+#[test]
+fn ctrl_k_opening_a_file_leaves_unsaved_work_where_it_is() {
+    let env = Env::new();
+    let project = env.path("proj");
+    fs::create_dir(&project).unwrap();
+    let a = project.join("a.txt");
+    fs::write(&a, "first\n").unwrap();
+    fs::write(project.join("other.txt"), "second\n").unwrap();
+    let mut p = open_in(&env, &project, &a);
+    type_text(&mut p, "edit ");
+    p.send_keys(&["C-k"]);
+    p.wait_for("Commands, files", TIMEOUT);
+    p.send_str("other");
+    p.wait_for("▸ other.txt", TIMEOUT);
+    p.send_keys(&["Enter"]);
+    p.wait_for("1 │ second", TIMEOUT);
+    wait_status(&p, "file 2 of 2, 1 more unsaved");
+    assert_eq!(fs::read_to_string(&a).unwrap(), "first\n");
+    esc_then(&mut p, ".");
+    p.wait_for("1 │ edit first", TIMEOUT);
+    wait_status(&p, "a.txt [+]");
+    p.send_keys(&["C-z"]);
+    p.wait_for("1 │ first", TIMEOUT);
+    p.send_keys(&["C-q"]);
+    p.wait_for("Unsaved changes in a.txt", TIMEOUT);
+    p.send_str("n");
+    assert_eq!(p.wait_exit(TIMEOUT), 0);
+}
+
+#[test]
+fn a_crash_leaves_every_open_files_edits_recoverable() {
+    let env = Env::new();
+    let a = work_file(&env, "a.txt", "first\n");
+    let b = work_file(&env, "b.txt", "second\n");
+    let mut p = env.open(&a);
+    type_text(&mut p, "aa ");
+    open_from_prompt(&mut p, b.to_str().unwrap());
+    p.wait_for("1 │ second", TIMEOUT);
+    type_text(&mut p, "bb ");
+    esc_then(&mut p, ",");
+    p.wait_for("1 │ aa first", TIMEOUT);
+    type_text(&mut p, "again ");
+    p.kill9();
+    assert_eq!(print_swap(&env, &a), (0, "aa again first\n".to_string()));
+    assert_eq!(print_swap(&env, &b), (0, "bb second\n".to_string()));
+}
+
+#[test]
+fn opening_a_file_thats_open_moves_to_it_and_never_touches_its_swap() {
+    let env = Env::new();
+    let a = work_file(&env, "a.txt", "first\n");
+    let b = work_file(&env, "b.txt", "second\n");
+    let link = a.parent().unwrap().join("link.txt");
+    std::os::unix::fs::symlink(&a, &link).unwrap();
+    let mut p = env.open(&a);
+    type_text(&mut p, "keep ");
+    open_from_prompt(&mut p, b.to_str().unwrap());
+    p.wait_for("1 │ second", TIMEOUT);
+    open_from_prompt(&mut p, link.to_str().unwrap());
+    p.wait_for("1 │ keep first", TIMEOUT);
+    wait_status(&p, "a.txt [+] │ file 1 of 2");
+    assert_eq!(swap_files(&env).len(), 2);
+    open_from_prompt(&mut p, a.to_str().unwrap());
+    p.wait_for("Already open", TIMEOUT);
+    p.wait_for("1 │ keep first", TIMEOUT);
+    type_text(&mut p, "more ");
+    p.kill9();
+    assert_eq!(print_swap(&env, &a), (0, "keep more first\n".to_string()));
+}
+
+#[test]
+fn the_same_file_twice_on_the_command_line_opens_once() {
+    let env = Env::new();
+    let a = work_file(&env, "a.txt", "first\n");
+    let mut p = open_all(&env, &[&a, &a]);
+    p.wait_for("1 │ first", TIMEOUT);
+    assert!(!status(&p).contains("file 1"), "{}", status(&p));
+    assert_eq!(swap_files(&env).len(), 1);
+    quit_clean(&mut p);
+}
+
+#[test]
+fn moving_between_files_keeps_their_order() {
+    let env = Env::new();
+    let a = work_file(&env, "a.txt", "aaa\n");
+    let b = work_file(&env, "b.txt", "bbb\n");
+    let c = work_file(&env, "c.txt", "ccc\n");
+    let mut p = open_all(&env, &[&a, &b, &c]);
+    p.wait_for("1 │ aaa", TIMEOUT);
+    wait_status(&p, "a.txt │ file 1 of 3");
+    esc_then(&mut p, ".");
+    wait_status(&p, "b.txt │ file 2 of 3");
+    esc_then(&mut p, ".");
+    wait_status(&p, "c.txt │ file 3 of 3");
+    esc_then(&mut p, ".");
+    wait_status(&p, "a.txt │ file 1 of 3");
+    esc_then(&mut p, ",");
+    wait_status(&p, "c.txt │ file 3 of 3");
+    run_from_palette(&mut p, "Open files");
+    p.wait_for("Open files", TIMEOUT);
+    p.send_keys(&["Up", "Up"]);
+    p.wait_until("a.txt to be selected", TIMEOUT, |s| {
+        s.lines().any(|l| l.contains("▸ ") && l.contains("a.txt"))
+    });
+    p.send_keys(&["Enter"]);
+    wait_status(&p, "a.txt │ file 1 of 3");
+    esc_then(&mut p, ".");
+    wait_status(&p, "b.txt │ file 2 of 3");
+    esc_then(&mut p, ",");
+    wait_status(&p, "a.txt │ file 1 of 3");
+    esc_then(&mut p, ",");
+    wait_status(&p, "c.txt │ file 3 of 3");
+    quit_clean(&mut p);
+}
+
+#[test]
+fn the_open_files_box_says_which_are_unsaved() {
+    let env = Env::new();
+    let a = work_file(&env, "a.txt", "first\n");
+    let b = work_file(&env, "b.txt", "second\n");
+    let mut p = open_all(&env, &[&a, &b]);
+    p.wait_for("1 │ first", TIMEOUT);
+    type_text(&mut p, "x");
+    open_overlay(&mut p);
+    p.send_str("b");
+    p.wait_for("Open files", TIMEOUT);
+    p.wait_for("unsaved", TIMEOUT);
+    p.wait_for("b.txt", TIMEOUT);
+    p.send_str("b.txt");
+    p.wait_until("b.txt to be selected", TIMEOUT, |s| {
+        s.lines().any(|l| l.contains("▸ ") && l.contains("b.txt"))
+    });
+    p.send_keys(&["Enter"]);
+    wait_status(&p, "b.txt │ file 2 of 2, 1 more unsaved");
+    p.send_keys(&["C-q"]);
+    p.wait_for("Unsaved changes in a.txt", TIMEOUT);
+    p.send_str("n");
+    assert_eq!(p.wait_exit(TIMEOUT), 0);
+}
+
+#[test]
+fn quit_asks_about_each_unsaved_file_in_turn() {
+    let env = Env::new();
+    let a = work_file(&env, "a.txt", "aaa\n");
+    let b = work_file(&env, "b.txt", "bbb\n");
+    let c = work_file(&env, "c.txt", "ccc\n");
+    let mut p = open_all(&env, &[&a, &b, &c]);
+    p.wait_for("1 │ aaa", TIMEOUT);
+    type_text(&mut p, "1");
+    esc_then(&mut p, ".");
+    p.wait_for("1 │ bbb", TIMEOUT);
+    type_text(&mut p, "2");
+    esc_then(&mut p, ".");
+    p.wait_for("1 │ ccc", TIMEOUT);
+    p.send_keys(&["C-q"]);
+    p.wait_for("Unsaved changes in a.txt", TIMEOUT);
+    p.send_str("y");
+    p.wait_for("Unsaved changes in b.txt", TIMEOUT);
+    p.send_str("n");
+    assert_eq!(p.wait_exit(TIMEOUT), 0);
+    assert_eq!(fs::read_to_string(&a).unwrap(), "1aaa\n");
+    assert_eq!(fs::read_to_string(&b).unwrap(), "bbb\n");
+    assert!(swap_files(&env).is_empty());
+}
+
+#[test]
+fn esc_while_quitting_keeps_every_file_and_the_next_quit_asks_again() {
+    let env = Env::new();
+    let a = work_file(&env, "a.txt", "aaa\n");
+    let b = work_file(&env, "b.txt", "bbb\n");
+    let mut p = open_all(&env, &[&a, &b]);
+    p.wait_for("1 │ aaa", TIMEOUT);
+    type_text(&mut p, "1");
+    esc_then(&mut p, ".");
+    p.wait_for("1 │ bbb", TIMEOUT);
+    type_text(&mut p, "2");
+    p.send_keys(&["C-q"]);
+    p.wait_for("Unsaved changes in b.txt", TIMEOUT);
+    p.send_str("n");
+    p.wait_for("Unsaved changes in a.txt", TIMEOUT);
+    p.send_keys(&["Esc"]);
+    p.wait_gone("Unsaved changes", TIMEOUT);
+    p.send_keys(&["C-q"]);
+    p.wait_for("Unsaved changes in a.txt", TIMEOUT);
+    p.send_str("y");
+    p.wait_for("Unsaved changes in b.txt", TIMEOUT);
+    p.send_str("y");
+    assert_eq!(p.wait_exit(TIMEOUT), 0);
+    assert_eq!(fs::read_to_string(&a).unwrap(), "1aaa\n");
+    assert_eq!(fs::read_to_string(&b).unwrap(), "2bbb\n");
+}
+
+#[test]
+fn quit_without_saving_asks_when_another_file_is_unsaved() {
+    let env = Env::new();
+    let a = work_file(&env, "a.txt", "aaa\n");
+    let b = work_file(&env, "b.txt", "bbb\n");
+    let mut p = open_all(&env, &[&a, &b]);
+    p.wait_for("1 │ aaa", TIMEOUT);
+    type_text(&mut p, "1");
+    esc_then(&mut p, ".");
+    p.wait_for("1 │ bbb", TIMEOUT);
+    run_from_palette(&mut p, "Quit without saving");
+    p.wait_for("Discard unsaved changes in 1 other file?", TIMEOUT);
+    p.send_str("n");
+    p.wait_gone("Discard unsaved", TIMEOUT);
+    wait_status(&p, "b.txt │ file 2 of 2, 1 more unsaved");
+    run_from_palette(&mut p, "Quit without saving");
+    p.wait_for("Discard unsaved changes in 1 other file?", TIMEOUT);
+    p.send_str("y");
+    assert_eq!(p.wait_exit(TIMEOUT), 0);
+    assert_eq!(fs::read_to_string(&a).unwrap(), "aaa\n");
+    assert!(swap_files(&env).is_empty());
+}
+
+#[test]
+fn ctrl_w_closes_a_file_asking_if_its_unsaved_and_the_last_one_quits() {
+    let env = Env::new();
+    let a = work_file(&env, "a.txt", "aaa\n");
+    let b = work_file(&env, "b.txt", "bbb\n");
+    let c = work_file(&env, "c.txt", "ccc\n");
+    let mut p = open_all(&env, &[&a, &b, &c]);
+    p.wait_for("1 │ aaa", TIMEOUT);
+    esc_then(&mut p, ".");
+    p.wait_for("1 │ bbb", TIMEOUT);
+    p.send_keys(&["C-w"]);
+    p.wait_for("1 │ ccc", TIMEOUT);
+    wait_status(&p, "c.txt │ file 2 of 2");
+    assert_eq!(swap_files(&env).len(), 2);
+    type_text(&mut p, "1");
+    p.send_keys(&["C-w"]);
+    p.wait_for("Unsaved changes in c.txt", TIMEOUT);
+    p.send_keys(&["Esc"]);
+    p.wait_gone("Unsaved changes", TIMEOUT);
+    p.send_keys(&["C-w"]);
+    p.wait_for("Save and close", TIMEOUT);
+    p.send_str("y");
+    p.wait_for("1 │ aaa", TIMEOUT);
+    assert_eq!(fs::read_to_string(&c).unwrap(), "1ccc\n");
+    type_text(&mut p, "2");
+    p.send_keys(&["C-w"]);
+    p.wait_for("Unsaved changes", TIMEOUT);
+    p.send_str("n");
+    assert_eq!(p.wait_exit(TIMEOUT), 0);
+    assert_eq!(fs::read_to_string(&a).unwrap(), "aaa\n");
+    assert!(swap_files(&env).is_empty());
+}
+
+#[test]
+fn save_as_onto_a_file_open_here_is_refused() {
+    let env = Env::new();
+    let a = work_file(&env, "a.txt", "aaa\n");
+    let b = work_file(&env, "b.txt", "bbb\n");
+    let mut p = open_all(&env, &[&a, &b]);
+    p.wait_for("1 │ aaa", TIMEOUT);
+    save_as(&mut p, b.to_str().unwrap());
+    p.wait_for("close it first", TIMEOUT);
+    p.send_keys(&["Esc"]);
+    wait_insert(&p);
+    assert_eq!(fs::read_to_string(&b).unwrap(), "bbb\n");
+    assert_eq!(swap_files(&env).len(), 2);
+    quit_clean(&mut p);
+}
+
+#[test]
+fn an_empty_untitled_file_gives_way_but_one_with_text_stays() {
+    let env = Env::new();
+    let a = work_file(&env, "a.txt", "aaa\n");
+    let mut p = Pty::kyte(&bin(), &env.state, &[]);
+    p.wait_for("Ln 1, Col 1", TIMEOUT);
+    open_from_prompt(&mut p, a.to_str().unwrap());
+    p.wait_for("1 │ aaa", TIMEOUT);
+    assert!(!status(&p).contains("file 1"), "{}", status(&p));
+    assert_eq!(swap_files(&env).len(), 1);
+    quit_clean(&mut p);
+    let mut p = Pty::kyte(&bin(), &env.state, &[]);
+    p.wait_for("Ln 1, Col 1", TIMEOUT);
+    type_text(&mut p, "notes");
+    open_from_prompt(&mut p, a.to_str().unwrap());
+    p.wait_for("1 │ aaa", TIMEOUT);
+    wait_status(&p, "file 2 of 2, 1 more unsaved");
+    esc_then(&mut p, ".");
+    p.wait_for("1 │ notes", TIMEOUT);
+    p.kill9();
+}
+
+#[test]
+fn a_file_with_crashed_edits_can_be_left_without_quitting() {
+    let env = Env::new();
+    let a = work_file(&env, "a.txt", "aaa\n");
+    let b = work_file(&env, "b.txt", "bbb\n");
+    let mut p = env.open(&b);
+    type_text(&mut p, "lost ");
+    p.kill9();
+    let mut p = env.open(&a);
+    type_text(&mut p, "1");
+    open_from_prompt(&mut p, b.to_str().unwrap());
+    p.wait_for("Recover unsaved changes", TIMEOUT);
+    p.wait_for("Close this file", TIMEOUT);
+    p.send_str("q");
+    p.wait_for("1 │ 1aaa", TIMEOUT);
+    wait_status(&p, "a.txt [+]");
+    assert!(!status(&p).contains("file 1"), "{}", status(&p));
+    assert_eq!(print_swap(&env, &b), (0, "lost bbb\n".to_string()));
+    p.send_keys(&["C-q"]);
+    p.wait_for("Unsaved changes", TIMEOUT);
+    p.send_str("n");
+    assert_eq!(p.wait_exit(TIMEOUT), 0);
+    assert_eq!(print_swap(&env, &b), (0, "lost bbb\n".to_string()));
+}
+
+#[test]
+fn a_later_file_with_crashed_edits_stops_to_ask_then_the_rest_open() {
+    let env = Env::new();
+    let a = work_file(&env, "a.txt", "aaa\n");
+    let b = work_file(&env, "b.txt", "bbb\n");
+    let c = work_file(&env, "c.txt", "ccc\n");
+    let mut p = env.open(&b);
+    type_text(&mut p, "lost ");
+    p.kill9();
+    let mut p = Pty::kyte(
+        &bin(),
+        &env.state,
+        &[
+            a.to_str().unwrap(),
+            b.to_str().unwrap(),
+            c.to_str().unwrap(),
+        ],
+    );
+    p.wait_for("Recover unsaved changes", TIMEOUT);
+    p.send_str("r");
+    p.wait_for("1 │ aaa", TIMEOUT);
+    wait_status(&p, "file 1 of 3, 1 more unsaved");
+    esc_then(&mut p, ".");
+    p.wait_for("1 │ lost bbb", TIMEOUT);
+    esc_then(&mut p, ".");
+    p.wait_for("1 │ ccc", TIMEOUT);
+    p.send_keys(&["C-q"]);
+    p.wait_for("Unsaved changes in b.txt", TIMEOUT);
+    p.send_str("y");
+    assert_eq!(p.wait_exit(TIMEOUT), 0);
+    assert_eq!(fs::read_to_string(&b).unwrap(), "lost bbb\n");
+}
+
+#[test]
+fn a_file_kyte_cant_open_on_the_command_line_doesnt_stop_the_rest() {
+    let env = Env::new();
+    let a = work_file(&env, "a.txt", "aaa\n");
+    let bad = env.path("bin.dat");
+    fs::write(&bad, [0xff, 0xfe]).unwrap();
+    let c = work_file(&env, "c.txt", "ccc\n");
+    let mut p = open_all(&env, &[&a, &bad, &c]);
+    p.wait_for("not valid UTF-8", TIMEOUT);
+    wait_status(&p, "a.txt │ file 1 of 2");
+    assert_eq!(swap_files(&env).len(), 2);
+    quit_clean(&mut p);
+}
+
+#[test]
+fn a_change_to_a_file_not_on_screen_shows_up_when_you_look() {
+    let env = Env::new();
+    let a = work_file(&env, "a.txt", "aaa\n");
+    let b = work_file(&env, "b.txt", "bbb\n");
+    let mut p = open_all(&env, &[&a, &b]);
+    p.wait_for("1 │ aaa", TIMEOUT);
+    fs::write(&b, "outside\n").unwrap();
+    std::thread::sleep(Duration::from_millis(2300));
+    p.send_keys(&["Right"]);
+    esc_then(&mut p, ".");
+    wait_status(&p, "changed on disk");
+    quit_clean(&mut p);
 }

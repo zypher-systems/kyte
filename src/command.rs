@@ -21,6 +21,10 @@ pub enum Command {
     ToggleIndent,
     ToggleWrap,
     ChooseTheme,
+    OpenFiles,
+    NextFile,
+    PreviousFile,
+    CloseFile,
     History,
     DeleteHistory,
     Reader,
@@ -48,6 +52,10 @@ pub const REGISTRY: &[Command] = &[
     Command::ToggleIndent,
     Command::ToggleWrap,
     Command::ChooseTheme,
+    Command::OpenFiles,
+    Command::NextFile,
+    Command::PreviousFile,
+    Command::CloseFile,
     Command::History,
     Command::DeleteHistory,
     Command::Reader,
@@ -76,6 +84,10 @@ impl Command {
             Command::ToggleIndent => "Toggle tabs and spaces",
             Command::ToggleWrap => "Toggle soft wrap",
             Command::ChooseTheme => "Choose theme",
+            Command::OpenFiles => "Open files",
+            Command::NextFile => "Next file",
+            Command::PreviousFile => "Previous file",
+            Command::CloseFile => "Close file",
             Command::History => "File history",
             Command::DeleteHistory => "Delete file history",
             Command::Reader => "Reader mode",
@@ -105,6 +117,10 @@ impl Command {
             Command::ToggleIndent => "",
             Command::ToggleWrap => "",
             Command::ChooseTheme => "",
+            Command::OpenFiles => "Esc b",
+            Command::NextFile => "Esc .",
+            Command::PreviousFile => "Esc ,",
+            Command::CloseFile => "Ctrl-W",
             Command::History => "Esc h",
             Command::DeleteHistory => "",
             Command::Reader => "Esc v",
@@ -137,7 +153,7 @@ pub const KEY_HELP: &[(&str, &str)] = &[
     ("Shift + any move, Ctrl-A", "select, select all"),
     ("Ctrl-X, Ctrl-C, Ctrl-V", "cut, copy, paste"),
     ("Ctrl-S, Ctrl-O", "save, open a file"),
-    ("Ctrl-Q", "quit (asks if unsaved)"),
+    ("Ctrl-W, Ctrl-Q", "close the file, quit (ask if unsaved)"),
     ("Ctrl-Z, Ctrl-Y", "undo, redo"),
     ("Ctrl-F, Ctrl-R", "search, replace"),
     ("Ctrl-K", "commands, files, :line, /text"),
@@ -147,6 +163,7 @@ pub const KEY_HELP: &[(&str, &str)] = &[
     ("  %  /", "matching bracket, search"),
     ("  u  r  s", "undo, redo, save"),
     ("  h  v", "file history, reader mode"),
+    ("  b  .  ,", "open files, next, previous"),
     ("  (more by context)", "the menu shows what fits"),
     ("  Esc (quickly)", "command palette"),
 ];
@@ -167,7 +184,7 @@ mod tests {
 
     #[test]
     fn every_command_has_a_label() {
-        assert_eq!(REGISTRY.len(), 23);
+        assert_eq!(REGISTRY.len(), 27);
         let labels: Vec<&str> = REGISTRY.iter().map(|c| c.label()).collect();
         assert_eq!(
             labels,
@@ -190,6 +207,10 @@ mod tests {
                 "Toggle tabs and spaces",
                 "Toggle soft wrap",
                 "Choose theme",
+                "Open files",
+                "Next file",
+                "Previous file",
+                "Close file",
                 "File history",
                 "Delete file history",
                 "Reader mode",

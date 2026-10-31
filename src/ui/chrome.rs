@@ -73,10 +73,22 @@ pub fn status_bar(app: &App, area: Rect, cells: &mut Cells, theme: &Theme) {
             };
             (format!(" {name}{dirty}{crumbs}"), place)
         }
-        _ => (format!(" {name}{dirty}"), facts.join(" │ ")),
+        _ => {
+            let files = app
+                .files_summary()
+                .map_or(String::new(), |s| format!(" │ {s}"));
+            (format!(" {name}{dirty}{files}"), facts.join(" │ "))
+        }
     };
+    let unprotected = app.unprotected_others();
+    let other_note = format!(
+        " │ no crash recovery for {}",
+        plural(unprotected, "other file")
+    );
     let note = if app.recovery_off() {
         " │ no crash recovery"
+    } else if unprotected > 0 {
+        other_note.as_str()
     } else if app.history_lost() {
         " │ no history"
     } else if app.has_outside_change() {
@@ -103,6 +115,11 @@ pub fn status_bar(app: &App, area: Rect, cells: &mut Cells, theme: &Theme) {
         cells.set_stringn(end, area.y, note, room, theme.error);
         cells.set_stringn(at, area.y, facts, (right - at) as usize, theme.status);
     }
+}
+
+/// `3 things`, or `1 thing`.
+fn plural(n: usize, what: &str) -> String {
+    format!("{n} {what}{}", if n == 1 { "" } else { "s" })
 }
 
 /// Message line. Returns the cursor position when a prompt owns the cursor.
@@ -225,19 +242,23 @@ fn menu_for(app: &App) -> Option<Menu> {
                 ("Esc", "close"),
             ],
         ),
-        Mode::Prompt(Prompt::ConfirmLeave { then: After::Quit }) => middle(
-            "Unsaved changes",
+        Mode::Prompt(Prompt::ConfirmLeave { then }) => {
+            let title = app.unsaved_title();
+            let rows = match (then, app.open_count() > 1) {
+                (After::Close, _) => [("y", "Save and close"), ("n", "Discard them and close")],
+                (_, false) => [("y", "Save and quit"), ("n", "Discard them and quit")],
+                (_, true) => [("y", "Save this file"), ("n", "Discard them")],
+            };
+            middle(&title, [&rows[..], &[("Esc", "Keep editing")]].concat())
+        }
+        Mode::Prompt(Prompt::ConfirmDiscardOthers { count }) => middle(
+            &format!(
+                "Discard unsaved changes in {}?",
+                plural(*count, "other file")
+            ),
             vec![
-                ("y", "Save and quit"),
-                ("n", "Discard them and quit"),
-                ("Esc", "Keep editing"),
-            ],
-        ),
-        Mode::Prompt(Prompt::ConfirmLeave { .. }) => middle(
-            "Unsaved changes",
-            vec![
-                ("y", "Save, then open the file"),
-                ("n", "Discard them and open it"),
+                ("y", "Discard them and quit"),
+                ("n", "Keep editing"),
                 ("Esc", "Keep editing"),
             ],
         ),
@@ -423,6 +444,8 @@ pub fn palette(app: &App, text_area: Rect, cells: &mut Cells, theme: &Theme) -> 
         "Commands, files, :line, /text"
     } else if state.theme_before().is_some() {
         "Choose theme"
+    } else if state.is_open_files() {
+        "Open files"
     } else {
         "Command palette"
     };
@@ -522,6 +545,12 @@ pub fn recover(app: &App, text_area: Rect, cells: &mut Cells, theme: &Theme) {
     } else {
         info.target.display().to_string()
     };
+    let leave = if app.open_count() > 1 {
+        "q  Close this file without changing anything (also Esc)"
+    } else {
+        "q  Quit without changing anything (also Esc)"
+    }
+    .to_string();
     let lines: Vec<String> = if info.recovered.is_some() {
         let mut l = vec![
             "Kyte found unsaved changes for:".to_string(),
@@ -535,7 +564,7 @@ pub fn recover(app: &App, text_area: Rect, cells: &mut Cells, theme: &Theme) {
             String::new(),
             "r  Recover the unsaved changes".to_string(),
             "d  Discard them and open the file as it is on disk".to_string(),
-            "q  Quit without changing anything (also Esc)".to_string(),
+            leave.clone(),
         ]);
         l
     } else {
@@ -546,7 +575,7 @@ pub fn recover(app: &App, text_area: Rect, cells: &mut Cells, theme: &Theme) {
             format!("Swap file written {}", info.modified),
             String::new(),
             "d  Discard the stale swap and open the file".to_string(),
-            "q  Quit without changing anything (also Esc)".to_string(),
+            leave,
         ]
     };
     let title = if info.recovered.is_some() {

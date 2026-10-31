@@ -69,6 +69,7 @@ pub fn run(opts: Options) -> anyhow::Result<ExitCode> {
         app.message = opts.config_warning.clone();
         app.message_is_error = app.message.is_some();
     }
+    app.queue_files(opts.more_files.clone());
     let result = event_loop(&mut app, opts.no_kitty);
     if result.is_ok() {
         app.finish();
@@ -190,6 +191,7 @@ fn event_loop(app: &mut App, no_kitty: bool) -> anyhow::Result<()> {
     let truecolor = ui::theme::takes_24_bit(std::env::var("COLORTERM").ok().as_deref());
     let mut redraw = true;
     loop {
+        app.open_queued();
         if redraw {
             let size = terminal.size()?;
             app.layout(size.width, size.height);

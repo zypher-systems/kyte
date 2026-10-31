@@ -14,6 +14,8 @@ pub const DEFAULT_ESC_MS: u64 = 300;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Options {
     pub file: Option<PathBuf>,
+    /// The files after the first.
+    pub more_files: Vec<PathBuf>,
     pub esc_ms: u64,
     pub no_kitty: bool,
     pub print_swap: Option<PathBuf>,
@@ -37,6 +39,7 @@ impl Default for Options {
     fn default() -> Self {
         Options {
             file: None,
+            more_files: Vec::new(),
             esc_ms: DEFAULT_ESC_MS,
             no_kitty: false,
             print_swap: None,
@@ -84,7 +87,7 @@ pub fn version() -> String {
 pub fn usage() -> String {
     format!(
         "{}\nA terminal text editor: always insert, Esc for one-key operators, Esc Esc for the palette.\n\n\
-Usage: kyte [OPTIONS] [FILE]\n\n\
+Usage: kyte [OPTIONS] [FILE]...\n\n\
 Options:\n\
   -h, --help             Print this help and exit\n\
   -V, --version          Print the version and exit\n\
@@ -133,11 +136,10 @@ pub fn parse_onto(
     while let Some(arg) = args.next() {
         if only_files || arg == "-" || !arg.starts_with('-') {
             if opts.file.is_some() {
-                return Err(CliError::Usage(format!(
-                    "unexpected extra argument '{arg}'"
-                )));
+                opts.more_files.push(PathBuf::from(arg));
+            } else {
+                opts.file = Some(PathBuf::from(arg));
             }
-            opts.file = Some(PathBuf::from(arg));
             continue;
         }
         let (name, inline) = match arg.split_once('=') {
@@ -206,8 +208,13 @@ mod tests {
     }
 
     #[test]
-    fn two_files_is_usage_error() {
-        assert!(matches!(p(&["a", "b"]), Err(CliError::Usage(_))));
+    fn every_file_named_is_kept_in_order() {
+        let o = p(&["a.txt", "b.txt", "--", "-c"]).unwrap();
+        assert_eq!(o.file, Some(PathBuf::from("a.txt")));
+        assert_eq!(
+            o.more_files,
+            vec![PathBuf::from("b.txt"), PathBuf::from("-c")]
+        );
     }
 
     #[test]
