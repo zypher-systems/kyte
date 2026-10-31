@@ -31,6 +31,10 @@ pub struct Options {
     pub soft_wrap: bool,
     /// Markdown, text and LaTeX get the writing setup.
     pub writing: bool,
+    /// What builds a LaTeX file, instead of `latexmk`.
+    pub build_command: Option<String>,
+    /// What shows a PDF, instead of `xdg-open`.
+    pub pdf_command: Option<String>,
     /// Writing gets its spelling checked.
     pub spell_check: bool,
     pub theme: ThemeName,
@@ -55,6 +59,8 @@ impl Default for Options {
             line_numbers: true,
             soft_wrap: false,
             writing: true,
+            build_command: None,
+            pdf_command: None,
             spell_check: true,
             theme: ThemeName::Signal,
             history_limit_mb: 100,

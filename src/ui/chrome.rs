@@ -79,7 +79,15 @@ pub fn status_bar(app: &App, area: Rect, cells: &mut Cells, theme: &Theme) {
             let files = app
                 .files_summary()
                 .map_or(String::new(), |s| format!(" │ {s}"));
-            (format!(" {name}{dirty}{files}"), facts.join(" │ "))
+            let building = if app.building() {
+                " │ building PDF"
+            } else {
+                ""
+            };
+            (
+                format!(" {name}{dirty}{files}{building}"),
+                facts.join(" │ "),
+            )
         }
     };
     let unprotected = app.unprotected_others();
@@ -447,7 +455,7 @@ pub fn palette(app: &App, text_area: Rect, cells: &mut Cells, theme: &Theme) -> 
         return None;
     };
     let rows = state.results.len().clamp(1, VISIBLE_ROWS) as u16;
-    let wide = if state.is_citations() { 76 } else { 54 };
+    let wide = if state.is_wide() { 76 } else { 54 };
     let w = wide.min(text_area.width.saturating_sub(2)).max(10);
     let rule = (text_area.height >= rows + 4) as u16;
     let area = centered(text_area, w, rows + 3 + rule);
@@ -462,8 +470,8 @@ pub fn palette(app: &App, text_area: Rect, cells: &mut Cells, theme: &Theme) -> 
     } else {
         "Command palette"
     };
-    let fixing = state.spelling_word().map(|w| format!("Fix {w}"));
-    let title = fixing.as_deref().unwrap_or(title);
+    let own = state.own_title();
+    let title = own.as_deref().unwrap_or(title);
     let inner = modal_box(area, text_area, cells, title, theme);
     let input = format!("> {}", state.query);
     let iw = inner.width as usize;
@@ -496,7 +504,7 @@ pub fn palette(app: &App, text_area: Rect, cells: &mut Cells, theme: &Theme) -> 
             let marker = if sel { "▸ " } else { "  " };
             let hint = entry.hint();
             let room = iw.saturating_sub(hint.len() + 4);
-            let label = if state.is_citations() {
+            let label = if state.is_wide() {
                 entry.label().chars().take(room).collect()
             } else {
                 fit_label(&entry.label(), room)

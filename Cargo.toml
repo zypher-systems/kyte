@@ -21,7 +21,7 @@ unicode-segmentation = "1"
 unicode-width = "0.2"
 crc32fast = "1"
 anyhow = "1"
-rustix = { version = "1", features = ["fs"] }
+rustix = { version = "1", features = ["fs", "process"] }
 signal-hook = "0.3"
 # Spell checking, on by default.
 spellbook = { version = "0.4", optional = true }

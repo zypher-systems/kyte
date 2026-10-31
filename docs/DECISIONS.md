@@ -56,6 +56,22 @@ These replace the matching parts of `ARCHITECTURE`. `docs/ROADMAP.md` holds the 
 - A named bibliography wins over one that merely sits beside the paper, because a folder can hold several.
 - Only LaTeX gets this. Pandoc's `[@key]` in Markdown could use the same box.
 
+## Building PDFs
+
+- `latexmk` is the default because it knows how many passes a paper needs, and when to run BibTeX. `build_command` swaps it for `tectonic` or anything else, with `%f` shell-quoted.
+- The build runs as a child process, and its output goes to a thread, so the editor never waits. The event loop polls every 100 ms during a build, so its end shows soon after it happens.
+- The child gets its own process group, because `latexmk` starts `pdflatex` and stopping only the parent would leave that running. Quitting stops the build rather than waiting for it.
+- The parser was written against real `latexmk` output from TeX Live 2026 in a throwaway container, and that output is kept as test fixtures. Three things differed from the documented `file:line: message` form:
+  - A missing package prints `! LaTeX Error: ...` with no place, and the place comes a few lines later as `Emergency stop`. Those two lines become one problem, and `==> Fatal error` is dropped.
+  - A first pass warns about every citation, and later passes settle them. So warnings come from the last pass only, or every paper with citations would report warnings.
+  - `latexmk` ends with general advice, so a failure with no errors to list uses the line after `Collected error summary`.
+- `max_print_line=1000` stops TeX wrapping output at 79 columns, which would split file names.
+- Errors open the box by themselves, because the build failed and there's something to fix. Warnings don't, because the PDF exists and an undefined citation may be mid-draft.
+- Errors only open the box from plain editing, so a build ending can't take over a question or a search.
+- Being LaTeX is separate from showing for writing, so `writing = false` keeps citations and Ctrl-B. A test caught them disappearing together.
+- A chapter finds its root from `% !TEX root`, the convention other LaTeX editors use, and then from a `main.tex`.
+- Unsaved files other than the one on screen aren't saved first. Saving can ask questions, and asking about several files before a build is more than a keypress should do.
+
 ## File tree
 
 - The tree is a box in the middle of the screen, not a sidebar. It's something you pick from, so it follows the rule for menus, and it leaves the text its full width.

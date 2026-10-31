@@ -97,6 +97,7 @@ Environment variables: `KYTE_STATE_DIR` (where swap files go; overrides the defa
 | Alt-*key* | Same as Esc then *key* |
 | Ctrl-K | Open the universal palette |
 | Ctrl-T | Open the file tree |
+| Ctrl-B | Build a LaTeX file's PDF |
 | Ctrl-P | Open the command palette |
 
 Pasted text (bracketed paste) is inserted as one block and undone with a single Ctrl-Z.
@@ -129,7 +130,7 @@ The menu changes with where you are, and only lists what works there:
 | Where | Extra keys |
 | --- | --- |
 | On a bracket with a partner | `i` select inside |
-| In LaTeX | `q` insert citation |
+| In LaTeX | `q` insert citation, `g` build PDF, `o` open PDF |
 | In writing | `m` next misspelling, and `z` fix spelling on a misspelled word |
 | With more than one file open | `b` open files, `.` next file, `,` previous file |
 | In a file with a line comment syntax | `#` comment or uncomment the line |
@@ -158,7 +159,7 @@ Under tmux, set `tmux set -g escape-time 10`. tmux's default of 500 ms delays ev
 
 Esc Esc (or Ctrl-P) opens a fuzzy-filtered list. Type to filter, Up and Down to select, Enter to run, Esc to close without running anything.
 
-Commands: Save, Save as, Open file, Quit, Quit without saving, Undo, Redo, Cut, Copy, Paste, Select all, Find, Replace, Go to line, Toggle line numbers, Toggle tabs and spaces, Toggle soft wrap, Choose theme, File tree, Insert citation, Fix spelling, Next misspelling, Toggle spell check, Open files, Next file, Previous file, Close file, Show key help.
+Commands: Save, Save as, Open file, Quit, Quit without saving, Undo, Redo, Cut, Copy, Paste, Select all, Find, Replace, Go to line, Toggle line numbers, Toggle tabs and spaces, Toggle soft wrap, Choose theme, File tree, Insert citation, Build PDF, Stop build, Show build problems, Open PDF, Fix spelling, Next misspelling, Toggle spell check, Open files, Next file, Previous file, Close file, Show key help.
 
 Kyte works out whether a file indents with tabs or spaces, and how many, from its first 10,000 lines. A file with no indent uses tabs. The status bar shows `Spaces N` for space-indented files. **Toggle tabs and spaces** changes what new indent uses until the file is closed; it doesn't rewrite existing lines.
 
@@ -255,6 +256,16 @@ In a LaTeX file, finishing `\\cite{` opens a box of the works in your bibliograp
 
 The works come from the files named by `\\bibliography{}` or `\\addbibresource{}`, and failing that from every `.bib` beside the paper. A `.bib` file open in Kyte counts as it stands, saved or not.
 
+### Building the PDF
+
+Ctrl-B (**Build PDF**) saves a LaTeX file and builds it with `latexmk`, in the file's folder. Kyte doesn't install LaTeX, so you need TeX Live with `latexmk`, or another tool set as `build_command`. The build runs beside the editor, so you can keep typing, and the status bar shows `building PDF` until it ends. **Stop build** ends it, and so does quitting.
+
+If it fails, a box lists the errors, and Enter goes to the line, opening the file if it's another one. If it works but left citations or labels undefined, Kyte says so, and **Show build problems** lists them. Esc `o` (**Open PDF**) shows the result with `xdg-open`.
+
+A chapter builds its whole document. Kyte goes by a `% !TEX root = ../thesis.tex` comment in the first ten lines, and failing that, for a file with no `\\documentclass`, a `main.tex` beside it or a folder up.
+
+Open files other than the one you build aren't saved first.
+
 ## Soft wrap
 
 With soft wrap on, a long line continues on the next screen row, breaking after a space where it can. It changes only how the line is shown: the file is the same, and the line keeps one number. Up and Down move by screen row, and Home and End still go to the start and end of the whole line. Ordinary text is unaffected, but very long lines cost more, because each keystroke re-measures them: about 25 ms per key at 1 MB on one line, and 110 ms at 5 MB.
@@ -272,6 +283,8 @@ With soft wrap on, a long line continues on the next screen row, breaking after 
 | `soft_wrap` | `false` | Wrap long lines at the edge of the screen. **Toggle soft wrap** in the palette changes it for the session |
 | `writing` | `true` | Open Markdown, text and LaTeX files for writing |
 | `spell_check` | `true` | Underline misspelled words in writing |
+| `build_command` | `latexmk`, as below | What builds a LaTeX file, run in its folder. `%f` is the file name |
+| `pdf_command` | `"xdg-open %f"` | What shows a PDF |
 | `theme` | `"signal"` | Colors: `"signal"`, `"harbor"`, `"dusk"`, `"ember"`, `"moss"` or `"daybreak"`. **Choose theme** in the palette changes it for the session |
 | `esc_ms` | `300` | Milliseconds to press Esc again for the palette |
 | `history` | `true` | Keep a history of every edit to each file |

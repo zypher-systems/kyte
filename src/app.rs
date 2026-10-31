@@ -7,6 +7,7 @@ use anyhow::Result;
 
 use crate::bib;
 use crate::buffer::{Buffer, Edit, GroupKind, Indent};
+use crate::build::{self, Build, Outcome, Problem};
 use crate::cli::Options;
 use crate::command::{self, Command};
 use crate::fileio::{self, DiskState};
@@ -123,6 +124,8 @@ pub enum After {
     Quit,
     /// Close the file on screen.
     Close,
+    /// Build the PDF.
+    Build,
 }
 
 /// A review of outside changes in progress.
@@ -208,6 +211,8 @@ pub struct Doc {
     discard: bool,
     /// What kind of writing this is, if it isn't code.
     pub prose: Option<Prose>,
+    /// It shows for writing: the word count, and the view that goes with it.
+    writing: bool,
     /// This file's spelling is being checked.
     spelling: bool,
     /// LaTeX's words, counted when typing pauses, because that needs a parse.
@@ -249,6 +254,7 @@ impl Doc {
             keep_swap: false,
             discard: false,
             prose: None,
+            writing: false,
             spelling: false,
             latex_words: None,
             recount: false,
@@ -277,16 +283,13 @@ impl Doc {
 
     fn set_view(&mut self, view: View) {
         let head = self.buffer.head();
-        self.prose = self
-            .buffer
-            .path()
-            .and_then(|p| syntax::prose(p, &head))
-            .filter(|_| view.writing);
-        self.spelling = view.spell_check && self.prose.is_some();
-        self.soft_wrap = view.soft_wrap || self.prose.is_some();
+        self.prose = self.buffer.path().and_then(|p| syntax::prose(p, &head));
+        self.writing = view.writing && self.prose.is_some();
+        self.spelling = view.spell_check && self.writing;
+        self.soft_wrap = view.soft_wrap || self.writing;
         // LaTeX reports errors by line, so it keeps its numbers.
-        self.line_numbers =
-            view.line_numbers && !matches!(self.prose, Some(Prose::Text | Prose::Markdown));
+        let bare = self.writing && self.prose != Some(Prose::Latex);
+        self.line_numbers = view.line_numbers && !bare;
     }
 
     fn name(&self) -> String {
@@ -411,10 +414,25 @@ pub struct App {
     default_view: View,
     /// Loaded the first time a file needs it.
     speller: Option<Speller>,
+    /// The PDF being built.
+    build: Option<Build>,
+    /// What the last build reported.
+    build_problems: Vec<Problem>,
+    build_command: Option<String>,
+    pdf_command: Option<String>,
     last_key: Option<Instant>,
     /// The column Up and Down hold to while moving by wrapped rows.
     visual_col: Option<usize>,
     view: (u16, u16),
+}
+
+/// The end of a count's word: `s` unless there's one.
+fn plural(n: usize) -> &'static str {
+    if n == 1 {
+        ""
+    } else {
+        "s"
+    }
 }
 
 /// Counting words reads the whole file on every key, so past this it stops.
@@ -454,6 +472,10 @@ impl App {
             doc: Doc::new(buffer, swap).with_view(default_view),
             speller: None,
             last_key: None,
+            build: None,
+            build_problems: Vec::new(),
+            build_command: opts.build_command.clone(),
+            pdf_command: opts.pdf_command.clone(),
             parked: Vec::new(),
             at: 0,
             queued: Default::default(),
@@ -624,7 +646,8 @@ impl App {
     /// Records the terminal size and scrolls so the cursor stays visible.
     /// Call before every render.
     pub fn layout(&mut self, width: u16, height: u16) {
-        if self.doc.prose == Some(Prose::Latex) && self.doc.latex_words.is_none() {
+        let counted = self.doc.writing && self.doc.prose == Some(Prose::Latex);
+        if counted && self.doc.latex_words.is_none() {
             self.count_latex();
         }
         self.view = (width, height);
@@ -748,6 +771,9 @@ impl App {
 
     /// Called once after the event loop: removes the swaps unless they must be kept.
     pub fn finish(&mut self) {
+        if let Some(b) = self.build.as_mut() {
+            b.stop();
+        }
         self.doc.close();
         self.parked.iter_mut().for_each(Doc::close);
     }
@@ -959,6 +985,7 @@ impl App {
             Key::Ctrl('q') => self.request_quit(),
             Key::Ctrl('w') => self.close_file(),
             Key::Ctrl('t') => self.open_tree(),
+            Key::Ctrl('b') => self.build_pdf(),
             Key::Ctrl('z') => self.undo(),
             Key::Ctrl('y') => self.redo(),
             _ => {}
@@ -1150,6 +1177,8 @@ impl App {
         rows.extend_from_slice(LEGEND);
         if self.doc.prose == Some(Prose::Latex) {
             rows.push(("q", "insert citation"));
+            rows.push(("g", "build PDF"));
+            rows.push(("o", "open PDF"));
         }
         if self.checks_spelling() {
             if self.misspelled_at_cursor().is_some() {
@@ -1201,6 +1230,8 @@ impl App {
             'v' => self.open_reader(),
             't' => self.open_tree(),
             'q' if self.doc.prose == Some(Prose::Latex) => self.insert_citation(),
+            'g' if self.doc.prose == Some(Prose::Latex) => self.build_pdf(),
+            'o' if self.doc.prose == Some(Prose::Latex) => self.open_pdf(),
             'z' => self.fix_spelling(),
             'm' => self.next_misspelling(),
             'b' => self.open_files_list(),
@@ -1553,6 +1584,7 @@ impl App {
             Entry::Line(n) => self.go_to_line(n),
             Entry::OpenFile { at, .. } => self.show_file(at),
             Entry::Citation { key, .. } => self.finish_citation(&key),
+            Entry::Problem(p) => self.go_to_problem(&p),
             Entry::Spelling { with, range } => {
                 let b = &mut self.doc.buffer;
                 b.move_to(range.end);
@@ -1659,6 +1691,10 @@ impl App {
             Command::ChooseTheme => self.mode = Mode::Palette(PaletteState::themes(self.theme)),
             Command::FileTree => self.open_tree(),
             Command::InsertCitation => self.insert_citation(),
+            Command::BuildPdf => self.build_pdf(),
+            Command::StopBuild => self.stop_build(),
+            Command::BuildProblems => self.show_build_problems(),
+            Command::OpenPdf => self.open_pdf(),
             Command::FixSpelling => self.fix_spelling(),
             Command::NextMisspelling => self.next_misspelling(),
             Command::ToggleSpelling => {
@@ -1817,6 +1853,7 @@ impl App {
     /// Called when the poll timeout elapses with no input.
     /// fsyncs a dirty swap at most once per second.
     pub fn tick(&mut self, now: Instant) -> Result<()> {
+        self.check_build();
         let due = self
             .last_fsync
             .is_none_or(|t| now.saturating_duration_since(t) >= Duration::from_secs(1));
@@ -1827,7 +1864,8 @@ impl App {
             let paused = self
                 .last_key
                 .is_none_or(|t| now.saturating_duration_since(t) >= RECOUNT_PAUSE);
-            if self.doc.recount && paused && self.doc.prose == Some(Prose::Latex) {
+            let counted = self.doc.writing && self.doc.prose == Some(Prose::Latex);
+            if self.doc.recount && paused && counted {
                 self.count_latex();
                 self.needs_redraw = true;
             }
@@ -2010,6 +2048,144 @@ impl App {
         } else if self.mode == Mode::Insert {
             let name = path.file_name().unwrap_or_default().to_string_lossy();
             self.set_message(format!("Opened {name}"));
+        }
+    }
+
+    /// Whether a PDF is being built.
+    pub fn building(&self) -> bool {
+        self.build.is_some()
+    }
+
+    /// The LaTeX file this one builds as: itself, or the root it belongs to.
+    fn build_root(&self) -> Option<std::path::PathBuf> {
+        let path = self.doc.buffer.path()?;
+        (self.doc.prose == Some(Prose::Latex))
+            .then(|| build::root_of(path, &self.doc.buffer.to_string()))
+    }
+
+    /// Ctrl-B: saves the file, then builds.
+    fn build_pdf(&mut self) {
+        if self.building() {
+            self.set_message("Already building; Stop build is in the palette");
+        } else if self.doc.prose != Some(Prose::Latex) {
+            self.set_message("Build PDF works on LaTeX files");
+        } else if self.doc.buffer.is_dirty() {
+            self.start_save(After::Build);
+        } else {
+            self.start_build();
+        }
+    }
+
+    fn start_build(&mut self) {
+        let Some(root) = self.build_root() else {
+            return;
+        };
+        let name = root.file_name().unwrap_or_default().to_string_lossy();
+        let name = name.into_owned();
+        let dir = root.parent().unwrap_or(std::path::Path::new("."));
+        let path = std::env::var("PATH").unwrap_or_default();
+        let Some(command) = build::command_for(self.build_command.as_deref(), &name, &path) else {
+            self.set_error("latexmk isn't installed; install it or set build_command");
+            return;
+        };
+        self.build_problems.clear();
+        match Build::start(&command, dir, &name) {
+            Ok(b) => self.build = Some(b),
+            Err(e) => self.set_error(format!("Can't start the build: {e}")),
+        }
+    }
+
+    fn stop_build(&mut self) {
+        match self.build.take() {
+            Some(mut b) => {
+                b.stop();
+                self.set_message("Build stopped");
+            }
+            None => self.set_message("No build is running"),
+        }
+    }
+
+    /// Picks up a build that has ended.
+    fn check_build(&mut self) {
+        let Some(outcome) = self.build.as_mut().and_then(Build::finished) else {
+            return;
+        };
+        if let Some(b) = self.build.take() {
+            self.report_build(&b, outcome);
+        }
+        self.needs_redraw = true;
+    }
+
+    fn report_build(&mut self, b: &Build, outcome: Outcome) {
+        let pdf = std::path::Path::new(&b.name).with_extension("pdf");
+        let pdf = pdf.display();
+        let seconds = outcome.took.as_secs_f32();
+        let warnings = outcome.warnings.len();
+        let failed = !outcome.ok;
+        let errors = outcome.errors.len();
+        self.build_problems = outcome.errors.into_iter().chain(outcome.warnings).collect();
+        if failed && errors == 0 {
+            self.set_error(format!("Build failed: {}", outcome.last_line));
+        } else if failed {
+            self.set_error(format!(
+                "Build failed with {errors} error{}",
+                plural(errors)
+            ));
+            if self.mode == Mode::Insert {
+                self.show_build_problems();
+            }
+        } else if warnings > 0 {
+            self.set_message(format!(
+                "Built {pdf} with {warnings} warning{}; Show build problems lists them",
+                plural(warnings)
+            ));
+        } else {
+            self.set_message(format!("Built {pdf} in {seconds:.1} s"));
+        }
+    }
+
+    /// Opens the box of what the last build reported.
+    fn show_build_problems(&mut self) {
+        if self.build_problems.is_empty() {
+            self.set_message("No build problems");
+            return;
+        }
+        let n = self.build_problems.len();
+        let title = format!("{n} build problem{}", plural(n));
+        let rows = self.build_problems.iter().cloned().map(Entry::Problem);
+        self.mode = Mode::Palette(PaletteState::problems(title, rows.collect()));
+    }
+
+    /// Goes to where a build problem is, opening the file if it has to.
+    fn go_to_problem(&mut self, problem: &Problem) {
+        let Some(dir) = self
+            .build_root()
+            .and_then(|r| r.parent().map(|d| d.to_path_buf()))
+        else {
+            return;
+        };
+        let path = dir.join(&problem.file);
+        match self.submit_open(&path.display().to_string()) {
+            Ok(()) if self.mode == Mode::Insert && problem.line > 0 => {
+                self.go_to_line(problem.line);
+            }
+            Ok(()) => {}
+            Err(e) => self.set_error(e),
+        }
+    }
+
+    /// Hands the paper's PDF to a viewer.
+    fn open_pdf(&mut self) {
+        let Some(pdf) = self.build_root().map(|r| r.with_extension("pdf")) else {
+            self.set_message("Open PDF works on LaTeX files");
+            return;
+        };
+        if !pdf.exists() {
+            self.set_message("No PDF yet; Ctrl-B builds it");
+            return;
+        }
+        if let Err(e) = build::open_pdf(self.pdf_command.as_deref(), &pdf) {
+            self.set_error(format!("Can't open the PDF: {e}"));
         }
     }
 
@@ -2242,7 +2418,7 @@ impl App {
     /// every key.
     pub fn word_count(&self) -> Option<usize> {
         let buf = self.view_buffer();
-        let prose = self.doc.prose?;
+        let prose = self.doc.prose.filter(|_| self.doc.writing)?;
         if prose == Prose::Latex {
             return self.doc.latex_words;
         }
@@ -2260,7 +2436,7 @@ impl App {
 
     /// The words in the selection, in writing.
     pub fn selected_words(&self) -> Option<usize> {
-        self.doc.prose?;
+        self.doc.prose.filter(|_| self.doc.writing)?;
         let r = self.doc.buffer.selection()?;
         Some(syntax::plain_words(&self.doc.buffer.slice_string(r)))
     }
@@ -2816,6 +2992,7 @@ impl App {
             After::Stay => {}
             After::Quit => self.quit_next(),
             After::Close => self.close_file_now(),
+            After::Build => self.start_build(),
         }
     }
 

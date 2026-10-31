@@ -1083,7 +1083,7 @@ fn ac16_empty_query_does_nothing() {
 
 // ---------------------------------------------------------------- AC-17
 
-const COMMANDS: [&str; 32] = [
+const COMMANDS: [&str; 36] = [
     "Save",
     "Save as",
     "Open file",
@@ -1104,6 +1104,10 @@ const COMMANDS: [&str; 32] = [
     "Choose theme",
     "File tree",
     "Insert citation",
+    "Build PDF",
+    "Stop build",
+    "Show build problems",
+    "Open PDF",
     "Fix spelling",
     "Next misspelling",
     "Toggle spell check",
@@ -1151,7 +1155,7 @@ fn ac17_palette_lists_every_command() {
         .collect();
     assert!(first_result(&p).contains("▸ Save"), "{}", p.dump());
     // 8 rows are visible at once; scrolling down reveals the rest
-    for _ in 0..31 {
+    for _ in 0..35 {
         p.send_keys(&["Down"]);
         std::thread::sleep(Duration::from_millis(5));
         for c in COMMANDS {
@@ -2277,7 +2281,7 @@ fn standard_terminal_shows_the_legend_and_help_in_full() {
     p.wait_for("▸ Show key help", TIMEOUT);
     p.send_keys(&["Enter"]);
     p.wait_for("Up, Down scroll", TIMEOUT);
-    for _ in 0..31 {
+    for _ in 0..35 {
         p.send_keys(&["Down"]);
     }
     p.wait_for("Esc (quickly)", TIMEOUT);
@@ -4422,4 +4426,216 @@ fn other_files_type_cite_as_plain_text() {
     p.wait_for("\\cite{x", TIMEOUT);
     assert!(!p.screen().contains(" Cite "), "{}", p.dump());
     abandon(&mut p);
+}
+
+// ---------------------------------------------------------------- building PDFs
+
+/// A paper, with `build_command` set to a script of the test's own.
+fn open_build(env: &Env, tex: &str, script: &str) -> (PathBuf, Pty) {
+    let paper = work_file(env, "paper.tex", tex);
+    let dir = paper.parent().unwrap();
+    fs::write(dir.join("build.sh"), script).unwrap();
+    let settings = "build_command = \"sh build.sh %f\"\npdf_command = \"sh show.sh %f\"\n";
+    let p = open_writing(env, &paper, settings);
+    (paper, p)
+}
+
+#[test]
+fn ctrl_b_saves_then_builds_in_the_papers_folder() {
+    let env = Env::new();
+    let script = "cat \"$1\" > seen.txt; pwd > where.txt; touch paper.pdf\n";
+    let (paper, mut p) = open_build(&env, "text\n", script);
+    type_text(&mut p, "new ");
+    p.send_keys(&["C-b"]);
+    p.wait_for("Built paper.pdf in", TIMEOUT);
+    let dir = paper.parent().unwrap();
+    assert_eq!(
+        fs::read_to_string(dir.join("seen.txt")).unwrap(),
+        "new text\n"
+    );
+    let found = fs::read_to_string(dir.join("where.txt")).unwrap();
+    assert_eq!(Path::new(found.trim()), dir.canonicalize().unwrap());
+    assert_eq!(fs::read_to_string(&paper).unwrap(), "new text\n");
+    quit_clean(&mut p);
+}
+
+#[test]
+fn a_failed_build_lists_its_errors_and_enter_goes_to_the_line() {
+    let env = Env::new();
+    let script = "echo './paper.tex:3: Undefined control sequence.'; echo './paper.tex:1: Other.'; exit 12\n";
+    let (_paper, mut p) = open_build(&env, "one\ntwo\nthree\n", script);
+    p.send_keys(&["C-b"]);
+    p.wait_for("2 build problems", TIMEOUT);
+    p.wait_for("▸ paper.tex:3  Undefined control sequence.", TIMEOUT);
+    p.send_keys(&["Enter"]);
+    wait_status(&p, "Ln 3, Col 1");
+    assert!(!p.screen().contains("build problems"), "{}", p.dump());
+    run_from_palette(&mut p, "Show build problems");
+    p.wait_for("2 build problems", TIMEOUT);
+    p.send_keys(&["Down", "Enter"]);
+    wait_status(&p, "Ln 1, Col 1");
+    quit_clean(&mut p);
+}
+
+#[test]
+fn an_error_in_another_file_opens_that_file() {
+    let env = Env::new();
+    let script = "echo './ch1.tex:2: Boom.'; exit 1\n";
+    let (paper, mut p) = open_build(&env, "\\input{ch1}\n", script);
+    fs::write(paper.parent().unwrap().join("ch1.tex"), "a\nb\n").unwrap();
+    p.send_keys(&["C-b"]);
+    p.wait_for("▸ ch1.tex:2  Boom.", TIMEOUT);
+    p.send_keys(&["Enter"]);
+    wait_status(&p, "ch1.tex");
+    wait_status(&p, "Ln 2, Col 1");
+    quit_clean(&mut p);
+}
+
+#[test]
+fn a_build_with_undefined_references_succeeds_and_says_so() {
+    let env = Env::new();
+    let script = "echo \"LaTeX Warning: Citation \\`foo' on page 1 undefined on input line 2.\"\n";
+    let (_paper, mut p) = open_build(&env, "one\ntwo\n", script);
+    p.send_keys(&["C-b"]);
+    p.wait_for("Built paper.pdf with 1 warning", TIMEOUT);
+    assert!(
+        !p.screen().contains("build problem "),
+        "no box for a warning\n{}",
+        p.dump()
+    );
+    run_from_palette(&mut p, "Show build problems");
+    p.wait_for("▸ paper.tex:2  Citation `foo' on page 1 undefined", TIMEOUT);
+    p.send_keys(&["Enter"]);
+    wait_status(&p, "Ln 2, Col 1");
+    quit_clean(&mut p);
+}
+
+#[test]
+fn a_failure_with_nothing_to_list_says_what_it_can() {
+    let env = Env::new();
+    let (_paper, mut p) = open_build(&env, "x\n", "echo 'it went wrong'; exit 3\n");
+    p.send_keys(&["C-b"]);
+    p.wait_for("Build failed: it went wrong", TIMEOUT);
+    quit_clean(&mut p);
+}
+
+#[test]
+fn typing_carries_on_during_a_build_and_it_can_be_stopped() {
+    let env = Env::new();
+    let script = "sleep 2 && touch finished.txt\n";
+    let (paper, mut p) = open_build(&env, "x\n", script);
+    p.send_keys(&["C-b"]);
+    wait_status(&p, "building PDF");
+    type_text(&mut p, "typed ");
+    p.send_keys(&["C-b"]);
+    p.wait_for("Already building", TIMEOUT);
+    run_from_palette(&mut p, "Stop build");
+    p.wait_for("Build stopped", TIMEOUT);
+    assert!(!status(&p).contains("building"), "{}", status(&p));
+    std::thread::sleep(Duration::from_millis(2300));
+    assert!(!paper.parent().unwrap().join("finished.txt").exists());
+    run_from_palette(&mut p, "Stop build");
+    p.wait_for("No build is running", TIMEOUT);
+    abandon(&mut p);
+}
+
+#[test]
+fn quitting_stops_a_build_and_doesnt_wait_for_it() {
+    let env = Env::new();
+    let script = "sleep 3 && touch finished.txt\n";
+    let (paper, mut p) = open_build(&env, "x\n", script);
+    p.send_keys(&["C-b"]);
+    wait_status(&p, "building PDF");
+    let start = Instant::now();
+    quit_clean(&mut p);
+    assert!(
+        start.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        start.elapsed()
+    );
+    std::thread::sleep(Duration::from_millis(3300));
+    assert!(!paper.parent().unwrap().join("finished.txt").exists());
+}
+
+#[test]
+fn only_latex_builds_and_a_missing_latexmk_is_explained() {
+    let env = Env::new();
+    let f = work_file(&env, "notes.md", "x\n");
+    let mut p = open_writing(&env, &f, "");
+    p.send_keys(&["C-b"]);
+    p.wait_for("Build PDF works on LaTeX files", TIMEOUT);
+    quit_clean(&mut p);
+    let paper = work_file(&env, "paper.tex", "x\n");
+    let empty = env.path("no-programs");
+    fs::create_dir(&empty).unwrap();
+    let mut p = Pty::spawn(
+        Spawn::new(bin())
+            .env("KYTE_STATE_DIR", env.state.to_string_lossy())
+            .env("PATH", empty.to_string_lossy())
+            .arg("--no-kitty")
+            .arg(paper.to_str().unwrap()),
+    );
+    p.wait_for("Ln 1, Col 1", TIMEOUT);
+    p.send_keys(&["C-b"]);
+    p.wait_for("latexmk isn't installed", TIMEOUT);
+    quit_clean(&mut p);
+}
+
+#[test]
+fn latex_tools_work_with_the_writing_setup_off() {
+    let env = Env::new();
+    let paper = work_file(&env, "paper.tex", "x\n");
+    let dir = paper.parent().unwrap();
+    fs::write(dir.join("refs.bib"), REFS).unwrap();
+    let settings = "writing = false\nbuild_command = \"true\"\n";
+    let mut p = open_writing(&env, &paper, settings);
+    p.wait_for("1 │ x", TIMEOUT);
+    assert!(!status(&p).contains("word"), "{}", status(&p));
+    p.send_str("\\cite{");
+    p.wait_for(" Cite ", TIMEOUT);
+    p.send_keys(&["Enter"]);
+    p.wait_for("\\cite{knuth84}x", TIMEOUT);
+    p.send_keys(&["C-b"]);
+    p.wait_for("Built paper.pdf", TIMEOUT);
+    quit_clean(&mut p);
+}
+
+#[test]
+fn a_chapter_builds_the_root_it_names() {
+    let env = Env::new();
+    let paper = work_file(&env, "ch1.tex", "% !TEX root = thesis.tex\ntext\n");
+    let dir = paper.parent().unwrap();
+    fs::write(dir.join("thesis.tex"), "\\documentclass{book}\n").unwrap();
+    fs::write(dir.join("build.sh"), "echo \"$1\" > built.txt\n").unwrap();
+    let mut p = open_writing(&env, &paper, "build_command = \"sh build.sh %f\"\n");
+    p.send_keys(&["C-b"]);
+    p.wait_for("Built thesis.pdf", TIMEOUT);
+    assert_eq!(
+        fs::read_to_string(dir.join("built.txt")).unwrap(),
+        "thesis.tex\n"
+    );
+    quit_clean(&mut p);
+}
+
+#[test]
+fn esc_o_shows_the_pdf_once_there_is_one() {
+    let env = Env::new();
+    let (paper, mut p) = open_build(&env, "x\n", "touch paper.pdf\n");
+    let dir = paper.parent().unwrap();
+    fs::write(dir.join("show.sh"), "echo \"$1\" > shown.txt\n").unwrap();
+    open_overlay(&mut p);
+    p.wait_for("open PDF", TIMEOUT);
+    p.send_str("o");
+    p.wait_for("No PDF yet", TIMEOUT);
+    p.send_keys(&["C-b"]);
+    p.wait_for("Built paper.pdf", TIMEOUT);
+    esc_then(&mut p, "o");
+    let shown = dir.join("shown.txt");
+    let deadline = Instant::now() + TIMEOUT;
+    while !shown.exists() {
+        assert!(Instant::now() < deadline, "the viewer didn't run");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    quit_clean(&mut p);
+    assert_eq!(fs::read_to_string(&shown).unwrap().trim(), "paper.pdf");
 }

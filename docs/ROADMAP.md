@@ -77,7 +77,7 @@ Kyte's pitch is an editor you can't lose work in and don't have to learn.
 - [x] Swift, LaTeX and BibTeX highlighting
 - [x] A Writing setup for Markdown, text and LaTeX: wrap, word count and spell check
 - [x] Citation keys from `.bib` files as you type `\\cite{`
-- [ ] Building a paper's PDF from inside Kyte
+- [x] Building a paper's PDF from inside Kyte
 - [ ] Multiple cursors and mouse support
 - [ ] Code intelligence (LSP)
 - [ ] Re-record the demo, which still shows the footer legend (needs `agg`)

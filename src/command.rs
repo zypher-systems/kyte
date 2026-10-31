@@ -23,6 +23,10 @@ pub enum Command {
     ChooseTheme,
     FileTree,
     InsertCitation,
+    BuildPdf,
+    StopBuild,
+    BuildProblems,
+    OpenPdf,
     FixSpelling,
     NextMisspelling,
     ToggleSpelling,
@@ -59,6 +63,10 @@ pub const REGISTRY: &[Command] = &[
     Command::ChooseTheme,
     Command::FileTree,
     Command::InsertCitation,
+    Command::BuildPdf,
+    Command::StopBuild,
+    Command::BuildProblems,
+    Command::OpenPdf,
     Command::FixSpelling,
     Command::NextMisspelling,
     Command::ToggleSpelling,
@@ -96,6 +104,10 @@ impl Command {
             Command::ChooseTheme => "Choose theme",
             Command::FileTree => "File tree",
             Command::InsertCitation => "Insert citation",
+            Command::BuildPdf => "Build PDF",
+            Command::StopBuild => "Stop build",
+            Command::BuildProblems => "Show build problems",
+            Command::OpenPdf => "Open PDF",
             Command::FixSpelling => "Fix spelling",
             Command::NextMisspelling => "Next misspelling",
             Command::ToggleSpelling => "Toggle spell check",
@@ -134,6 +146,10 @@ impl Command {
             Command::ChooseTheme => "",
             Command::FileTree => "Ctrl-T",
             Command::InsertCitation => "Esc q",
+            Command::BuildPdf => "Ctrl-B",
+            Command::StopBuild => "",
+            Command::BuildProblems => "",
+            Command::OpenPdf => "Esc o",
             Command::FixSpelling => "Esc z",
             Command::NextMisspelling => "Esc m",
             Command::ToggleSpelling => "",
@@ -178,6 +194,7 @@ pub const KEY_HELP: &[(&str, &str)] = &[
     ("Ctrl-F, Ctrl-R", "search, replace"),
     ("Ctrl-K", "commands, files, :line, /text"),
     ("Ctrl-T", "file tree"),
+    ("Ctrl-B", "build a LaTeX file's PDF"),
     ("Ctrl-P", "command palette"),
     ("Esc, Ctrl-Space, Alt-key", "operator layer:"),
     ("  w  d  k", "del word, del line, del to end"),
@@ -206,7 +223,7 @@ mod tests {
 
     #[test]
     fn every_command_has_a_label() {
-        assert_eq!(REGISTRY.len(), 32);
+        assert_eq!(REGISTRY.len(), 36);
         let labels: Vec<&str> = REGISTRY.iter().map(|c| c.label()).collect();
         assert_eq!(
             labels,
@@ -231,6 +248,10 @@ mod tests {
                 "Choose theme",
                 "File tree",
                 "Insert citation",
+                "Build PDF",
+                "Stop build",
+                "Show build problems",
+                "Open PDF",
                 "Fix spelling",
                 "Next misspelling",
                 "Toggle spell check",

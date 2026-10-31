@@ -5,6 +5,7 @@
 pub mod app;
 pub mod bib;
 pub mod buffer;
+pub mod build;
 pub mod cli;
 pub mod clipboard;
 pub mod command;
@@ -47,6 +48,7 @@ use swap::SwapWriter;
 
 /// How long the event loop waits for input before calling `App::tick`.
 const POLL: Duration = Duration::from_millis(1000);
+const BUILD_POLL: Duration = Duration::from_millis(100);
 
 /// Runs the editor with parsed options and returns the process exit code.
 pub fn run(opts: Options) -> anyhow::Result<ExitCode> {
@@ -206,7 +208,9 @@ fn event_loop(app: &mut App, no_kitty: bool) -> anyhow::Result<()> {
         if app.quit {
             break;
         }
-        if event::poll(POLL)? {
+        // A build's end should show soon after it happens.
+        let wait = if app.building() { BUILD_POLL } else { POLL };
+        if event::poll(wait)? {
             let ev = event::read()?;
             if let Some(input) = input::map_event(ev) {
                 app.handle_input(input, Instant::now())?;

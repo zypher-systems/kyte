@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use crate::build::Problem;
 use crate::command::{Command, REGISTRY};
 use crate::ui::theme::ThemeName;
 
@@ -65,6 +66,8 @@ pub enum Entry {
         key: String,
         line: String,
     },
+    /// Something a build reported.
+    Problem(Problem),
     /// A spelling to put in place of the characters at `range`.
     Spelling {
         with: String,
@@ -92,6 +95,7 @@ impl Entry {
             Entry::Theme(t) => t.label().to_string(),
             Entry::OpenFile { name, .. } => name.clone(),
             Entry::Citation { line, .. } => line.clone(),
+            Entry::Problem(p) => p.label(),
             Entry::Spelling { with, .. } => with.clone(),
             Entry::AddWord(word) => format!("Add {word} to my words"),
             Entry::IgnoreWord(word) => format!("Ignore {word} for now"),
@@ -105,6 +109,7 @@ impl Entry {
             Entry::Line(_)
             | Entry::Find(_)
             | Entry::Citation { .. }
+            | Entry::Problem(_)
             | Entry::Spelling { .. }
             | Entry::AddWord(_)
             | Entry::IgnoreWord(_) => "",
@@ -176,6 +181,11 @@ enum Source {
     OpenFiles(Arc<Vec<Entry>>),
     /// The works to cite.
     Citations(Arc<Vec<Entry>>),
+    /// What a build reported.
+    Problems {
+        title: String,
+        rows: Arc<Vec<Entry>>,
+    },
     /// What to do about a misspelled word.
     Spelling {
         word: String,
@@ -242,6 +252,33 @@ impl PaletteState {
 
     pub fn is_citations(&self) -> bool {
         matches!(self.source, Source::Citations(_))
+    }
+
+    /// What a build reported, under `title`.
+    pub fn problems(title: String, rows: Vec<Entry>) -> PaletteState {
+        let mut state = PaletteState {
+            source: Source::Problems {
+                title,
+                rows: Arc::new(rows),
+            },
+            ..PaletteState::default()
+        };
+        state.set_query(String::new());
+        state
+    }
+
+    /// This box's title, if it carries its own.
+    pub fn own_title(&self) -> Option<String> {
+        match &self.source {
+            Source::Spelling { word, .. } => Some(format!("Fix {word}")),
+            Source::Problems { title, .. } => Some(title.clone()),
+            _ => None,
+        }
+    }
+
+    /// Whether rows are sentences, which need room and keep their start.
+    pub fn is_wide(&self) -> bool {
+        matches!(self.source, Source::Citations(_) | Source::Problems { .. })
     }
 
     /// What to do about the misspelled `word`.
@@ -311,7 +348,7 @@ impl PaletteState {
                 scored.sort_by_key(|(s, _)| std::cmp::Reverse(*s));
                 scored.into_iter().map(|(_, f)| f.clone()).collect()
             }
-            Source::Spelling { rows, .. } => rows
+            Source::Spelling { rows, .. } | Source::Problems { rows, .. } => rows
                 .iter()
                 .filter(|r| score(&self.query, &r.label()).is_some())
                 .cloned()
@@ -366,7 +403,7 @@ mod tests {
     #[test]
     fn empty_query_keeps_registry_order() {
         assert_eq!(filter(""), REGISTRY.to_vec());
-        assert_eq!(PaletteState::default().results.len(), 32);
+        assert_eq!(PaletteState::default().results.len(), 36);
     }
 
     #[test]
@@ -534,13 +571,13 @@ mod tests {
         for _ in 0..40 {
             s.down();
         }
-        assert_eq!(s.selected, 31);
+        assert_eq!(s.selected, 35);
         assert_eq!(s.selected_command(), Some(Command::ShowKeyHelp));
-        assert_eq!(s.scroll_offset(), 24);
+        assert_eq!(s.scroll_offset(), 28);
         s.push('s');
         assert_eq!(s.selected, 0);
         assert_eq!(s.selected_command(), Some(Command::Save));
         s.pop();
-        assert_eq!(s.results.len(), 32);
+        assert_eq!(s.results.len(), 36);
     }
 }
