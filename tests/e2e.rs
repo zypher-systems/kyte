@@ -3781,3 +3781,29 @@ fn keeping_your_side_of_a_review_counts_as_unsaved() {
     p.send_str("n");
     assert_eq!(p.wait_exit(TIMEOUT), 0);
 }
+
+#[test]
+fn a_crash_right_after_keeping_your_side_of_a_review_loses_nothing() {
+    let env = Env::new();
+    let a = work_file(&env, "a.txt", "aaa\n");
+    let mut p = env.open(&a);
+    p.wait_for("1 │ aaa", TIMEOUT);
+    fs::write(&a, "theirs\n").unwrap();
+    wait_status(&p, "changed on disk");
+    open_overlay(&mut p);
+    p.send_str("c");
+    p.wait_for("Keep yours", TIMEOUT);
+    p.send_str("n");
+    wait_status(&p, "a.txt [+]");
+    p.kill9();
+    assert_eq!(print_swap(&env, &a), (0, "aaa\n".to_string()));
+    let mut p = Pty::kyte(&bin(), &env.state, &[a.to_str().unwrap()]);
+    p.wait_for("Recover unsaved changes", TIMEOUT);
+    p.send_str("r");
+    p.wait_for("1 │ aaa", TIMEOUT);
+    wait_status(&p, "a.txt [+]");
+    p.send_keys(&["C-q"]);
+    p.wait_for("Unsaved changes", TIMEOUT);
+    p.send_str("n");
+    assert_eq!(p.wait_exit(TIMEOUT), 0);
+}

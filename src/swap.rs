@@ -695,6 +695,21 @@ impl SwapWriter {
         Ok(())
     }
 
+    /// Makes a buffer with no edits recoverable, for when the file moves on
+    /// and the buffer stays behind. A swap holds no copy of its base until the
+    /// first edit, and with no edits a crash offers nothing, so this writes the
+    /// copy and an edit that changes nothing.
+    pub fn keep_base(&mut self) -> io::Result<()> {
+        if self.pending_base.is_none() {
+            return Ok(());
+        }
+        self.append(&[Edit {
+            at: 0,
+            removed: String::new(),
+            inserted: String::new(),
+        }])
+    }
+
     pub fn fsync_if_pending(&mut self) -> io::Result<()> {
         if self.pending_fsync {
             self.file.sync_data()?;

@@ -24,10 +24,11 @@ These replace the matching parts of `ARCHITECTURE`. `docs/ROADMAP.md` holds the 
 - Files on the command line open one at a time, stopping for any with crashed edits to recover. A later file that can't be opened is reported and skipped, and only the first decides the exit code.
 - Changing files uses Esc `b`, `.` and `,`. Ctrl-Tab doesn't reach programs in most terminals, and terminals with tabs take Ctrl-PageUp and Ctrl-PageDown.
 - After a crash, each file offers recovery when it's reopened. Nothing lists them all yet.
-- An independent review fuzzed thousands of random sessions and found three ways to lose work, now fixed:
+- An independent review fuzzed thousands of random sessions and found ways to lose work, now fixed:
   - `resolve_target` left `..` in a dangling symlink's path, so two spellings of one new file looked different and both opened. It now follows the whole chain and canonicalizes the directory. `write_file` also checks again before saving, because a symlink can move onto an open file mid-session.
   - Save As only refused a live lock, so it could truncate a crashed session's swap. It now refuses recoverable and stale swaps too.
   - Keeping your side of a review left a buffer that differed from disk marked clean, so closing it asked nothing. It's now marked unsaved.
+  - With no edits, that buffer was also missing from the swap, which keeps no copy of its base until the first edit. Fuzzing the fix found this. `keep_base` now writes the copy and an empty edit, so a crash offers the text, and recovery says the file moved on.
 
 ## Soft wrap
 

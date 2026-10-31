@@ -2248,8 +2248,12 @@ impl App {
         if self.doc.buffer.to_string() == *run.theirs {
             self.doc.buffer.mark_clean();
         } else {
-            // What's kept here is no longer what's on disk.
+            // What's kept here is no longer what's on disk, so it's the only copy.
             self.doc.buffer.set_dirty();
+            if let Some(Err(e)) = self.doc.swap.as_mut().map(SwapWriter::keep_base) {
+                self.doc.swap_failed = true;
+                self.set_error(format!("Swap write failed: {e}"));
+            }
         }
         if !run.changes.is_empty() {
             let (took, all) = (run.accepted, run.changes.len());
