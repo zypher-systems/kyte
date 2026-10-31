@@ -45,33 +45,94 @@ pub struct Outcome {
     pub took: Duration,
 }
 
+/// The kinds of file a person might have to fix.
+const SOURCES: [&str; 6] = [".tex", ".ltx", ".sty", ".cls", ".bib", ".bbl"];
+
 /// Whether `name` is a file a person might have to fix.
 fn is_source(name: &str) -> bool {
-    let tex = [".tex", ".ltx", ".sty", ".cls", ".bib", ".bbl"];
-    tex.iter().any(|t| name.ends_with(t))
+    SOURCES.iter().any(|t| name.ends_with(t))
+}
+
+/// The local source file named at the start of `text`, the rest of a line after
+/// a `(`. A name can hold spaces, so it runs through its extension. TeX quotes
+/// some names.
+fn source_name(text: &str) -> Option<&str> {
+    let text = text.strip_prefix('"').unwrap_or(text);
+    if !text.starts_with("./") && !text.starts_with("../") {
+        return None;
+    }
+    let text = &text[..text.find(['(', ')', '"']).unwrap_or(text.len())];
+    text.match_indices('.').find_map(|(at, _)| {
+        let end = at + SOURCES.iter().find(|t| text[at..].starts_with(**t))?.len();
+        let ended = text[end..]
+            .chars()
+            .next()
+            .is_none_or(|c| matches!(c, ' ' | '['));
+        ended.then(|| &text[..end])
+    })
+}
+
+/// Document text TeX is echoing, which needn't balance.
+#[derive(Clone, Copy, PartialEq)]
+enum Echo {
+    /// The line after `Overfull` or `Underfull`, up to a blank line.
+    Box,
+    /// After `Runaway argument?`, up to the error it leads to.
+    Runaway,
 }
 
 /// Follows which file TeX is reading. It prints `(` and a name on entering a
 /// file and `)` on leaving, and other text has parentheses too, so all of them
 /// are tracked, with a name only where there is one.
-fn track_files(line: &str, open: &mut Vec<Option<String>>) {
-    // Where an error is shown, TeX echoes the document, which needn't balance.
-    let echoed = line.starts_with("l.") || line.starts_with(' ') || line.starts_with('<');
-    if echoed {
-        return;
+#[derive(Default)]
+struct Files {
+    open: Vec<Option<String>>,
+    echo: Option<Echo>,
+}
+
+impl Files {
+    /// The file being read, as the build named it.
+    fn current(&self) -> Option<&str> {
+        let file = self.open.iter().rev().flatten().next()?;
+        Some(file.strip_prefix("./").unwrap_or(file))
     }
-    for (i, c) in line.char_indices() {
-        match c {
-            '(' => {
-                let rest = &line[i + 1..];
-                let name = rest.split([' ', '(', ')']).next().unwrap_or_default();
-                let local = name.starts_with("./") || name.starts_with("../");
-                open.push((local && is_source(name)).then(|| name.to_string()));
+
+    fn read(&mut self, line: &str) {
+        match self.echo {
+            Some(Echo::Box) if !line.trim().is_empty() => return,
+            Some(Echo::Runaway) if !line.starts_with('!') && error_line(line).is_none() => return,
+            _ => self.echo = None,
+        }
+        // The line of a box needn't balance, but the report of one does.
+        let full = line.starts_with("Overfull \\") || line.starts_with("Underfull \\");
+        if full && !line.ends_with("[]") {
+            self.echo = Some(Echo::Box);
+            return;
+        }
+        if line.starts_with("Runaway argument?") || line.starts_with("Runaway text?") {
+            self.echo = Some(Echo::Runaway);
+            return;
+        }
+        // Around an error TeX echoes the document, set off like this.
+        if line.starts_with("l.") || line.starts_with(' ') || line.starts_with('<') {
+            return;
+        }
+        let mut skip_to = 0;
+        for (i, c) in line.char_indices() {
+            if i < skip_to {
+                continue;
             }
-            ')' => {
-                open.pop();
+            match c {
+                '(' => {
+                    let name = source_name(&line[i + 1..]);
+                    skip_to = name.map_or(0, |n| i + 1 + n.len());
+                    self.open.push(name.map(str::to_string));
+                }
+                ')' => {
+                    self.open.pop();
+                }
+                _ => {}
             }
-            _ => {}
         }
     }
 }
@@ -118,17 +179,12 @@ pub fn problems(output: &str, root: &str) -> (Vec<Problem>, Vec<Problem>) {
     // A `!` error, such as a missing package, gives its place on a later line.
     let mut placeless: Option<usize> = None;
     let last_pass = output.rfind("This is ").unwrap_or(0);
-    let mut open = Vec::new();
+    let mut files = Files::default();
     for line in output.lines() {
         if line.starts_with("This is ") {
-            open.clear();
+            files = Files::default();
         }
-        let file = open
-            .iter()
-            .rev()
-            .flatten()
-            .next()
-            .map_or(root, |f: &String| f.strip_prefix("./").unwrap_or(f));
+        let file = files.current().unwrap_or(root);
         if let Some(text) = line.strip_prefix("! ") {
             let p = Problem {
                 file: file.to_string(),
@@ -161,7 +217,7 @@ pub fn problems(output: &str, root: &str) -> (Vec<Problem>, Vec<Problem>) {
                 warnings.push(p);
             }
         }
-        track_files(line, &mut open);
+        files.read(line);
     }
     (errors, warnings)
 }
@@ -444,6 +500,114 @@ l.4 \notacommand (unbalanced
 LaTeX Warning: Citation `atend' on page 2 undefined on input line 9.
 
 "#;
+
+    /// From real `latexmk` output: text that overflows its box, with a stray
+    /// `)`, and included files with spaces in their names.
+    const REAL_BOXES: &str = r#"This is pdfTeX, Version 3.141592653-2.6-1.40.29 (TeX Live 2026) (preloaded format=pdflatex)
+(./main.tex
+LaTeX2e <2026-06-01>
+(./ch/boxes.tex
+Overfull \hbox (258.99226pt too wide) detected at line 1
+\OT1/cmr/m/n/10 Smith) says something long enough to overflow the box width really
+
+Underfull \hbox (badness 10000) detected at line 2
+\OT1/cmr/m/n/10 a) b
+
+Overfull \hbox (255.50113pt too wide) in paragraph at lines 3--6
+[][] 
+
+Overfull \hbox (31.83414pt too wide) in paragraph at lines 7--8
+\OT1/cmr/m/n/10 Paragraph with a very-long-unbreakable-word Smith) Supercalifragilisticexpialidocious-
+
+LaTeX Warning: Citation `inboxes' on page 1 undefined on input line 9.
+
+)
+
+LaTeX Warning: Citation `aftersboxes' on page 1 undefined on input line 4.
+
+(./ch/my chapter.tex
+
+LaTeX Warning: Citation `inspaced' on page 1 undefined on input line 2.
+
+)
+
+LaTeX Warning: Citation `afterspace' on page 1 undefined on input line 6.
+
+[1{/usr/local/texlive/2026/texmf-var/fonts/map/pdftex/updmap/pdftex.map}]
+
+LaTeX Warning: Citation `lastroot' on page 2 undefined on input line 10.
+
+[2] (./main.aux)
+"#;
+
+    /// From real `latexmk` output: an argument that never closes.
+    const REAL_RUNAWAY: &str = r#"This is pdfTeX, Version 3.141592653-2.6-1.40.29 (TeX Live 2026) (preloaded format=pdflatex)
+(./run.tex
+(./ch/run.tex
+Runaway argument?
+{Smith) unclosed argument \par \cite {inrun} 
+./ch/run.tex:4: File ended while scanning use of \foo.
+<inserted text> 
+                \par 
+l.4 \input{ch/run}
+                  
+LaTeX Warning: Citation `here' on page 1 undefined on input line 2.
+
+)
+
+LaTeX Warning: Citation `afterrun' on page 1 undefined on input line 5.
+
+"#;
+
+    fn places(warnings: &[Problem]) -> Vec<String> {
+        let place = |p: &Problem| format!("{}:{}", p.file, p.line);
+        warnings.iter().map(place).collect()
+    }
+
+    #[test]
+    fn a_stray_parenthesis_in_a_box_doesnt_end_the_file() {
+        let (_, warnings) = problems(REAL_BOXES, "main.tex");
+        assert_eq!(
+            places(&warnings),
+            [
+                "ch/boxes.tex:9",
+                "main.tex:4",
+                "ch/my chapter.tex:2",
+                "main.tex:6",
+                "main.tex:10",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_stray_parenthesis_in_runaway_text_doesnt_end_the_file() {
+        let (errors, warnings) = problems(REAL_RUNAWAY, "run.tex");
+        assert_eq!(places(&warnings), ["ch/run.tex:2", "run.tex:5"]);
+        assert_eq!(errors[0].file, "ch/run.tex");
+    }
+
+    #[test]
+    fn a_box_with_nothing_to_show_doesnt_hide_the_next_line() {
+        let output = "(./a.tex\nUnderfull \\vbox (badness 10000) has occurred while \\output is active []\n(./ch.tex\nLaTeX Warning: Citation `x' on page 1 undefined on input line 2.\n";
+        assert_eq!(places(&problems(output, "a.tex").1), ["ch.tex:2"]);
+    }
+
+    #[test]
+    fn source_names_can_hold_spaces_and_quotes() {
+        assert_eq!(source_name("./my chapter.tex"), Some("./my chapter.tex"));
+        assert_eq!(
+            source_name("\"./my chapter.tex\""),
+            Some("./my chapter.tex")
+        );
+        assert_eq!(source_name("../up.tex [1]"), Some("../up.tex"));
+        assert_eq!(source_name("./a.tex)"), Some("./a.tex"));
+        assert_eq!(source_name("./a.tex (./b.tex"), Some("./a.tex"));
+        assert_eq!(source_name("./a.aux"), None);
+        assert_eq!(source_name("./my.texture"), None);
+        assert_eq!(source_name("Default extension: sty)"), None);
+        assert_eq!(source_name("see the transcript"), None);
+        assert_eq!(source_name("/usr/share/a.tex"), None);
+    }
 
     #[test]
     fn a_warning_belongs_to_the_file_tex_was_reading() {

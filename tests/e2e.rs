@@ -4744,11 +4744,14 @@ fn a_bibliography_that_isnt_a_plain_file_cant_hang_the_editor() {
     fs::write(dir.join("good.bib"), REFS).unwrap();
     std::os::unix::fs::symlink("/dev/zero", dir.join("zero.bib")).unwrap();
     let fifo = dir.join("pipe.bib");
-    assert!(Command::new("mkfifo")
-        .arg(&fifo)
-        .status()
-        .unwrap()
-        .success());
+    rustix::fs::mknodat(
+        rustix::fs::CWD,
+        &fifo,
+        rustix::fs::FileType::Fifo,
+        rustix::fs::Mode::from_raw_mode(0o600),
+        0,
+    )
+    .unwrap();
     let huge = fs::File::create(dir.join("huge.bib")).unwrap();
     huge.set_len(33 * 1024 * 1024).unwrap();
     let mut p = open_writing(&env, &paper, "");

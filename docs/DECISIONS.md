@@ -82,7 +82,7 @@ These replace the matching parts of `ARCHITECTURE`. `docs/ROADMAP.md` holds the 
 - Errors only open the box from plain editing, so a build ending can't take over a question or a search.
 - Being LaTeX is separate from showing for writing, so `writing = false` keeps citations and Ctrl-B. A test caught them disappearing together.
 - A chapter finds its root from `% !TEX root`, the convention other LaTeX editors use, and then from a `main.tex`.
-- A warning's file comes from following TeX's `(` and `)` as it enters and leaves files, so a citation undefined in a chapter opens that chapter. Ordinary text has parentheses too, so all of them are tracked, and the document text TeX echoes around an error is skipped because it needn't balance.
+- A warning's file comes from following TeX's `(` and `)` as it enters and leaves files, so a citation undefined in a chapter opens that chapter. Ordinary text has parentheses too, so all of them are tracked. Document text TeX echoes is skipped, because it needn't balance: around an error, in the lines after `Overfull` and `Underfull`, and after `Runaway argument?` up to its error. These forms all come from real runs. A file name can hold spaces, so a name runs through its extension.
 - Problems keep the folder that was built, because the file on screen can change before someone picks one. A file that has since gone is reported, not opened as a new empty one.
 - Unsaved files other than the one on screen aren't saved first. Saving can ask questions, and asking about several files before a build is more than a keypress should do.
 
