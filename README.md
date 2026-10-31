@@ -11,9 +11,25 @@ MIT License. See [LICENSE](LICENSE).
 
 ![Kyte demo](docs/demo/demo.gif)
 
-## Install and build
+## Install
 
-You need a recent stable Rust toolchain on Linux (Kyte was built and tested with 1.99.1).
+```
+curl -fsSL https://raw.githubusercontent.com/zypher-systems/kyte/main/install.sh | sh
+```
+
+This puts `kyte` in `~/.local/bin`, with no root needed, after checking the download against a signed list of checksums. It works on any x86-64 or arm64 Linux, because the binary is static. To update, run it again. To remove it, run the script with `--uninstall`.
+
+Or take a package from the [releases page](https://github.com/zypher-systems/kyte/releases):
+
+- **Fedora, RHEL:** `sudo dnf install ./kyte-<version>-1.x86_64.rpm`
+- **Debian, Ubuntu:** `sudo apt install ./kyte_<version>-1_amd64.deb`
+- **Anything else:** unpack `kyte-<target>.tar.gz` and put `kyte` on your `PATH`
+
+Kyte runs on Linux only. Building a PDF needs LaTeX installed separately; see [Building the PDF](#building-the-pdf).
+
+## Build from source
+
+You need a recent stable Rust toolchain, and a C compiler for the grammars.
 
 ```
 cargo build --release          # binary at target/release/kyte
@@ -373,7 +389,7 @@ These Docker files have not been run yet, because the build machine had no Docke
 - Files over 512 KiB aren't syntax highlighted, because each keystroke re-parses the file. LaTeX is the exception: Kyte parses only the text around the screen, so its size doesn't matter, though a verbatim block or a math block longer than a few KB can color wrongly when you're inside it. Typing takes under about 25 ms per key at 100 KB, and 60 to 115 ms near the limit, depending on the language.
 - Search takes under about 30 ms per key on a 38 MB ASCII file. On a file that size with non-ASCII text, ignoring case takes about 240 ms per key.
 - A very long single line costs more per keystroke, depending on what's in it. At the end of a 5 MB line on the build machine, plain ASCII takes about 8 ms, a line full of tabs about 45 ms, and CJK text about 170 ms.
-- Not in this version: mouse, splits, LSP, plugins, CRLF conversion, non-UTF-8 files, RPM/COPR packaging, and use as the default `$EDITOR`.
+- Not in this version: mouse, splits, LSP, plugins, CRLF conversion, non-UTF-8 files, and use as the default `$EDITOR`.
 
 ## Documentation
 

@@ -58,6 +58,7 @@ Kyte's pitch is an editor you can't lose work in and don't have to learn.
 ## Released: 0.4.0, working with other tools
 
 - [x] Review changes made by other tools, built on file history
+- [x] CI
 
 ## Released: 0.5.0, a working everyday editor
 
@@ -78,6 +79,7 @@ Kyte's pitch is an editor you can't lose work in and don't have to learn.
 - [x] A Writing setup for Markdown, text and LaTeX: wrap, word count and spell check
 - [x] Citation keys from `.bib` files as you type `\cite{`
 - [x] Building a paper's PDF from inside Kyte
+- [x] Releases with an installer, `.deb`, `.rpm` and signed checksums
 - [ ] Multiple cursors and mouse support
 - [ ] Code intelligence (LSP)
 - [ ] Re-record the demo, which still shows the footer legend (needs `agg`)
@@ -90,7 +92,8 @@ Keep using Kyte for real work along the way, on actual terminals with the kitty 
 - A high-contrast theme
 - Splits
 - Incremental parsing, and languages embedded in others
-- Packaging, and use as `$EDITOR`
+- A Fedora COPR and an Arch AUR package, so package managers can update Kyte
+- Use as `$EDITOR`
 
 ## What 1.0 means
 
@@ -109,3 +112,4 @@ Proposed, not yet confirmed.
 
 ## Repository
 
+Kyte is open source at [github.com/zypher-systems/kyte](https://github.com/zypher-systems/kyte). `main` holds releases, and `dev` collects finished work.

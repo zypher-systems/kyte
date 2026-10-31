@@ -4,6 +4,11 @@ version = "0.5.0"
 edition = "2021"
 description = "Kyte: a terminal text editor"
 license = "MIT"
+repository = "https://github.com/zypher-systems/kyte"
+homepage = "https://github.com/zypher-systems/kyte"
+readme = "README.md"
+keywords = ["editor", "terminal", "text-editor", "latex", "tui"]
+categories = ["text-editors", "command-line-utilities"]
 publish = false
 
 [lib]
@@ -110,6 +115,41 @@ tempfile = "3"
 proptest = "1"
 portable-pty = "0.9"
 vt100 = "0.18"
+
+# `cargo generate-rpm --target <triple> -o dist/` (the release workflow does
+# this, after packaging/dist.sh).
+[package.metadata.generate-rpm]
+name = "kyte"
+summary = "A terminal text editor that doesn't lose your work"
+license = "MIT"
+url = "https://github.com/zypher-systems/kyte"
+assets = [
+    { source = "target/release/kyte", dest = "/usr/bin/kyte", mode = "755" },
+    { source = "LICENSE", dest = "/usr/share/licenses/kyte/LICENSE", mode = "644", doc = true },
+    { source = "README.md", dest = "/usr/share/doc/kyte/README.md", mode = "644", doc = true },
+    # Written by packaging/dist.sh: run it first.
+    { source = "dist/third-party/*", dest = "/usr/share/doc/kyte/third-party/", mode = "644", doc = true },
+]
+
+# `cargo deb --no-build --no-strip --target <triple> -o dist/` (the release
+# workflow does this, after packaging/dist.sh): the same files as the RPM.
+[package.metadata.deb]
+name = "kyte"
+maintainer = "Zypher Systems <zypher@zyphersystems.com>"
+copyright = "2026, Zypher Systems"
+license-file = ["LICENSE", "0"]
+section = "editors"
+priority = "optional"
+depends = ""
+extended-description = """Kyte is a terminal text editor. It starts in insert mode, keeps every edit in a
+history you can browse, and recovers your work after a crash. It highlights 33
+languages, keeps several files open, checks spelling in writing, and can cite
+from a BibTeX file and build a LaTeX paper's PDF."""
+assets = [
+    ["target/release/kyte", "usr/bin/", "755"],
+    ["README.md", "usr/share/doc/kyte/", "644"],
+    ["dist/third-party/*", "usr/share/doc/kyte/third-party/", "644"],
+]
 
 [profile.release]
 debug = false

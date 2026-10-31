@@ -88,6 +88,7 @@ Hard rules: no network access at runtime, no secrets anywhere, no telemetry. Lin
 
 ## 4\. Repo, naming and layout
 
+- Repository: `zypher-systems/kyte` on GitHub.
 - Cargo package name `kyte-editor` (the `kyte` crate name is taken on crates.io). Library target named `kyte`, binary named `kyte`.
 - No license file yet (put "All rights reserved, license TBD" in the README).
 

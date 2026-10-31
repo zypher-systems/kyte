@@ -12,6 +12,16 @@ These replace the matching parts of `ARCHITECTURE`. `docs/ROADMAP.md` holds the 
 - License: MIT. This settles section 16 and the section 4 note.
 - Kyte isn't tied to any one OS. It's meant to be open source for everyone.
 
+## Getting Kyte
+
+- A release carries a `.tar.gz` for x86-64 and arm64, a `.deb` and an `.rpm` for each, signed checksums and `install.sh`. They all come from one workflow, so what's tested is what ships.
+- Binaries are static, built against musl, so one build runs on any Linux whatever its glibc. Kyte depends on nothing at run time, so the packages declare nothing.
+- The installer needs no root and goes to `~/.local/bin`. It checks a signature against a key it carries, so a mirror can't swap the files. `--from` skips that for a file someone already has.
+- Kyte has no updater. The README promises it makes no network connections, and that's worth more than the convenience. Updating is the installer again, or a package manager.
+- A tag makes a draft release, which a person publishes. A tag can't be released unsigned.
+- Third-party notices ship in every package: the crates that reach the binary, and the files kept in `vendor/`.
+- Linux only, because the swap lock reads `/proc`.
+
 ## Several open files
 
 - `App` holds the file on screen in `doc` and the rest in `parked`. Everything tied to one file moved into `Doc`, and what belongs to a modal screen stayed on `App`, because you can only change files from the editor itself.
@@ -149,6 +159,7 @@ These replace the matching parts of `ARCHITECTURE`. `docs/ROADMAP.md` holds the 
 
 ## CI
 
+- `.github/workflows/ci.yml` runs fmt, clippy and the tests, with and without default features, on pushes to `main`, `dev`, patch and hotfix branches, and on pull requests.
 - That image has no Node, which `actions/checkout` needs, so the job checks out with git.
 - The first runs found test races that never showed on the build machine, because the runner is slower: a popup's title could arrive before its rows. Tests now wait for what they check instead of reading the screen once.
 - The container runs as root, so the tests that need a read-only directory or file skip there. They run only on a normal user's machine, so run `cargo test` locally too.
