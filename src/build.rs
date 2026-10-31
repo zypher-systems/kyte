@@ -410,9 +410,10 @@ fn read_source(path: &Path) -> Option<Source> {
 /// so `Citation `key' ... on input line 12` is looked for as a key of a citation
 /// command ending at or before line 12, because inside a footnote or caption
 /// TeX gives the line that ends. The warning moves only if the file it's on
-/// doesn't mention the key there, and exactly one other file the build read
-/// cites it. "Mentions" is deliberately loose: a command this can't read, in a
-/// form it doesn't know, must never send a warning away from its own file.
+/// neither cites nor mentions the key there, and exactly one other file the
+/// build read cites it. "Mentions" is deliberately loose: a command this can't
+/// read, in a form it doesn't know, must never send a warning away from its own
+/// file. Both are needed, because a long citation ends far from its first key.
 pub fn check_against_source(warnings: &mut [Problem], output: &str, dir: &Path) {
     let names: Vec<&str> = sources_in(output)
         .into_iter()
@@ -432,7 +433,8 @@ pub fn check_against_source(warnings: &mut [Problem], output: &str, dir: &Path) 
                 .map(|s| (s.mentions(key, line), s.cites(key, line)))
                 .unwrap_or_default()
         };
-        if source(&warning.file).0 {
+        let (mentioned, cited) = source(&warning.file);
+        if mentioned || cited {
             continue;
         }
         let others: Vec<&&str> = names
@@ -1038,6 +1040,19 @@ LaTeX Warning: Citation `aftertail' on page 7 undefined on input line 14.
             vec![warning("ch.tex", 1, "key")],
         );
         assert_eq!(found, ["ch.tex:1"]);
+    }
+
+    #[test]
+    fn a_citation_longer_than_the_reach_of_a_mention_keeps_its_warning() {
+        let mut long = "\\cite{key,\n".to_string();
+        long.push_str(&"other,\n".repeat(41));
+        long.push_str("last}\n");
+        let elsewhere = format!("{}\\cite{{key}}\n", "x\n".repeat(42));
+        let found = checked(
+            &[("main.tex", &elsewhere), ("chapter.tex", &long)],
+            vec![warning("chapter.tex", 43, "key")],
+        );
+        assert_eq!(found, ["chapter.tex:43"]);
     }
 
     #[test]
