@@ -536,7 +536,8 @@ mod tests {
     #[test]
     fn the_later_languages_color_a_real_file() {
         use HighlightKind as K;
-        let cases: &[(Lang, &str, &[(&str, HighlightKind)])] = &[
+        type Case<'a> = (Lang, &'a str, &'a [(&'a str, HighlightKind)]);
+        let cases: &[Case] = &[
             (
                 Lang::Sql,
                 "-- users\nSELECT id FROM users WHERE age > 18.5 AND name = 'bob';\n",
