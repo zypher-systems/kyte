@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use crate::command::{Command, REGISTRY};
+use crate::ui::theme::ThemeName;
 
 /// Rows of results the popup shows at once.
 pub const VISIBLE_ROWS: usize = 8;
@@ -57,6 +58,8 @@ pub enum Entry {
     Line(usize),
     /// `/text` in the universal palette.
     Find(String),
+    /// A row of the theme picker.
+    Theme(ThemeName),
 }
 
 impl Entry {
@@ -66,6 +69,7 @@ impl Entry {
             Entry::File(p) => p.clone(),
             Entry::Line(n) => format!("Go to line {n}"),
             Entry::Find(q) => format!("Find {q}"),
+            Entry::Theme(t) => t.label().to_string(),
         }
     }
 
@@ -74,6 +78,8 @@ impl Entry {
             Entry::Command(c) => c.hint(),
             Entry::File(_) => "file",
             Entry::Line(_) | Entry::Find(_) => "",
+            Entry::Theme(t) if t.is_light() => "light",
+            Entry::Theme(_) => "dark",
         }
     }
 }
@@ -122,8 +128,19 @@ pub struct PaletteState {
     pub query: String,
     pub selected: usize,
     pub results: Vec<Entry>,
-    /// The universal palette's file list; `None` for the command palette.
-    files: Option<Arc<Vec<String>>>,
+    source: Source,
+}
+
+/// What the palette lists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Source {
+    Commands,
+    /// The universal palette, with its file list.
+    Universal(Arc<Vec<String>>),
+    /// The theme picker, with the theme to go back to on Esc.
+    Themes {
+        before: ThemeName,
+    },
 }
 
 impl Default for PaletteState {
@@ -132,7 +149,7 @@ impl Default for PaletteState {
             query: String::new(),
             selected: 0,
             results: filter("").into_iter().map(Entry::Command).collect(),
-            files: None,
+            source: Source::Commands,
         }
     }
 }
@@ -141,24 +158,59 @@ impl PaletteState {
     /// The Ctrl-K palette over `files`.
     pub fn universal(files: Vec<String>) -> PaletteState {
         let mut state = PaletteState {
-            files: Some(Arc::new(files)),
+            source: Source::Universal(Arc::new(files)),
             ..PaletteState::default()
         };
         state.set_query(String::new());
         state
     }
 
+    /// The theme picker, starting on `current`.
+    pub fn themes(current: ThemeName) -> PaletteState {
+        let mut state = PaletteState {
+            source: Source::Themes { before: current },
+            ..PaletteState::default()
+        };
+        state.set_query(String::new());
+        state.selected = ThemeName::ALL
+            .iter()
+            .position(|t| *t == current)
+            .unwrap_or(0);
+        state
+    }
+
     pub fn is_universal(&self) -> bool {
-        self.files.is_some()
+        matches!(self.source, Source::Universal(_))
+    }
+
+    /// The theme the picker started from.
+    pub fn theme_before(&self) -> Option<ThemeName> {
+        match self.source {
+            Source::Themes { before } => Some(before),
+            _ => None,
+        }
+    }
+
+    /// The theme on the selected row, to show while choosing.
+    pub fn theme_shown(&self) -> Option<ThemeName> {
+        match self.selected_entry() {
+            Some(Entry::Theme(t)) => Some(*t),
+            _ => None,
+        }
     }
 
     pub fn set_query(&mut self, q: String) {
         self.query = q;
-        self.results = match &self.files {
-            Some(files) => universal_filter(&self.query, files),
-            None => filter(&self.query)
+        self.results = match &self.source {
+            Source::Universal(files) => universal_filter(&self.query, files),
+            Source::Commands => filter(&self.query)
                 .into_iter()
                 .map(Entry::Command)
+                .collect(),
+            Source::Themes { .. } => ThemeName::ALL
+                .into_iter()
+                .filter(|t| score(&self.query, t.label()).is_some())
+                .map(Entry::Theme)
                 .collect(),
         };
         self.selected = 0;
@@ -210,7 +262,28 @@ mod tests {
     #[test]
     fn empty_query_keeps_registry_order() {
         assert_eq!(filter(""), REGISTRY.to_vec());
-        assert_eq!(PaletteState::default().results.len(), 22);
+        assert_eq!(PaletteState::default().results.len(), 23);
+    }
+
+    #[test]
+    fn the_theme_picker_starts_on_the_current_theme_and_filters() {
+        let mut s = PaletteState::themes(ThemeName::Ember);
+        assert_eq!(s.results.len(), ThemeName::ALL.len());
+        assert_eq!(s.theme_shown(), Some(ThemeName::Ember));
+        assert_eq!(s.theme_before(), Some(ThemeName::Ember));
+        typed(&mut s, "mos");
+        assert_eq!(s.results, vec![Entry::Theme(ThemeName::Moss)]);
+        assert_eq!(s.theme_shown(), Some(ThemeName::Moss));
+        typed(&mut s, "zz");
+        assert_eq!(s.theme_shown(), None);
+        assert_eq!(s.theme_before(), Some(ThemeName::Ember));
+    }
+
+    #[test]
+    fn only_the_light_theme_says_so() {
+        let hint = |t| Entry::Theme(t).hint();
+        assert_eq!(hint(ThemeName::Daybreak), "light");
+        assert_eq!(hint(ThemeName::Signal), "dark");
     }
 
     fn universal(files: &[&str]) -> PaletteState {
@@ -330,13 +403,13 @@ mod tests {
         for _ in 0..40 {
             s.down();
         }
-        assert_eq!(s.selected, 21);
+        assert_eq!(s.selected, 22);
         assert_eq!(s.selected_command(), Some(Command::ShowKeyHelp));
-        assert_eq!(s.scroll_offset(), 14);
+        assert_eq!(s.scroll_offset(), 15);
         s.push('s');
         assert_eq!(s.selected, 0);
         assert_eq!(s.selected_command(), Some(Command::Save));
         s.pop();
-        assert_eq!(s.results.len(), 22);
+        assert_eq!(s.results.len(), 23);
     }
 }

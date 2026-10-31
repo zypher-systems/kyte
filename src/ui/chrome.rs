@@ -416,6 +416,8 @@ pub fn palette(app: &App, text_area: Rect, cells: &mut Cells, theme: &Theme) -> 
     let area = centered(text_area, w, rows + 3 + rule);
     let title = if state.is_universal() {
         "Commands, files, :line, /text"
+    } else if state.theme_before().is_some() {
+        "Choose theme"
     } else {
         "Command palette"
     };

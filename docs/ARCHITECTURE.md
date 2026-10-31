@@ -427,7 +427,7 @@ Environment: `KYTE_STATE_DIR` (swap directory override, used by tests), `KYTE_ES
 - The bottom two rows are always the status bar and the message line, so opening the legend never shifts the text.
 - Palette: centered popup, up to 8 result rows plus the input line, drawn over the text.
 - Tabs render to the next multiple of 4 columns; wide characters use `unicode-width`; the terminal cursor is placed at the cursor's display position.
-- Theme: Signal, a near-black theme defined as a `Theme` built from a set of colors, once in 24-bit color and once in indexed 256-color values. `COLORTERM=truecolor` or `24bit` picks the first; anything else, including the pty tests and demo, gets the second. Provide fields for text, gutter, status bar, message, legend, palette box, selected row, error. Later themes are just more sets of colors.
+- Themes: each `ThemeName` has a set of colors in 24-bit color and another in indexed 256-color values, and a `Theme` is built from one of them. `COLORTERM=truecolor` or `24bit` picks the first; anything else, including the pty tests and demo, gets the second. Provide fields for text, gutter, status bar, message, legend, palette box, selected row, error. Later themes are just more sets of colors.
 - Minimum terminal size 20x5; below that, draw "terminal too small" instead of panicking.
 - No animation, no timers that repaint: the screen only changes on input, resize or message expiry on the next key. This keeps recordings and screenshots deterministic.
 

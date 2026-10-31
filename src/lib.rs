@@ -187,13 +187,14 @@ fn event_loop(app: &mut App, no_kitty: bool) -> anyhow::Result<()> {
     term::install_signal_handler()?;
     let _guard = term::TerminalGuard::enter(no_kitty)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(std::io::stdout()))?;
-    let theme = ui::theme::for_terminal(std::env::var("COLORTERM").ok().as_deref());
+    let truecolor = ui::theme::takes_24_bit(std::env::var("COLORTERM").ok().as_deref());
     let mut redraw = true;
     loop {
         if redraw {
             let size = terminal.size()?;
             app.layout(size.width, size.height);
-            terminal.draw(|f| ui::render(app, f, theme))?;
+            let theme = app.theme.styles(truecolor);
+            terminal.draw(|f| ui::render(app, f, &theme))?;
             redraw = false;
         }
         if app.quit {

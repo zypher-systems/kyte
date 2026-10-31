@@ -112,7 +112,12 @@ These replace the matching parts of `ARCHITECTURE`. `docs/ROADMAP.md` holds the 
 - Signal won from six candidates: near black with vivid color, 17.9:1 for text and 7.6:1 for comments. It replaced the old 256-color dark theme, whose comments fell short at 4.4:1.
 - The selection, added-line and faint colors moved slightly after the pick, because comments on a selection measured 3.3:1 and line numbers 4.1:1. Tests in `src/ui/theme.rs` hold code and chrome to 4.5:1 on every background they land on.
 - 24-bit color is used only when `COLORTERM` says `truecolor` or `24bit`. Anything else gets a hand-matched 256-color palette, since ratatui doesn't downsample and a wrong guess shows garbled colors. SSH and sudo usually drop `COLORTERM`, so those sessions get the 256-color palette, and `COLORTERM=truecolor kyte` overrides it.
-- The one known gap: the darkest green in 256 colors leaves code colors on added lines in change review under the minimum (keywords at 2.8:1). Plain text there reaches it.
+- The one known gap: the darkest green in 256 colors leaves code colors on added lines in change review under the minimum (keywords at 2.8:1 in Signal). Plain text there reaches it.
+- Six themes ship, and `theme` picks one. The other five moved from their mock-ups for the same reasons as Signal. Comments rose to about 7:1 on the editor background, so they stay readable on a selection, which is still clearly visible against the cursor's line.
+- Daybreak's search matches were white on yellow in the mock-up, so `on_matched` is its own color.
+- Dark backgrounds in 256 colors are gray, because that palette has nothing darker than `#00005f` in blue and nothing similar in brown or green. Harbor, Dusk, Ember and Moss differ there by their text colors.
+- The theme picker is the palette with a different list, so it filters and moves the same way. It shows each theme as the selection lands on it, because a name doesn't say what a theme looks like.
+- Enter keeps a theme for the session, as **Toggle soft wrap** does, and doesn't write the settings file. Kyte has never edited that file, which keeps a person's comments and layout safe.
 
 ## File history
 

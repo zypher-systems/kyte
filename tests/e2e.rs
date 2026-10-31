@@ -1083,7 +1083,7 @@ fn ac16_empty_query_does_nothing() {
 
 // ---------------------------------------------------------------- AC-17
 
-const COMMANDS: [&str; 22] = [
+const COMMANDS: [&str; 23] = [
     "Save",
     "Save as",
     "Open file",
@@ -1101,6 +1101,7 @@ const COMMANDS: [&str; 22] = [
     "Toggle line numbers",
     "Toggle tabs and spaces",
     "Toggle soft wrap",
+    "Choose theme",
     "File history",
     "Delete file history",
     "Reader mode",
@@ -1141,7 +1142,7 @@ fn ac17_palette_lists_every_command() {
         .collect();
     assert!(first_result(&p).contains("▸ Save"), "{}", p.dump());
     // 8 rows are visible at once; scrolling down reveals the rest
-    for _ in 0..21 {
+    for _ in 0..22 {
         p.send_keys(&["Down"]);
         std::thread::sleep(Duration::from_millis(5));
         for c in COMMANDS {
@@ -2104,6 +2105,46 @@ fn open_with_settings(env: &Env, file: &Path, settings: &str, extra: &[&str]) ->
     let pty = Pty::spawn(spawn.arg(file.to_str().unwrap()));
     pty.wait_for("Ln 1, Col 1", TIMEOUT);
     pty
+}
+
+/// Waits until the text area shows `color`, since a frame can arrive in parts.
+fn wait_for_bg(p: &Pty, color: vt100::Color) {
+    let deadline = Instant::now() + TIMEOUT;
+    while p.bg(5, 2) != Some(color) {
+        assert!(Instant::now() < deadline, "{color:?}\n{}", p.dump());
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn the_theme_setting_and_picker_change_the_colors() {
+    let harbor = vt100::Color::Rgb(0x0f, 0x1f, 0x2c);
+    let dusk = vt100::Color::Rgb(0x1b, 0x1d, 0x2b);
+    let env = Env::new();
+    let f = env.write("colors.txt", "text\n");
+    let config = env.dir.path().join("config.toml");
+    fs::write(&config, "theme = \"harbor\"\n").unwrap();
+    let mut p = Pty::spawn(
+        Spawn::new(bin())
+            .env("KYTE_STATE_DIR", env.state.to_string_lossy())
+            .env("KYTE_CONFIG", config.to_string_lossy())
+            .env("COLORTERM", "truecolor")
+            .arg("--no-kitty")
+            .arg(f.to_string_lossy()),
+    );
+    p.wait_for("Ln 1, Col 1", TIMEOUT);
+    assert_eq!(p.bg(5, 2), Some(harbor), "{}", p.dump());
+    p.send_keys(&["C-p"]);
+    p.wait_for("Command palette", TIMEOUT);
+    p.send_str("choose theme");
+    p.wait_for("Choose theme", TIMEOUT);
+    p.send_keys(&["Enter"]);
+    p.wait_for("Daybreak", TIMEOUT);
+    p.send_keys(&["Down"]);
+    wait_for_bg(&p, dusk);
+    p.send_keys(&["Esc"]);
+    wait_for_bg(&p, harbor);
+    quit_clean(&mut p);
 }
 
 #[test]

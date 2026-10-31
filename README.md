@@ -152,7 +152,7 @@ Under tmux, set `tmux set -g escape-time 10`. tmux's default of 500 ms delays ev
 
 Esc Esc (or Ctrl-P) opens a fuzzy-filtered list. Type to filter, Up and Down to select, Enter to run, Esc to close without running anything.
 
-Commands: Save, Save as, Open file, Quit, Quit without saving, Undo, Redo, Cut, Copy, Paste, Select all, Find, Replace, Go to line, Toggle line numbers, Toggle tabs and spaces, Toggle soft wrap, Show key help.
+Commands: Save, Save as, Open file, Quit, Quit without saving, Undo, Redo, Cut, Copy, Paste, Select all, Find, Replace, Go to line, Toggle line numbers, Toggle tabs and spaces, Toggle soft wrap, Choose theme, Show key help.
 
 Kyte works out whether a file indents with tabs or spaces, and how many, from its first 10,000 lines. A file with no indent uses tabs. The status bar shows `Spaces N` for space-indented files. **Toggle tabs and spaces** changes what new indent uses until the file is closed; it doesn't rewrite existing lines.
 
@@ -244,15 +244,27 @@ With soft wrap on, a long line continues on the next screen row, breaking after 
 | `indent_width` | `4` | How many spaces, when `indent` is `"spaces"` |
 | `line_numbers` | `true` | Show line numbers |
 | `soft_wrap` | `false` | Wrap long lines at the edge of the screen. **Toggle soft wrap** in the palette changes it for the session |
+| `theme` | `"signal"` | Colors: `"signal"`, `"harbor"`, `"dusk"`, `"ember"`, `"moss"` or `"daybreak"`. **Choose theme** in the palette changes it for the session |
 | `esc_ms` | `300` | Milliseconds to press Esc again for the palette |
 | `history` | `true` | Keep a history of every edit to each file |
 | `history_limit_mb` | `100` | Trim a file's history when it passes this size |
 
 Environment variables and command-line options override the file. A line Kyte can't use is skipped and reported on the first screen, and never stops Kyte from opening.
 
-## Colors
+## Themes
 
-Kyte's theme is Signal, near black with vivid color. It uses 24-bit color when the terminal says it can, through `COLORTERM=truecolor` or `COLORTERM=24bit`, and a close 256-color match otherwise. SSH and sudo usually drop that variable, so to get 24-bit color there, start Kyte with `COLORTERM=truecolor kyte`.
+**Choose theme** in the palette opens a box of themes. The screen changes as you move through the list, Enter keeps one for the session, and Esc puts the old one back. To keep one, set `theme` in the settings file.
+
+| Theme | Look |
+| --- | --- |
+| Signal | Near black with vivid color, the default and the strongest contrast |
+| Harbor | Navy and teal |
+| Dusk | Blue-violet with soft amber |
+| Ember | Warm charcoal with orange and gold |
+| Moss | Muted forest greens |
+| Daybreak | Light, cool white with ink blue |
+
+Themes use 24-bit color when the terminal says it can, through `COLORTERM=truecolor` or `COLORTERM=24bit`, and a close 256-color match otherwise. SSH and sudo usually drop that variable, so to get 24-bit color there, start Kyte with `COLORTERM=truecolor kyte`. In 256 colors the dark themes share a plain dark gray background, because that palette has no soft dark blues, browns or greens, so they differ mainly in their text colors.
 
 ## Swap files and recovery
 
@@ -317,7 +329,7 @@ These Docker files have not been run yet, because the build machine had no Docke
 - Files over 512 KiB aren't syntax highlighted, because each keystroke re-parses the file. Typing takes under about 25 ms per key at 100 KB, and 60 to 115 ms near the limit, depending on the language.
 - Search takes under about 30 ms per key on a 38 MB ASCII file. On a file that size with non-ASCII text, ignoring case takes about 240 ms per key.
 - A very long single line costs more per keystroke, depending on what's in it. At the end of a 5 MB line on the build machine, plain ASCII takes about 8 ms, a line full of tabs about 45 ms, and CJK text about 170 ms.
-- Not in this version: file tree, light and high-contrast themes, mouse, multiple buffers or splits, LSP, plugins, CRLF conversion, non-UTF-8 files, RPM/COPR packaging, and use as the default `$EDITOR`.
+- Not in this version: file tree, mouse, multiple buffers or splits, LSP, plugins, CRLF conversion, non-UTF-8 files, RPM/COPR packaging, and use as the default `$EDITOR`.
 
 ## Documentation
 

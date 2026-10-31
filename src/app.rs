@@ -19,6 +19,7 @@ use crate::search;
 use crate::session::{self, Opened};
 use crate::swap::{self, RecoverInfo, SwapStatus, SwapWriter};
 use crate::syntax;
+use crate::ui::theme::ThemeName;
 
 /// How soon after Esc a `[` or `O` counts as the rest of a split key sequence.
 /// A person can't reach those keys this fast, and they do nothing in the layer.
@@ -207,6 +208,7 @@ pub struct App {
     terminal_output: Option<String>,
     /// Names Tab found in a file prompt, shown until the next key.
     pub completions: Vec<String>,
+    pub theme: ThemeName,
     /// File history is wanted this session.
     history_on: bool,
     history_limit: u64,
@@ -276,6 +278,7 @@ impl App {
             clipboard_whole_line: false,
             terminal_output: None,
             completions: Vec::new(),
+            theme: opts.theme,
             history_on: false,
             history_limit: opts.history_limit_mb.saturating_mul(1_000_000),
             default_indent: opts.default_indent,
@@ -1323,6 +1326,14 @@ impl App {
                 }
             }
             Entry::Line(n) => self.go_to_line(n),
+            Entry::Theme(t) => {
+                self.theme = t;
+                let name = t.label();
+                let key = name.to_lowercase();
+                self.message = Some(format!(
+                    "{name} for this session. Set theme = \"{key}\" in settings to keep it"
+                ));
+            }
             Entry::Find(query) => {
                 self.buffer.clear_selection();
                 let origin = self.buffer.cursor();
@@ -1341,6 +1352,7 @@ impl App {
     fn palette_key(&mut self, key: Key, mut state: PaletteState) {
         match key {
             Key::Esc => {
+                self.theme = state.theme_before().unwrap_or(self.theme);
                 self.mode = Mode::Insert;
                 return;
             }
@@ -1357,6 +1369,7 @@ impl App {
             Key::Down => state.down(),
             _ => {}
         }
+        self.theme = state.theme_shown().unwrap_or(self.theme);
         self.mode = Mode::Palette(state);
     }
 
@@ -1388,6 +1401,7 @@ impl App {
                 self.scroll_row = 0;
                 self.scroll_left = 0;
             }
+            Command::ChooseTheme => self.mode = Mode::Palette(PaletteState::themes(self.theme)),
             Command::History => self.open_history(),
             Command::Reader => self.open_reader(),
             Command::Settings => self.open_settings(),
@@ -1506,6 +1520,7 @@ impl App {
             Mode::Palette(state) => {
                 let q = format!("{}{}", state.query, text.replace('\n', " "));
                 state.set_query(q);
+                self.theme = state.theme_shown().unwrap_or(self.theme);
             }
             Mode::Prompt(Prompt::Search { query, origin }) => {
                 query.push_str(&text.replace('\n', self.buffer.eol()));
@@ -3188,6 +3203,66 @@ mod tests {
         let mut a = wrapped(&"a".repeat(25));
         a.handle_key(Key::Select(Motion::Down), t).unwrap();
         assert_eq!(a.buffer.selection(), Some(0..10));
+    }
+
+    fn theme_picker(a: &mut App) {
+        a.run_command(Command::ChooseTheme);
+        assert!(matches!(&a.mode, Mode::Palette(s) if s.theme_before().is_some()));
+    }
+
+    #[test]
+    fn the_theme_picker_shows_each_theme_and_esc_puts_it_back() {
+        let t = Instant::now();
+        let mut a = app("x");
+        theme_picker(&mut a);
+        a.handle_key(Key::Down, t).unwrap();
+        assert_eq!(a.theme, ThemeName::Harbor);
+        a.handle_key(Key::Down, t).unwrap();
+        assert_eq!(a.theme, ThemeName::Dusk);
+        a.handle_key(Key::Up, t).unwrap();
+        assert_eq!(a.theme, ThemeName::Harbor);
+        a.handle_key(Key::Esc, t).unwrap();
+        assert_eq!(a.theme, ThemeName::Signal);
+        assert_eq!(a.mode, Mode::Insert);
+    }
+
+    #[test]
+    fn enter_keeps_the_theme_and_says_how_to_make_it_last() {
+        let t = Instant::now();
+        let mut a = app("x");
+        theme_picker(&mut a);
+        typ(&mut a, "ember");
+        assert_eq!(a.theme, ThemeName::Ember);
+        a.handle_key(Key::Enter, t).unwrap();
+        assert_eq!(a.theme, ThemeName::Ember);
+        assert_eq!(a.mode, Mode::Insert);
+        let said = a.message.clone().unwrap();
+        assert!(said.contains("theme = \"ember\""), "{said}");
+    }
+
+    #[test]
+    fn a_filter_with_no_match_keeps_the_last_theme_shown() {
+        let t = Instant::now();
+        let mut a = app("x");
+        theme_picker(&mut a);
+        typ(&mut a, "moss");
+        typ(&mut a, "zz");
+        assert_eq!(a.theme, ThemeName::Moss);
+        a.handle_key(Key::Enter, t).unwrap();
+        assert!(matches!(a.mode, Mode::Palette(_)), "nothing to pick");
+        a.handle_key(Key::Esc, t).unwrap();
+        assert_eq!(a.theme, ThemeName::Signal);
+    }
+
+    #[test]
+    fn pasting_into_the_theme_picker_shows_the_match() {
+        let t = Instant::now();
+        let mut a = app("x");
+        theme_picker(&mut a);
+        a.handle_paste("day".to_string()).unwrap();
+        assert_eq!(a.theme, ThemeName::Daybreak);
+        a.handle_key(Key::Esc, t).unwrap();
+        assert_eq!(a.theme, ThemeName::Signal);
     }
 
     #[test]

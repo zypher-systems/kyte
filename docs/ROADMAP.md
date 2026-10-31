@@ -70,15 +70,20 @@ Kyte's pitch is an editor you can't lose work in and don't have to learn.
 ## Next
 
 - [x] Signal theme, centred boxes, and a redrawn status bar and cursor line
+- [x] Six themes, a `theme` setting and a theme picker
+- [ ] Several files open at once, and a file tree
+- [ ] Highlighting for more languages
+- [ ] A Writing setup for Markdown and text files: word count and spell check
+- [ ] Multiple cursors and mouse support
+- [ ] Code intelligence (LSP)
 - [ ] Re-record the demo, which still shows the footer legend (needs `agg`)
 
 Keep using Kyte for real work along the way, on actual terminals with the kitty keyboard protocol, and over SSH and tmux.
 
 ## Later
 
-- Light and high-contrast themes
-- File tree
-- Multiple buffers and splits
+- A high-contrast theme
+- Splits
 - Incremental parsing, and languages embedded in others
 - Packaging, and use as `$EDITOR`
 

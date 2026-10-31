@@ -72,16 +72,20 @@ mod tests {
     use ratatui::Terminal;
 
     use super::chrome;
+    use super::theme::{Theme, ThemeName};
     use crate::app::App;
     use crate::buffer::Buffer;
     use crate::cli::Options;
     use crate::input::Key;
 
+    fn signal() -> Theme {
+        ThemeName::Signal.styles(true)
+    }
+
     fn draw(app: &mut App, w: u16, h: u16) -> Terminal<TestBackend> {
         let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
         app.layout(w, h);
-        t.draw(|f| super::render(app, f, &super::theme::SIGNAL))
-            .unwrap();
+        t.draw(|f| super::render(app, f, &signal())).unwrap();
         t
     }
 
@@ -200,7 +204,7 @@ mod tests {
 
     #[test]
     fn the_cursor_line_is_picked_out_and_its_bar_stays_quiet() {
-        let t = super::theme::SIGNAL;
+        let t = signal();
         let mut a = app("one
 two");
         let term = draw(&mut a, 40, 8);
@@ -214,7 +218,7 @@ two");
 
     #[test]
     fn a_box_casts_a_shadow_only_on_the_text() {
-        let t = super::theme::SIGNAL;
+        let t = signal();
         let mut a = app("abc");
         a.handle_key(Key::Esc, Instant::now()).unwrap();
         let term = draw(&mut a, 80, 24);
@@ -259,7 +263,7 @@ two");
     /// The box's edges, found by the popup background.
     fn box_of(t: &Terminal<TestBackend>) -> Rect {
         let b = t.backend().buffer();
-        let bg = super::theme::SIGNAL.palette.bg.unwrap();
+        let bg = signal().palette.bg.unwrap();
         let area = b.area;
         let hit: Vec<(u16, u16)> = (0..area.height)
             .flat_map(|y| (0..area.width).map(move |x| (x, y)))

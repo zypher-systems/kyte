@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use crate::buffer::Indent;
 use crate::config;
+use crate::ui::theme::ThemeName;
 
 /// Default double-tap Esc window in milliseconds.
 pub const DEFAULT_ESC_MS: u64 = 300;
@@ -26,6 +27,7 @@ pub struct Options {
     pub indent_width: usize,
     pub line_numbers: bool,
     pub soft_wrap: bool,
+    pub theme: ThemeName,
     pub history_limit_mb: u64,
     /// What was wrong with the settings file, for the first screen.
     pub config_warning: Option<String>,
@@ -45,6 +47,7 @@ impl Default for Options {
             indent_width: 4,
             line_numbers: true,
             soft_wrap: false,
+            theme: ThemeName::Signal,
             history_limit_mb: 100,
             config_warning: None,
         }
