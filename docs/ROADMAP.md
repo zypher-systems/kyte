@@ -68,21 +68,24 @@ Kyte's pitch is an editor you can't lose work in and don't have to learn.
 - [x] A settings file
 - [x] Soft wrap
 
-## Next
+## Released: 0.6.0, a public editor for code and writing
 
 - [x] Signal theme, centred boxes, and a redrawn status bar and cursor line
 - [x] Six themes, a `theme` setting and a theme picker
 - [x] Several files open at once
 - [x] A file tree
-- [x] Highlighting for more languages
-- [x] Swift, LaTeX and BibTeX highlighting
+- [x] Highlighting for 33 languages, including Swift, LaTeX and BibTeX
 - [x] A Writing setup for Markdown, text and LaTeX: wrap, word count and spell check
 - [x] Citation keys from `.bib` files as you type `\cite{`
 - [x] Building a paper's PDF from inside Kyte
 - [x] Releases with an installer, `.deb`, `.rpm` and signed checksums
+- [x] Open source on GitHub
+
+## Next
+
+- [ ] A Fedora COPR and an Arch AUR package, so package managers can update Kyte
 - [ ] Multiple cursors and mouse support
 - [ ] Code intelligence (LSP)
-- [x] Re-record the demo with the current look
 
 Keep using Kyte for real work along the way, on actual terminals with the kitty keyboard protocol, and over SSH and tmux.
 
@@ -92,7 +95,6 @@ Keep using Kyte for real work along the way, on actual terminals with the kitty 
 - A high-contrast theme
 - Splits
 - Incremental parsing, and languages embedded in others
-- A Fedora COPR and an Arch AUR package, so package managers can update Kyte
 - Use as `$EDITOR`
 
 ## What 1.0 means
