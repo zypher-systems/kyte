@@ -360,7 +360,7 @@ fn line_spans(
     let mut not_prose = vec![Vec::new(); rows];
     let buf = app.view_buffer();
     let head = buf.head();
-    let Some(lang) = buf.path().and_then(|p| Lang::detect(p, &head)) else {
+    let Some(lang) = Lang::detect(&buf.kind_path(), &head) else {
         return (per, not_prose);
     };
     let end = (top + rows).min(buf.line_count());

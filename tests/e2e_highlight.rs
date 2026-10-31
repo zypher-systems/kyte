@@ -332,3 +332,185 @@ fn swift_is_colored_and_its_function_keys_work() {
     p.send_keys(&["C-q"]);
     p.wait_exit(TIMEOUT);
 }
+
+// ---------------------------------------------------------------- unsaved buffers
+
+/// Kyte with no file, in a fresh state directory.
+fn open_untitled() -> (tempfile::TempDir, Pty) {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    std::fs::create_dir(&state).unwrap();
+    let p = Pty::kyte(Path::new(env!("CARGO_BIN_EXE_kyte")), &state, &[]);
+    p.wait_for("Ln 1, Col 1", TIMEOUT);
+    (dir, p)
+}
+
+/// Whether `word` in row `r` is colored differently from `plain` in that row.
+fn colored(p: &Pty, r: usize, word: &str, plain: &str) -> bool {
+    p.fg(r as u16, col_of(p, r, word)) != p.fg(r as u16, col_of(p, r, plain))
+}
+
+/// Picks `name` in the Set language box.
+fn set_language(p: &mut Pty, name: &str) {
+    p.send_keys(&["C-p"]);
+    p.wait_for("▸ Save", TIMEOUT);
+    p.send_str("set language");
+    p.wait_for("▸ Set language", TIMEOUT);
+    p.send_keys(&["Enter"]);
+    p.wait_gone("▸ Set language", TIMEOUT);
+    p.send_str(name);
+    p.wait_for(&format!("▸ {name}"), TIMEOUT);
+    p.send_keys(&["Enter"]);
+    p.wait_gone("▸", TIMEOUT);
+}
+
+/// Replaces the Save as prompt's text with `path`, and saves.
+fn save_as(p: &mut Pty, path: &str) {
+    p.send_keys(&["C-p"]);
+    p.wait_for("▸ Save", TIMEOUT);
+    p.send_str("save as");
+    p.wait_for("▸ Save as", TIMEOUT);
+    p.send_keys(&["Enter"]);
+    p.wait_for("Save as:", TIMEOUT);
+    for _ in 0..200 {
+        p.send_keys(&["Backspace"]);
+    }
+    p.wait_until("the prompt to empty", TIMEOUT, |s| {
+        s.lines().any(|l| l.trim_end() == " Save as:")
+    });
+    p.send_str(path);
+    p.send_keys(&["Enter"]);
+}
+
+#[test]
+fn typing_code_into_an_untitled_buffer_colors_it() {
+    let (_dir, mut p) = open_untitled();
+    p.send_str("fn main() { x }");
+    p.wait_for("fn main() { x }", TIMEOUT);
+    p.wait_until("the keyword to color", TIMEOUT, |_| {
+        colored(&p, 0, "fn", "x")
+    });
+}
+
+#[test]
+fn a_shebang_colors_an_untitled_buffer() {
+    let (_dir, mut p) = open_untitled();
+    p.paste("#!/bin/sh\necho y # comment");
+    p.wait_for("# comment", TIMEOUT);
+    p.wait_until("the comment to color", TIMEOUT, |_| {
+        colored(&p, 1, "comment", "y")
+    });
+}
+
+#[test]
+fn plain_writing_in_an_untitled_buffer_stays_plain() {
+    let (_dir, mut p) = open_untitled();
+    p.send_str("Dear reader, this is a letter.");
+    p.wait_for("Dear reader, this is a letter.", TIMEOUT);
+    assert!(!colored(&p, 0, "Dear", "letter"));
+}
+
+#[test]
+fn set_language_colors_an_untitled_buffer() {
+    let (_dir, mut p) = open_untitled();
+    p.paste("for x in y:\n    pass");
+    p.wait_for("pass", TIMEOUT);
+    assert!(!colored(&p, 0, "for", "x"), "nothing says this is Python");
+    set_language(&mut p, "Python");
+    p.wait_until("the keyword to color", TIMEOUT, |_| {
+        colored(&p, 0, "for", "x")
+    });
+    p.wait_for("Language: Python", TIMEOUT);
+    set_language(&mut p, "Automatic");
+    p.wait_until("the color to go", TIMEOUT, |_| !colored(&p, 0, "for", "x"));
+}
+
+#[test]
+fn set_language_opens_on_the_current_language() {
+    let (_dir, mut p) = open_untitled();
+    set_language(&mut p, "Python");
+    p.send_keys(&["C-p"]);
+    p.wait_for("▸ Save", TIMEOUT);
+    p.send_str("set language");
+    p.wait_for("▸ Set language", TIMEOUT);
+    p.send_keys(&["Enter"]);
+    p.wait_for("▸ Python", TIMEOUT);
+    p.send_keys(&["Esc"]);
+    p.wait_gone("▸ Python", TIMEOUT);
+}
+
+#[test]
+fn a_language_stays_through_a_save_unless_the_name_says_otherwise() {
+    let (dir, mut p) = open_untitled();
+    let name = |n: &str| dir.path().join(n).to_str().unwrap().to_string();
+    p.paste("for x in y:\n    pass");
+    p.wait_for("pass", TIMEOUT);
+    set_language(&mut p, "Python");
+    p.wait_until("the keyword to color", TIMEOUT, |_| {
+        colored(&p, 0, "for", "x")
+    });
+
+    // A name that says nothing keeps what was chosen.
+    save_as(&mut p, &name("script"));
+    p.wait_for("Saved 2 lines", TIMEOUT);
+    assert!(colored(&p, 0, "for", "x"));
+
+    // A name that says something takes over.
+    save_as(&mut p, &name("notes.txt"));
+    p.wait_for("notes.txt", TIMEOUT);
+    p.wait_until("the color to go", TIMEOUT, |_| !colored(&p, 0, "for", "x"));
+}
+
+#[test]
+fn a_guess_stays_through_a_save_to_a_name_that_says_nothing() {
+    let (dir, mut p) = open_untitled();
+    let file = dir.path().join("script");
+    p.send_str("fn main() { x }");
+    p.wait_for("fn main() { x }", TIMEOUT);
+    p.wait_until("the keyword to color", TIMEOUT, |_| {
+        colored(&p, 0, "fn", "x")
+    });
+    save_as(&mut p, file.to_str().unwrap());
+    p.wait_for("Saved 1 line", TIMEOUT);
+    assert!(colored(&p, 0, "fn", "x"));
+}
+
+#[test]
+fn set_language_works_on_a_file_kyte_cant_name() {
+    let (_dir, mut p) = open_named("settings.conf2", "for x in y:\n    pass\n");
+    p.wait_for("pass", TIMEOUT);
+    assert!(!colored(&p, 0, "for", "x"));
+    set_language(&mut p, "Python");
+    p.wait_until("the keyword to color", TIMEOUT, |_| {
+        colored(&p, 0, "for", "x")
+    });
+}
+
+#[test]
+fn building_an_unnamed_latex_buffer_asks_for_a_name() {
+    let (_dir, mut p) = open_untitled();
+    set_language(&mut p, "LaTeX");
+    p.send_keys(&["C-b"]);
+    p.wait_for("Save as:", TIMEOUT);
+}
+
+#[test]
+fn opening_the_pdf_of_an_unnamed_latex_buffer_says_there_is_none() {
+    let (_dir, mut p) = open_untitled();
+    set_language(&mut p, "LaTeX");
+    p.send_keys(&["Esc"]);
+    p.wait_for("open PDF", TIMEOUT);
+    p.send_str("o");
+    p.wait_for("No PDF yet", TIMEOUT);
+}
+
+#[test]
+fn a_guessed_language_turns_on_the_code_keys() {
+    let (_dir, mut p) = open_untitled();
+    p.paste("def go(x):\n    return x\n");
+    p.wait_for("return x", TIMEOUT);
+    p.send_keys(&["Up"]);
+    p.send_keys(&["Esc"]);
+    p.wait_for("select function", TIMEOUT);
+    p.wait_for("comment line", TIMEOUT);
+}

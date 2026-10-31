@@ -50,7 +50,7 @@ The Makefile targets are thin wrappers:
 | `make demo` | `scripts/demo.sh` (see [Demo](#demo)) |
 | `make docker-test` | `cargo test` inside the Docker dev image (see [Docker](#docker)) |
 
-Kyte highlights Rust, Python, Bash, Fish, JavaScript, TypeScript, TSX, C, C++, C#, Go, Java, PHP, Ruby, Lua, Swift, Zig, SQL, Nix, JSON, HTML, CSS, XML, TOML, YAML, INI, Markdown, LaTeX, BibTeX, Makefiles, Dockerfiles, CMake and diffs, picked by file name or extension, or the `#!` line of a script, using tree-sitter. Building needs a C compiler for the grammars. To leave highlighting, the code actions and spell check out, which shrinks the binary from about 34 MB to about 1.3 MB:
+Kyte highlights Rust, Python, Bash, Fish, JavaScript, TypeScript, TSX, C, C++, C#, Go, Java, PHP, Ruby, Lua, Swift, Zig, SQL, Nix, JSON, HTML, CSS, XML, TOML, YAML, INI, Markdown, LaTeX, BibTeX, Makefiles, Dockerfiles, CMake and diffs, picked by file name or extension, or the `#!` line of a script, or for a buffer with no name by its opening lines, using tree-sitter. Building needs a C compiler for the grammars. To leave highlighting, the code actions and spell check out, which shrinks the binary from about 34 MB to about 1.3 MB:
 
 ```
 cargo build --release --no-default-features
@@ -176,11 +176,13 @@ Under tmux, set `tmux set -g escape-time 10`. tmux's default of 500 ms delays ev
 
 Esc Esc (or Ctrl-P) opens a fuzzy-filtered list. Type to filter, Up and Down to select, Enter to run, Esc to close without running anything.
 
-Commands: Save, Save as, Open file, Quit, Quit without saving, Undo, Redo, Cut, Copy, Paste, Select all, Find, Replace, Go to line, Toggle line numbers, Toggle tabs and spaces, Toggle soft wrap, Choose theme, File tree, Insert citation, Build PDF, Stop build, Show build problems, Open PDF, Fix spelling, Next misspelling, Toggle spell check, Open files, Next file, Previous file, Close file, Show key help.
+Commands: Save, Save as, Open file, Quit, Quit without saving, Undo, Redo, Cut, Copy, Paste, Select all, Find, Replace, Go to line, Toggle line numbers, Toggle tabs and spaces, Toggle soft wrap, Choose theme, Set language, File tree, Insert citation, Build PDF, Stop build, Show build problems, Open PDF, Fix spelling, Next misspelling, Toggle spell check, Open files, Next file, Previous file, Close file, Show key help.
 
 Kyte works out whether a file indents with tabs or spaces, and how many, from its first 10,000 lines. A file with no indent uses tabs. The status bar shows `Spaces N` for space-indented files. **Toggle tabs and spaces** changes what new indent uses until the file is closed; it doesn't rewrite existing lines.
 
 **Save as** asks for a file name, starting from the current one; `~/` means your home directory, and Tab completes the path. It asks before overwriting a file, and refuses a file another Kyte has open. The buffer then belongs to the new file, and the old file stays as it was.
+
+**Set language** opens a box of languages. A file's name usually says what it is, but this overrides the name for as long as the file is open, and it's how to name the language of a file Kyte can't place. A buffer with no file name is colored as soon as its opening lines show what it is: a `#!` line, `fn main()`, `import os`, `<!doctype html>`, `\documentclass` and so on. Plain writing stays plain. If Kyte guesses wrong, choose the language yourself; **Plain text** turns the guess off. **Automatic** goes back to the name or the guess. When you save, a name that gives a language takes over, and one that doesn't, such as `build`, keeps the language you had.
 
 **Open file** (Ctrl-O) asks for a path, starting in the current file's directory. Tab completes it, and lists the matches in a floating box when there's more than one. A path that doesn't exist yet opens as a new file. The file you were in stays open, unsaved changes and all, and a file that's already open is shown rather than opened again. If the new file left a crashed session behind, Kyte offers to recover it; leaving that offer closes the new file, or quits if it's the only one.
 
@@ -217,7 +219,7 @@ Kyte keeps every edit to a file, across sessions, including edits you later undo
 | Enter | Restore this version. It comes back as one undo step, and the file changes only when you save |
 | Esc, `q` | Close, back to your text |
 
-History is stored under `$XDG_STATE_HOME/kyte/history/` (default `~/.local/state/kyte/history/`), one log per file, with mode 0600 in a 0700 directory. It's kept by path, so a renamed file starts a new history; Save as does too. A buffer with no file name has no history until it's saved. Nothing is written until your first edit, so reading a file leaves no trace.
+History is stored under `$XDG_STATE_HOME/kyte/history/` (default `~/.local/state/kyte/history/`), one log per file, with mode 0600 in a 0700 directory. It's kept by path, so a renamed file starts a new history; Save as does too. A buffer with no file name keeps a history from its first keystroke, and its first save takes that history to the file, after any versions the file already had. Discard the buffer and its history goes too. Nothing is written until your first edit, so reading a file leaves no trace.
 
 A million typed characters take about 34 MB, and a pasted block adds its own size. When you close a file whose log has passed 100 MB (the `history_limit_mb` setting), Kyte trims it towards 75 MB, oldest first: the single edits between old saves collapse into one step per changed area, and recent edits stay as they were. Every saved version and every version a save overwrote is kept, so a log can stay over the limit if those alone are that large. **It keeps what you type in plain text**, and trimming removes old keystrokes from the log but isn't a way to erase something. That includes a password you typed and then deleted. **Delete file history** in the palette removes one file's log, and `--no-history` keeps none for a session. Use `--no-history` for files holding secrets.
 
@@ -333,7 +335,7 @@ Themes use 24-bit color when the terminal says it can, through `COLORTERM=trueco
 - A file with hard links, or one whose owner or attributes the temporary file can't take on, is rewritten in place so it stays the same file. Kyte keeps a backup beside it during the write and restores the old content if the write fails.
 - If the file changed on disk since you opened or last saved it, Ctrl-S asks before overwriting. The check compares content, so a rewrite of the same bytes doesn't count. A read-only file also needs a `y` before Kyte replaces it. `n` or Esc cancels either question.
 - After a save, the swap starts over empty. After a clean quit, the swap is deleted.
-- A buffer with no file name has a swap too, named `untitled-<pid>-<start>.kyteswp`. After a crash, running `kyte` with no file offers to recover the newest one.
+- A buffer with no file name has a swap too, named `untitled-<pid>-<start>.kyteswp`. After a crash, running `kyte` with no file offers to recover the newest one, along with its history.
 - If a save fails, your changes stay in the editor and the swap. The error points you to Save as in the palette, which writes them elsewhere. Quitting after a failed save still asks first; only `n` discards.
 - If Kyte finds a swap with unsaved changes when you open the file, it shows **Recover unsaved changes**:
   - `r` recovers the changes into the editor, marked unsaved. Ctrl-S writes them.

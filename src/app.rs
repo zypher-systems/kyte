@@ -283,7 +283,7 @@ impl Doc {
 
     fn set_view(&mut self, view: View) {
         let head = self.buffer.head();
-        self.prose = self.buffer.path().and_then(|p| syntax::prose(p, &head));
+        self.prose = syntax::prose(&self.buffer.kind_path(), &head);
         self.writing = view.writing && self.prose.is_some();
         self.spelling = view.spell_check && self.writing;
         self.soft_wrap = view.soft_wrap || self.writing;
@@ -357,7 +357,12 @@ impl Doc {
     fn close(&mut self) {
         let text = self.buffer.rope().clone();
         if let Some(h) = self.history.as_mut() {
-            let _ = h.close(&text);
+            // Nothing can reach an unsaved buffer's log once its swap is gone.
+            let _ = if h.is_unsaved() && !self.keep_swap {
+                h.delete(&text)
+            } else {
+                h.close(&text)
+            };
         }
         self.history = None;
         if let Some(w) = self.swap.take() {
@@ -527,9 +532,15 @@ impl App {
         self.doc.history = None;
         self.doc.history_failed = false;
         if self.history_on {
-            self.doc.history = self.doc.swap_target.as_ref().map(|t| {
-                FileHistory::new(t, self.doc.buffer.rope()).with_limit(self.history_limit)
-            });
+            let text = self.doc.buffer.rope();
+            let log = match (&self.doc.swap_target, &self.doc.swap) {
+                (Some(target), _) => Some(FileHistory::new(target, text)),
+                (None, Some(swap)) if self.doc.buffer.path().is_none() => {
+                    Some(FileHistory::unsaved(swap.path(), text))
+                }
+                _ => None,
+            };
+            self.doc.history = log.map(|h| h.with_limit(self.history_limit));
         }
     }
 
@@ -897,14 +908,14 @@ impl App {
                     self.doc.disk = None;
                     self.doc.disk_text = None;
                 }
+                // An unsaved buffer's history goes by its swap, so that comes first.
+                let adopted = SwapWriter::adopt(&info.swap_path);
+                let result = adopted.map(|w| self.doc.swap = Some(w));
                 self.start_history();
                 let recovered = self.doc.buffer.rope().clone();
                 self.with_history(|h| h.snapshot(&recovered, SnapshotKind::Recovered));
-                match SwapWriter::adopt(&info.swap_path) {
-                    Ok(w) => {
-                        self.doc.swap = Some(w);
-                        self.set_message("Recovered unsaved changes; Ctrl-S saves them");
-                    }
+                match result {
+                    Ok(()) => self.set_message("Recovered unsaved changes; Ctrl-S saves them"),
                     Err(e) => {
                         self.set_error(format!("Recovered, but the swap could not be reused: {e}"))
                     }
@@ -913,7 +924,9 @@ impl App {
             Key::Char('d') => {
                 let _ = std::fs::remove_file(&info.swap_path);
                 self.mode = Mode::Insert;
-                let fresh = if info.target.as_os_str().is_empty() {
+                let unsaved = info.target.as_os_str().is_empty();
+                let fresh = if unsaved {
+                    let _ = std::fs::remove_file(history::unsaved_log_path(&info.swap_path));
                     SwapWriter::create_untitled()
                 } else {
                     SwapWriter::create(&info.target, self.doc.buffer.rope())
@@ -921,6 +934,9 @@ impl App {
                 match fresh {
                     Ok(w) => {
                         self.doc.swap = Some(w);
+                        if unsaved {
+                            self.start_history();
+                        }
                         self.set_message("Discarded the swap file");
                     }
                     Err(e) => self.set_error(format!("Discarded the swap; new swap failed: {e}")),
@@ -1125,30 +1141,21 @@ impl App {
         }
     }
 
-    /// The file's path, when Kyte can parse its language.
-    fn code_path(&self) -> Option<&std::path::Path> {
+    /// The name that gives the language, when Kyte can parse it.
+    fn code_path(&self) -> Option<std::borrow::Cow<'_, std::path::Path>> {
         let head = self.doc.buffer.head();
-        self.doc
-            .buffer
-            .path()
-            .filter(|p| syntax::supported(p, &head))
+        Some(self.doc.buffer.kind_path()).filter(|p| syntax::supported(p, &head))
     }
 
     /// Whether the file's language has functions to work with.
     fn has_functions(&self) -> bool {
         let head = self.doc.buffer.head();
-        self.doc
-            .buffer
-            .path()
-            .is_some_and(|p| syntax::has_functions(p, &head))
+        syntax::has_functions(&self.doc.buffer.kind_path(), &head)
     }
 
     fn comment_prefix(&self) -> Option<&'static str> {
         let head = self.doc.buffer.head();
-        self.doc
-            .buffer
-            .path()
-            .and_then(|p| syntax::comment_prefix(p, &head))
+        syntax::comment_prefix(&self.doc.buffer.kind_path(), &head)
     }
 
     /// Whether the cursor is on a bracket that has a partner.
@@ -1297,7 +1304,7 @@ impl App {
             .buffer
             .rope()
             .char_to_byte(self.doc.buffer.cursor());
-        f(path, &self.doc.buffer.to_string(), at)
+        f(&path, &self.doc.buffer.to_string(), at)
     }
 
     /// Selects a byte range of the text.
@@ -1613,6 +1620,7 @@ impl App {
                     s.ignore(&word);
                 }
             }
+            Entry::Language { name, extension } => self.set_language(name, extension),
             Entry::Theme(t) => {
                 self.theme = t;
                 let name = t.label();
@@ -1628,6 +1636,18 @@ impl App {
                 self.mode = Mode::Prompt(Prompt::Search { query, origin });
             }
         }
+    }
+
+    /// Treats this text as `extension`'s language, or as its name says if `None`.
+    fn set_language(&mut self, name: &str, extension: Option<&'static str>) {
+        let line_numbers = self.doc.line_numbers;
+        self.doc.buffer.set_language(extension);
+        self.doc.set_view(self.default_view);
+        self.doc.line_numbers = line_numbers;
+        self.doc.scroll_row = 0;
+        self.doc.scroll_left = 0;
+        self.load_speller();
+        self.set_message(format!("Language: {name}"));
     }
 
     fn go_to_line(&mut self, n: usize) {
@@ -1697,6 +1717,10 @@ impl App {
                 self.doc.scroll_left = 0;
             }
             Command::ChooseTheme => self.mode = Mode::Palette(PaletteState::themes(self.theme)),
+            Command::SetLanguage => {
+                let current = self.doc.buffer.language();
+                self.mode = Mode::Palette(PaletteState::languages(current));
+            }
             Command::FileTree => self.open_tree(),
             Command::InsertCitation => self.insert_citation(),
             Command::BuildPdf => self.build_pdf(),
@@ -2077,7 +2101,7 @@ impl App {
             self.set_message("Already building; Stop build is in the palette");
         } else if self.doc.prose != Some(Prose::Latex) {
             self.set_message("Build PDF works on LaTeX files");
-        } else if self.doc.buffer.is_dirty() {
+        } else if self.doc.buffer.is_dirty() || self.doc.buffer.path().is_none() {
             self.start_save(After::Build);
         } else {
             self.start_build();
@@ -2187,14 +2211,15 @@ impl App {
 
     /// Hands the paper's PDF to a viewer.
     fn open_pdf(&mut self) {
-        let Some(pdf) = self.build_root().map(|r| r.with_extension("pdf")) else {
+        if self.doc.prose != Some(Prose::Latex) {
             self.set_message("Open PDF works on LaTeX files");
             return;
-        };
-        if !pdf.exists() {
+        }
+        let pdf = self.build_root().map(|r| r.with_extension("pdf"));
+        let Some(pdf) = pdf.filter(|p| p.exists()) else {
             self.set_message("No PDF yet; Ctrl-B builds it");
             return;
-        }
+        };
         if let Err(e) = build::open_pdf(self.pdf_command.as_deref(), &pdf) {
             self.set_error(format!("Can't open the PDF: {e}"));
         }
@@ -2376,7 +2401,7 @@ impl App {
         let b = &self.doc.buffer;
         let mut out = vec![Vec::new(); lines.len()];
         let head = b.head();
-        let Some(lang) = b.path().and_then(|p| Lang::detect(p, &head)) else {
+        let Some(lang) = Lang::detect(&b.kind_path(), &head) else {
             return out;
         };
         let rope = b.rope();
@@ -2939,7 +2964,7 @@ impl App {
             let why = if !self.history_on {
                 "File history is off this session"
             } else {
-                "This buffer has no file yet, so it has no history"
+                "This buffer has no swap, so it has no history"
             };
             self.set_message(why);
             return;
@@ -3118,7 +3143,12 @@ impl App {
                 self.doc.outside_change = false;
                 self.needs_redraw = true;
                 if self.doc.buffer.path() != Some(path) {
+                    // A name that doesn't say leaves the language as it was.
+                    let language = self.doc.buffer.language_or_guess();
                     self.doc.buffer.set_path(path.to_path_buf());
+                    self.doc
+                        .buffer
+                        .set_language(language.filter(|_| !syntax::name_says(path)));
                     self.doc.swap_target = fileio::resolve_target(path).ok();
                     self.doc.set_view(self.default_view);
                     self.load_speller();
@@ -3160,10 +3190,20 @@ impl App {
 
     /// Records a finished save in the history, for the file it went to.
     fn note_save(&mut self, path: &std::path::Path, overwritten: Option<String>) {
+        let target = fileio::resolve_target(path).ok();
         let moved = self.doc.history.as_ref().map(|h| h.target());
-        if moved != fileio::resolve_target(path).ok().as_deref() {
-            self.doc.swap_target = fileio::resolve_target(path).ok();
-            self.start_history();
+        if moved != target.as_deref() {
+            let unsaved = self
+                .doc
+                .history
+                .as_ref()
+                .is_some_and(FileHistory::is_unsaved);
+            self.doc.swap_target.clone_from(&target);
+            match target.filter(|_| unsaved) {
+                // Its first save takes its past along.
+                Some(target) => self.with_history(|h| h.move_to(&target)),
+                None => self.start_history(),
+            }
         }
         let text = self.doc.buffer.rope().clone();
         self.with_history(|h| {

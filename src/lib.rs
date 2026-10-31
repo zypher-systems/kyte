@@ -16,6 +16,7 @@ pub mod fileio;
 pub mod highlight;
 pub mod history;
 pub mod input;
+pub mod language;
 pub mod ops;
 pub mod palette;
 pub mod reader;
@@ -87,7 +88,9 @@ pub fn run(opts: Options) -> anyhow::Result<ExitCode> {
 /// An empty buffer with no file name, or a crashed one to recover.
 fn open_untitled(opts: &Options) -> App {
     let buffer = Buffer::from_str("", None);
-    if let Ok(Some(info)) = swap::find_untitled() {
+    let crashed = swap::find_untitled();
+    history::sweep_unsaved();
+    if let Ok(Some(info)) = crashed {
         let mut app = App::new(buffer, None, opts);
         app.mode = Mode::Recover(info);
         return app;
