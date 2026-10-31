@@ -83,7 +83,9 @@ else
 
     # The trust anchor. A mirror can't replace it.
     cat > "$tmp/release-key.pem" <<'KYTE_RELEASE_KEY'
-@RELEASE_KEY@
+-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEAM9K8TsFeIW95cW0nMBT1bgkaAxpFHw1Dr8QN4PWOhmM=
+-----END PUBLIC KEY-----
 KYTE_RELEASE_KEY
     grep -q 'BEGIN PUBLIC KEY' "$tmp/release-key.pem" || die "this installer has no release key"
 

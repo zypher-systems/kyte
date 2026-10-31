@@ -30,3 +30,7 @@ jobs:
           cargo test --no-default-features
       - name: scripts
         run: sh -n install.sh && sh -n packaging/dist.sh
+      - name: the installer carries the release key
+        run: |
+          sed -n "/<<'KYTE_RELEASE_KEY'/,/^KYTE_RELEASE_KEY/p" install.sh | sed '1d;$d' |
+            diff - release/kyte-release.pub.pem
