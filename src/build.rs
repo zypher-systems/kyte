@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::io::Read;
+use std::ops::Range;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -269,98 +270,174 @@ fn without_comments(text: &str) -> String {
     out
 }
 
-/// The keys `text` cites or refers to, each with the lines its command ends on.
-/// A command counts if `cite` or `ref` is in its name, which covers natbib,
-/// biblatex and cleveref, and it can run over several lines.
-fn cited_keys(text: &str) -> HashMap<String, Vec<usize>> {
-    let text = without_comments(text);
+/// Where the group opened at `open` closes. Braces nest, and a `\\` hides the
+/// next character. As in TeX, a `]` or `)` inside braces doesn't count, so
+/// `\\cite[{see [12]}]{key}` is one note.
+fn group_end(text: &str, open: usize, close: char) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut escaped = false;
+    for (i, c) in text[open + 1..].char_indices() {
+        let at = open + 1 + i;
+        if escaped {
+            escaped = false;
+        } else if c == '\\' {
+            escaped = true;
+        } else if c == '{' {
+            depth += 1;
+        } else if depth == 0 && c == close {
+            return Some(at);
+        } else if c == '}' {
+            depth = depth.checked_sub(1)?;
+        }
+    }
+    None
+}
+
+/// Adds the keys of citation and reference commands in `text[range]`. A command
+/// counts if `cite` or `ref` is in its name, which covers natbib, biblatex and
+/// cleveref. Its arguments can run over several lines, and hold more commands.
+fn scan_commands(text: &str, range: Range<usize>, keys: &mut HashMap<String, Vec<usize>>) {
     let line_of = |at: usize| text[..at].matches('\n').count() + 1;
-    let mut keys: HashMap<String, Vec<usize>> = HashMap::new();
-    let mut at = 0;
-    while let Some(slash) = text[at..].find('\\') {
+    let mut at = range.start;
+    while let Some(slash) = text[at..range.end].find('\\') {
         let name_at = at + slash + 1;
-        let name_len = text[name_at..]
+        let name_len = text[name_at..range.end]
             .find(|c: char| !c.is_ascii_alphabetic())
-            .unwrap_or(text.len() - name_at);
+            .unwrap_or(range.end - name_at);
         at = name_at + name_len;
+        if name_len == 0 {
+            at = (at + 1).min(range.end);
+            while !text.is_char_boundary(at) {
+                at += 1;
+            }
+            continue;
+        }
         let name = text[name_at..at].to_ascii_lowercase();
         if !name.contains("cite") && !name.contains("ref") {
             continue;
         }
-        // `\\cite*[see][p. 3]{a,b}`, and biblatex's `\\cites{a}{b}`.
+        // `\\cite*[see][p. 3]{a,b}`, and biblatex's `\\cites(pre)(post)[n]{a}{b}`.
+        // Parentheses come first: after the keys they're only prose.
+        let mut keyed = false;
         loop {
-            let rest = text[at..].trim_start();
-            at = text.len() - rest.len();
-            let close = match rest.chars().next() {
+            let rest = text[at..range.end].trim_start();
+            let next = range.end - rest.len();
+            let group = match rest.chars().next() {
                 Some('*') => {
-                    at += 1;
+                    at = next + 1;
                     continue;
                 }
+                Some('(') if !keyed => ')',
                 Some('[') => ']',
                 Some('{') => '}',
                 _ => break,
             };
-            let Some(length) = rest.find(close) else {
+            let Some(end) = group_end(text, next, group).filter(|e| *e < range.end) else {
                 break;
             };
-            if close == '}' {
-                let line = line_of(at + length);
-                for key in rest[1..length].split(',') {
-                    keys.entry(key.trim().to_string()).or_default().push(line);
+            let body = &text[next + 1..end];
+            if group == ']' || (group == '}' && body.contains('\\')) {
+                scan_commands(text, next + 1..end, keys);
+            } else if group == '}' {
+                for key in body.split(',') {
+                    keys.entry(key.trim().to_string())
+                        .or_default()
+                        .push(line_of(end));
                 }
             }
-            at += length + 1;
+            keyed |= group == '}';
+            at = end + 1;
         }
     }
-    keys
 }
 
-/// The keys in a source file, if it's small enough to read on the way past. A
-/// path in a log can be anything, so only a regular file is opened.
-fn source_keys(path: &Path) -> Option<HashMap<String, Vec<usize>>> {
+/// What a source file says, for checking a warning.
+struct Source {
+    /// The keys it cites or refers to, each with the lines its command ends on.
+    keys: HashMap<String, Vec<usize>>,
+    /// Its text without comments, a line to an entry.
+    lines: Vec<String>,
+}
+
+impl Source {
+    fn read(text: &str) -> Source {
+        let text = without_comments(text);
+        let mut keys = HashMap::new();
+        scan_commands(&text, 0..text.len(), &mut keys);
+        let lines = text.lines().map(str::to_string).collect();
+        Source { keys, lines }
+    }
+
+    /// Whether a citation command for `key` ends in the reach of `line`.
+    fn cites(&self, key: &str, line: usize) -> bool {
+        self.keys.get(key).is_some_and(|ends| {
+            ends.iter()
+                .any(|&end| end <= line && line - end <= MAX_LINES_TO_COMMAND_END)
+        })
+    }
+
+    /// Whether `key` appears as a whole word in the reach of `line`, in a
+    /// command or not.
+    fn mentions(&self, key: &str, line: usize) -> bool {
+        let first = line.saturating_sub(MAX_LINES_TO_COMMAND_END + 1);
+        let near = self.lines.get(first..line.min(self.lines.len()));
+        let word = |c: char| c.is_alphanumeric() || matches!(c, '_' | ':' | '-' | '.');
+        near.is_some_and(|near| {
+            near.iter().any(|l| {
+                l.match_indices(key).any(|(at, _)| {
+                    let before = l[..at].chars().next_back();
+                    let after = l[at + key.len()..].chars().next();
+                    !before.is_some_and(word) && !after.is_some_and(word)
+                })
+            })
+        })
+    }
+}
+
+/// A source file, if it's small enough to read on the way past. A path in a
+/// log can be anything, so only a regular file is opened.
+fn read_source(path: &Path) -> Option<Source> {
     let meta = std::fs::metadata(path).ok()?;
     if !meta.is_file() || meta.len() > MAX_SOURCE_BYTES {
         return None;
     }
     let bytes = std::fs::read(path).ok()?;
-    Some(cited_keys(&String::from_utf8_lossy(&bytes)))
+    Some(Source::read(&String::from_utf8_lossy(&bytes)))
 }
 
 /// Checks each warning against the source. The file a warning came from is
 /// only a reading of TeX's parentheses, and text it prints can throw that off,
 /// so `Citation `key' ... on input line 12` is looked for as a key of a citation
 /// command ending at or before line 12, because inside a footnote or caption
-/// TeX gives the line that ends. The warning moves only if the file it's on has
-/// no such key and exactly one other file the build read does. Otherwise it
-/// stays where it was.
+/// TeX gives the line that ends. The warning moves only if the file it's on
+/// doesn't mention the key there, and exactly one other file the build read
+/// cites it. "Mentions" is deliberately loose: a command this can't read, in a
+/// form it doesn't know, must never send a warning away from its own file.
 pub fn check_against_source(warnings: &mut [Problem], output: &str, dir: &Path) {
     let names: Vec<&str> = sources_in(output)
         .into_iter()
         .map(|n| n.strip_prefix("./").unwrap_or(n))
         .collect();
-    let mut read: HashMap<String, Option<HashMap<String, Vec<usize>>>> = HashMap::new();
+    let mut read: HashMap<String, Option<Source>> = HashMap::new();
     for warning in warnings.iter_mut().filter(|w| w.line > 0) {
         let Some((_, key)) = warning.text.split_once('`') else {
             continue;
         };
         let key = key.split('\'').next().unwrap_or(key);
         let line = warning.line;
-        let mut holds = |file: &str| {
-            let keys = read
-                .entry(file.to_string())
-                .or_insert_with(|| source_keys(&dir.join(file)));
-            let lines = keys.as_ref().and_then(|keys| keys.get(key));
-            lines.is_some_and(|ends| {
-                ends.iter()
-                    .any(|&end| end <= line && line - end <= MAX_LINES_TO_COMMAND_END)
-            })
+        let mut source = |file: &str| {
+            read.entry(file.to_string())
+                .or_insert_with(|| read_source(&dir.join(file)))
+                .as_ref()
+                .map(|s| (s.mentions(key, line), s.cites(key, line)))
+                .unwrap_or_default()
         };
-        if holds(&warning.file) {
+        if source(&warning.file).0 {
             continue;
         }
         let others: Vec<&&str> = names
             .iter()
-            .filter(|n| **n != warning.file && holds(n))
+            .filter(|n| **n != warning.file && source(n).1)
             .collect();
         if let [file] = others[..] {
             warning.file = file.to_string();
@@ -896,8 +973,8 @@ LaTeX Warning: Citation `aftertail' on page 7 undefined on input line 14.
     #[test]
     fn keys_are_read_from_every_kind_of_command() {
         let text = "\\cite{a, b}\n\\citep[see][p. 3]{c}\n\\autocite*{d}\n\\cites{e}{f}\n\\cref{sec:g}\n\\eqref{h}\n\\section{no}\n\\cite{%\n  i\n}\n50\\% \\cite{j}\n% \\cite{k}\n";
-        let keys = cited_keys(text);
-        let line = |k: &str| keys.get(k).map(|l| l[0]);
+        let source = Source::read(text);
+        let line = |k: &str| source.keys.get(k).map(|l| l[0]);
         assert_eq!(line("a"), Some(1));
         assert_eq!(line("b"), Some(1));
         assert_eq!(line("c"), Some(2));
@@ -912,10 +989,83 @@ LaTeX Warning: Citation `aftertail' on page 7 undefined on input line 14.
         assert_eq!(line("k"), None);
     }
 
+    fn keys_of(text: &str) -> Vec<String> {
+        let mut keys: Vec<String> = Source::read(text).keys.into_keys().collect();
+        keys.sort();
+        keys
+    }
+
+    #[test]
+    fn biblatex_notes_in_parentheses_come_before_the_keys() {
+        assert_eq!(keys_of("\\cites(see)(){knuth84}"), ["knuth84"]);
+        assert_eq!(keys_of("\\parencites(see)(etc.){a,b}"), ["a", "b"]);
+        assert_eq!(keys_of("\\cites(pre)(post)[pre][post]{key}"), ["key"]);
+        assert_eq!(keys_of("\\autocites*(see)(){key}"), ["key"]);
+        assert_eq!(keys_of("\\cites({see (also)})(){key}"), ["key"]);
+    }
+
+    #[test]
+    fn parentheses_after_the_keys_are_only_prose() {
+        assert_eq!(keys_of("\\ref{a} (see \\cite{b})"), ["a", "b"]);
+    }
+
+    #[test]
+    fn brackets_in_braces_dont_end_a_note() {
+        assert_eq!(keys_of("\\cite[{cf. [12]}]{knuth84}"), ["knuth84"]);
+        assert_eq!(keys_of("\\citep[see][{[12]}]{knuth84}"), ["knuth84"]);
+        assert!(keys_of("\\citep[see [Fig.~1]]{knuth84}").is_empty());
+    }
+
+    #[test]
+    fn citations_nested_in_arguments_are_found() {
+        let text = "\\citetext{see \\citealp{companion}, or even better \\citealp{adams}}";
+        assert_eq!(keys_of(text), ["adams", "companion"]);
+        assert_eq!(
+            keys_of("\\href{http://a}{\\cite{knuth84}}"),
+            ["http://a", "knuth84"]
+        );
+        assert_eq!(keys_of("\\footnote{\\cite{knuth84}}"), ["knuth84"]);
+        assert_eq!(keys_of("\\cite[see \\cite{a}]{b}"), ["a", "b"]);
+    }
+
+    #[test]
+    fn a_form_the_scanner_cant_read_never_moves_a_warning_away() {
+        let found = checked(
+            &[
+                ("ch.tex", "\\mycustomcommand{key}\n"),
+                ("main.tex", "\\cite{key}\n"),
+            ],
+            vec![warning("ch.tex", 1, "key")],
+        );
+        assert_eq!(found, ["ch.tex:1"]);
+    }
+
+    #[test]
+    fn a_longer_word_isnt_a_mention() {
+        let found = checked(
+            &[
+                ("ch.tex", "keyholders and key-card and a.key\n"),
+                ("main.tex", "\\cite{key}\n"),
+            ],
+            vec![warning("ch.tex", 1, "key")],
+        );
+        assert_eq!(found, ["main.tex:1"]);
+    }
+
     #[test]
     fn an_unfinished_command_is_safe() {
-        for text in ["\\cite", "\\cite{", "\\cite[", "\\", "\\cite{é", "é\\ref"] {
-            assert!(cited_keys(text).is_empty(), "{text}");
+        for text in [
+            "\\cite",
+            "\\cite{",
+            "\\cite[",
+            "\\cite(",
+            "\\",
+            "\\é",
+            "\\cite{é",
+            "é\\ref",
+            "\\cite}",
+        ] {
+            assert!(Source::read(text).keys.is_empty(), "{text}");
         }
     }
 
@@ -923,8 +1073,8 @@ LaTeX Warning: Citation `aftertail' on page 7 undefined on input line 14.
     fn a_source_that_isnt_a_plain_file_isnt_read() {
         let dir = tempfile::tempdir().unwrap();
         std::os::unix::fs::symlink("/dev/zero", dir.path().join("z.tex")).unwrap();
-        assert!(source_keys(&dir.path().join("z.tex")).is_none());
-        assert!(source_keys(&dir.path().join("none.tex")).is_none());
+        assert!(read_source(&dir.path().join("z.tex")).is_none());
+        assert!(read_source(&dir.path().join("none.tex")).is_none());
         let mut w = [warning("z.tex", 1, "k")];
         check_against_source(&mut w, "(./z.tex", dir.path());
         assert_eq!(w[0].file, "z.tex");
