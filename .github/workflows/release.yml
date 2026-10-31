@@ -1,0 +1,196 @@
+name: release
+
+# Pushing a tag like v0.6.0 builds the Linux binaries and packages and opens a
+# *draft* release with them, the installer and the checksums signed with the
+# release key. A person reviews and publishes it.
+#
+# Running it by hand (Actions → release → Run workflow), or a pull request that
+# changes packaging, builds everything as the `release-files` artifact without
+# a release: a dry run, installs included.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - install.sh
+      - packaging/**
+      - release/**
+      - Cargo.toml
+      - Cargo.lock
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Static musl binaries: they run on any Linux, whatever its glibc.
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98.1"
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: musl tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: smoke test
+        run: |
+          set -eu
+          bin=target/${{ matrix.target }}/release/kyte
+          "$bin" --version
+          # Static, so it can't depend on the libraries of the machine it lands on.
+          file "$bin" | grep -Eq 'static(ally|-pie) linked'
+      - name: archive
+        # Also writes dist/third-party, which the RPM and .deb below pick up.
+        run: packaging/dist.sh ${{ matrix.target }} dist
+      - name: installer, end to end
+        # Install from the archive just built, into a scratch home, as a person
+        # would; then uninstall.
+        run: |
+          set -eu
+          export HOME="$RUNNER_TEMP/home"
+          mkdir -p "$HOME"
+          ./install.sh --from dist/kyte-${{ matrix.target }}.tar.gz
+          "$HOME/.local/bin/kyte" --version
+          ./install.sh --uninstall
+          test ! -e "$HOME/.local/bin/kyte"
+      - name: rpm
+        run: |
+          set -eu
+          cargo install cargo-generate-rpm --locked --version 0.16.1
+          cargo generate-rpm --target ${{ matrix.target }} -o dist/
+          rpm -qlp dist/kyte-*.rpm | grep -q /usr/share/doc/kyte/third-party/README.md
+      - name: deb
+        run: |
+          set -eu
+          cargo install cargo-deb --locked --version 3.8.0
+          cargo deb --no-build --no-strip --target ${{ matrix.target }} -o dist/
+          dpkg-deb --info dist/kyte_*.deb
+          dpkg-deb --contents dist/kyte_*.deb | grep -q usr/share/doc/kyte/third-party/README.md
+      - name: deb, installed and removed
+        # The runner is Debian-based: install the package as a person would,
+        # check what it put in place, then remove it.
+        run: |
+          set -eu
+          sudo apt-get install -y ./dist/kyte_*.deb
+          /usr/bin/kyte --version
+          test -f /usr/share/doc/kyte/third-party/README.md
+          sudo apt-get remove -y kyte
+          test ! -e /usr/bin/kyte
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kyte-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+            dist/*.rpm
+            dist/*.deb
+
+  assemble:
+    # Everything the release carries, in one place. Runs on dry runs too, so a
+    # broken signature shows up before release day.
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      KYTE_SIGNING_KEY: ${{ secrets.KYTE_SIGNING_KEY }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: the tag is this version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -eu
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          test "${GITHUB_REF_NAME#v}" = "$version" || {
+            echo "::error::tag ${GITHUB_REF_NAME} isn't version $version"
+            exit 1
+          }
+      - name: checksums
+        run: |
+          set -eu
+          rm -f dist/*.sha256
+          cp install.sh dist/
+          (cd dist && sha256sum *.tar.gz *.rpm *.deb install.sh > SHA256SUMS)
+          cat dist/SHA256SUMS
+      - name: sign the checksums
+        # A tag must be signed. A dry run is signed if the key is there.
+        run: |
+          set -euo pipefail
+          if [ -z "${KYTE_SIGNING_KEY:-}" ]; then
+            case "$GITHUB_REF" in
+              refs/tags/*) echo "::error::KYTE_SIGNING_KEY isn't set; releases must be signed"; exit 1 ;;
+              *) echo "No signing key on this dry run"; exit 0 ;;
+            esac
+          fi
+          umask 077
+          key="$RUNNER_TEMP/release.pem"
+          printf '%s\n' "$KYTE_SIGNING_KEY" > "$key"
+          openssl pkeyutl -sign -inkey "$key" -rawin -in dist/SHA256SUMS -out "$RUNNER_TEMP/sums.sig"
+          rm -f "$key"
+          # The signature must match the public key the installer carries.
+          openssl pkeyutl -verify -pubin -inkey release/kyte-release.pub.pem -rawin \
+            -in dist/SHA256SUMS -sigfile "$RUNNER_TEMP/sums.sig"
+          base64 -w0 "$RUNNER_TEMP/sums.sig" > dist/SHA256SUMS.sig
+      - name: installer, from the signed release files
+        # dist/ served as a release mirror: install from it as a person would,
+        # signature and checksums checked. Then the same files with one checksum
+        # changed after signing must be refused.
+        if: env.KYTE_SIGNING_KEY != ''
+        run: |
+          set -eu
+          (cd dist && exec python3 -m http.server 8765 --bind 127.0.0.1) >/dev/null 2>&1 &
+          good=$!
+          cp -r dist "$RUNNER_TEMP/tampered"
+          sed -i '1s/^./0/' "$RUNNER_TEMP/tampered/SHA256SUMS"
+          (cd "$RUNNER_TEMP/tampered" && exec python3 -m http.server 8766 --bind 127.0.0.1) >/dev/null 2>&1 &
+          bad=$!
+          trap 'kill "$good" "$bad"' EXIT
+          sleep 1
+          export HOME="$RUNNER_TEMP/home"
+          mkdir -p "$HOME"
+          KYTE_DOWNLOAD_URL=http://127.0.0.1:8765 ./install.sh
+          "$HOME/.local/bin/kyte" --version
+          ./install.sh --uninstall
+          if KYTE_DOWNLOAD_URL=http://127.0.0.1:8766 ./install.sh; then
+            echo "::error::a tampered release was installed"
+            exit 1
+          fi
+          test ! -e "$HOME/.local/bin/kyte"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-files
+          path: dist/*
+      - name: draft release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          notes="docs/releases/${tag}.md"
+          if [ -f "$notes" ]; then
+            flag=(--notes-file "$notes")
+          else
+            flag=(--generate-notes)
+          fi
+          gh release create "$tag" --draft --title "Kyte ${tag}" "${flag[@]}" dist/*
+    permissions:
+      contents: write

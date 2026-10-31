@@ -11,9 +11,25 @@ MIT License. See [LICENSE](LICENSE).
 
 ![Kyte demo](docs/demo/demo.gif)
 
-## Install and build
+## Install
 
-You need a recent stable Rust toolchain on Linux (Kyte was built and tested with 1.99.1).
+```
+curl -fsSL https://raw.githubusercontent.com/zypher-systems/kyte/main/install.sh | sh
+```
+
+This puts `kyte` in `~/.local/bin`, with no root needed, after checking the download against a signed list of checksums. It works on any x86-64 or arm64 Linux, because the binary is static. To update, run it again. To remove it, run the script with `--uninstall`.
+
+Or take a package from the [releases page](https://github.com/zypher-systems/kyte/releases):
+
+- **Fedora, RHEL:** `sudo dnf install ./kyte-<version>-1.x86_64.rpm`
+- **Debian, Ubuntu:** `sudo apt install ./kyte_<version>-1_amd64.deb`
+- **Anything else:** unpack `kyte-<target>.tar.gz` and put `kyte` on your `PATH`
+
+Kyte runs on Linux only. Building a PDF needs LaTeX installed separately; see [Building the PDF](#building-the-pdf).
+
+## Build from source
+
+You need a recent stable Rust toolchain, and a C compiler for the grammars.
 
 ```
 cargo build --release          # binary at target/release/kyte
@@ -34,7 +50,7 @@ The Makefile targets are thin wrappers:
 | `make demo` | `scripts/demo.sh` (see [Demo](#demo)) |
 | `make docker-test` | `cargo test` inside the Docker dev image (see [Docker](#docker)) |
 
-Kyte highlights Rust, Python, Bash, JavaScript, TypeScript, TSX, C, C++, Go, JSON, HTML, CSS, TOML, YAML and Markdown, picked by file name or extension, or the `#!` line of a script, using tree-sitter. Building needs a C compiler for the grammars. To leave highlighting and the code actions out, which shrinks the binary from about 15 MB to about 1.3 MB:
+Kyte highlights Rust, Python, Bash, Fish, JavaScript, TypeScript, TSX, C, C++, C#, Go, Java, PHP, Ruby, Lua, Swift, Zig, SQL, Nix, JSON, HTML, CSS, XML, TOML, YAML, INI, Markdown, LaTeX, BibTeX, Makefiles, Dockerfiles, CMake and diffs, picked by file name or extension, or the `#!` line of a script, using tree-sitter. Building needs a C compiler for the grammars. To leave highlighting, the code actions and spell check out, which shrinks the binary from about 34 MB to about 1.3 MB:
 
 ```
 cargo build --release --no-default-features
@@ -46,13 +62,13 @@ Kyte makes no network connections and sends no telemetry.
 ## Usage
 
 ```
-kyte [OPTIONS] [FILE]
+kyte [OPTIONS] [FILE]...
 ```
 
 | Option | Meaning |
 | --- | --- |
 | `-h`, `--help` | Show usage and exit 0 |
-| `-V`, `--version` | Print `kyte 0.5.0` and exit 0 |
+| `-V`, `--version` | Print `kyte 0.6.0` and exit 0 |
 | `--esc-ms N` | Double-tap window for Esc Esc in milliseconds (default 300; env `KYTE_ESC_MS`) |
 | `--no-kitty` | Never enable the kitty keyboard protocol |
 | `--no-history` | Keep no file history this session |
@@ -88,13 +104,16 @@ Environment variables: `KYTE_STATE_DIR` (where swap files go; overrides the defa
 | Ctrl-X, Ctrl-C, Ctrl-V | Cut, copy, paste. With nothing selected, cut and copy take the whole line, and a whole line pastes above the current one |
 | Ctrl-S | Save. With no file name, Kyte asks for one |
 | Ctrl-O | Open another file |
-| Ctrl-Q | Quit. With unsaved changes, Kyte asks first: `y` saves and quits, `n` discards, Esc cancels |
+| Ctrl-W | Close the file. With unsaved changes, Kyte asks first. Closing the last file quits |
+| Ctrl-Q | Quit. Kyte asks about each file with unsaved changes: `y` saves it, `n` discards it, Esc cancels |
 | Ctrl-Z, Ctrl-Y | Undo, redo |
 | Ctrl-F | Search |
 | Ctrl-R | Replace |
 | Esc, Ctrl-Space | Open the operator layer |
 | Alt-*key* | Same as Esc then *key* |
 | Ctrl-K | Open the universal palette |
+| Ctrl-T | Open the file tree |
+| Ctrl-B | Build a LaTeX file's PDF |
 | Ctrl-P | Open the command palette |
 
 Pasted text (bracketed paste) is inserted as one block and undone with a single Ctrl-Z.
@@ -103,7 +122,7 @@ Copy and cut also reach the system clipboard, through the terminal's OSC 52 sequ
 
 ### The Esc layer
 
-Esc never waits. The layer opens at once, the status bar shows `ESC`, and a floating menu lists the keys. It sits in a corner, clear of the cursor.
+Esc never waits. The layer opens at once, the status bar shows `ESC`, and a floating menu in the middle of the screen lists the keys.
 
 The next key runs one operator and closes the layer:
 
@@ -117,6 +136,8 @@ The next key runs one operator and closes the layer:
 | `u`, `r` | Undo, redo |
 | `s` | Save |
 | `h` | Open the file's history |
+| `t` | Open the file tree |
+| `l` | Turn line numbers on or off for this file |
 | Esc, within 300 ms of the first Esc | Open the command palette |
 | Esc, later | Close the layer |
 | Any other key | Close the layer; the key is discarded, nothing is inserted |
@@ -126,9 +147,12 @@ The menu changes with where you are, and only lists what works there:
 | Where | Extra keys |
 | --- | --- |
 | On a bracket with a partner | `i` select inside |
+| In LaTeX | `q` insert citation, `g` build PDF, `o` open PDF |
+| In writing | `m` next misspelling, and `z` fix spelling on a misspelled word |
+| With more than one file open | `b` open files, `.` next file, `,` previous file |
 | In a file with a line comment syntax | `#` comment or uncomment the line |
 | In any language Kyte highlights | `e` select the syntax under the cursor |
-| In Rust, Python, Bash, JavaScript, TypeScript, C, C++ or Go | `f` select function, `n` and `p` next and previous function |
+| In Rust, Python, Bash, Fish, JavaScript, TypeScript, C, C++, C#, Go, Java, PHP, Ruby, Lua, Swift or Zig | `f` select function, `n` and `p` next and previous function |
 
 With text selected, Esc shows the selection's menu instead. Actions leave the result selected where that makes sense, so they chain:
 
@@ -152,13 +176,19 @@ Under tmux, set `tmux set -g escape-time 10`. tmux's default of 500 ms delays ev
 
 Esc Esc (or Ctrl-P) opens a fuzzy-filtered list. Type to filter, Up and Down to select, Enter to run, Esc to close without running anything.
 
-Commands: Save, Save as, Open file, Quit, Quit without saving, Undo, Redo, Cut, Copy, Paste, Select all, Find, Replace, Go to line, Toggle line numbers, Toggle tabs and spaces, Toggle soft wrap, Show key help.
+Commands: Save, Save as, Open file, Quit, Quit without saving, Undo, Redo, Cut, Copy, Paste, Select all, Find, Replace, Go to line, Toggle line numbers, Toggle tabs and spaces, Toggle soft wrap, Choose theme, File tree, Insert citation, Build PDF, Stop build, Show build problems, Open PDF, Fix spelling, Next misspelling, Toggle spell check, Open files, Next file, Previous file, Close file, Show key help.
 
 Kyte works out whether a file indents with tabs or spaces, and how many, from its first 10,000 lines. A file with no indent uses tabs. The status bar shows `Spaces N` for space-indented files. **Toggle tabs and spaces** changes what new indent uses until the file is closed; it doesn't rewrite existing lines.
 
 **Save as** asks for a file name, starting from the current one; `~/` means your home directory, and Tab completes the path. It asks before overwriting a file, and refuses a file another Kyte has open. The buffer then belongs to the new file, and the old file stays as it was.
 
-**Open file** (Ctrl-O) asks for a path, starting in the current file's directory. Tab completes it, and lists the matches in a floating box when there's more than one. A path that doesn't exist yet opens as a new file. Kyte holds one file at a time, so opening another replaces the current one, and if you have unsaved changes it asks first: `y` saves them, `n` discards them, Esc cancels. If the new file left a crashed session behind, Kyte offers to recover it; quitting that offer closes Kyte.
+**Open file** (Ctrl-O) asks for a path, starting in the current file's directory. Tab completes it, and lists the matches in a floating box when there's more than one. A path that doesn't exist yet opens as a new file. The file you were in stays open, unsaved changes and all, and a file that's already open is shown rather than opened again. If the new file left a crashed session behind, Kyte offers to recover it; leaving that offer closes the new file, or quits if it's the only one.
+
+**Open files** (Esc `b`) lists what's open, marked `unsaved` or `changed` where that applies. Type to filter, Up and Down to select, Enter to go there. **Next file** and **Previous file** (Esc `.` and Esc `,`) move through them in order, and the status bar shows which you're in, such as `file 2 of 3`. Each file keeps its own cursor, undo, swap and history. **Close file** (Ctrl-W) closes the one on screen. Kyte can also start with several: `kyte a.txt b.txt`.
+
+**Quit without saving** asks first if a file not on screen has unsaved changes.
+
+**File tree** (Ctrl-T) opens the directory you started Kyte in, in a box in the middle of the screen, unfolded down to the file you're in. Up and Down move, PageUp, PageDown, Home and End move further, and a letter jumps to the next name starting with it. Right opens a folder and Left closes it, Enter opens the file or folder, `.` shows or hides hidden files, and Esc closes the box. Files already open are marked `open` or `unsaved`.
 
 **Go to line** asks for a 1-based line number. Numbers past the end go to the last line, and anything that is not a number shows an error. **Show key help** shows the key table; Up and Down scroll it, and Esc closes it.
 
@@ -229,6 +259,30 @@ Search ignores case until your text has a capital letter, then it matches exactl
 
 Ctrl-R asks what to replace and what to replace it with. Kyte then starts at the cursor, goes to the end of the file, wraps to the top, and stops where it started. At each match, `y` replaces it, `n` skips it, `a` replaces all the rest as one undo step, and Esc or `q` stops. Replace matches case the same way search does.
 
+## Writing
+
+Markdown, text and LaTeX files open for writing. Long lines wrap, the status bar shows a word count, and misspelled words are underlined. **Toggle soft wrap** and **Toggle spell check** change one file at a time, and `writing = false` turns the whole setup off. Selecting text shows how many words are selected.
+
+The word count in LaTeX covers what a reader reads: the document body, without commands, math, comments, citations or labels. It catches up when you stop typing for a moment. In other files it's live. Files over 2 MiB don't show one.
+
+Spell check uses a built-in American English dictionary, so it needs nothing installed. Esc `m` moves to the next misspelling. On a misspelled word, Esc `z` opens a box of suggestions. It can also add the word to your words, or ignore it until Kyte closes. Your words are kept in `words.txt` beside the settings file, one per line, so you can edit them. Kyte leaves alone what isn't prose, such as LaTeX commands, math and citation keys, code in Markdown, and web addresses. It also skips words with a digit or written in capitals or mixed case, such as `LSTM` and `arXiv`.
+
+### Citations
+
+In a LaTeX file, finishing `\cite{` opens a box of the works in your bibliography. So do `\citep{`, `\autocite{`, `\parencite[p. 3]{` and any other citation command. Type to filter by key, author or title. Enter puts in the key and closes the braces, a comma puts it in and stays open for the next, and Esc leaves what you typed. Esc `q` (**Insert citation**) does the same from anywhere: it fills in the braces at the cursor, or starts a `\cite{`.
+
+The works come from the files named by `\bibliography{}` or `\addbibresource{}`, and failing that from every `.bib` beside the paper. A `.bib` file open in Kyte counts as it stands, saved or not.
+
+### Building the PDF
+
+Ctrl-B (**Build PDF**) saves a LaTeX file and builds it with `latexmk`, in the file's folder. Kyte doesn't install LaTeX, so you need TeX Live with `latexmk`, or another tool set as `build_command`. The build runs beside the editor, so you can keep typing, and the status bar shows `building PDF` until it ends. **Stop build** ends it, and so does quitting.
+
+If it fails, a box lists the errors, and Enter goes to the line, opening the file if it's another one. If it works but left citations or labels undefined, Kyte says so, and **Show build problems** lists them. Esc `o` (**Open PDF**) shows the result with `xdg-open`.
+
+A chapter builds its whole document. Kyte goes by a `% !TEX root = ../thesis.tex` comment in the first ten lines, and failing that, for a file with no `\documentclass`, a `main.tex` beside it or a folder up.
+
+Open files other than the one you build aren't saved first.
+
 ## Soft wrap
 
 With soft wrap on, a long line continues on the next screen row, breaking after a space where it can. It changes only how the line is shown: the file is the same, and the line keeps one number. Up and Down move by screen row, and Home and End still go to the start and end of the whole line. Ordinary text is unaffected, but very long lines cost more, because each keystroke re-measures them: about 25 ms per key at 1 MB on one line, and 110 ms at 5 MB.
@@ -242,13 +296,33 @@ With soft wrap on, a long line continues on the next screen row, breaking after 
 | `tab_width` | `4` | Columns a tab takes up on screen |
 | `indent` | `"tabs"` | What Tab inserts in a file with no indent to go by: `"tabs"` or `"spaces"` |
 | `indent_width` | `4` | How many spaces, when `indent` is `"spaces"` |
-| `line_numbers` | `true` | Show line numbers |
+| `line_numbers` | `true` | Show line numbers. Esc `l` changes it for one file |
 | `soft_wrap` | `false` | Wrap long lines at the edge of the screen. **Toggle soft wrap** in the palette changes it for the session |
+| `writing` | `true` | Open Markdown, text and LaTeX files for writing |
+| `spell_check` | `true` | Underline misspelled words in writing |
+| `build_command` | `latexmk`, as below | What builds a LaTeX file, run in its folder. `%f` is the file name |
+| `pdf_command` | `"xdg-open %f"` | What shows a PDF |
+| `theme` | `"signal"` | Colors: `"signal"`, `"harbor"`, `"dusk"`, `"ember"`, `"moss"` or `"daybreak"`. **Choose theme** in the palette changes it for the session |
 | `esc_ms` | `300` | Milliseconds to press Esc again for the palette |
 | `history` | `true` | Keep a history of every edit to each file |
 | `history_limit_mb` | `100` | Trim a file's history when it passes this size |
 
 Environment variables and command-line options override the file. A line Kyte can't use is skipped and reported on the first screen, and never stops Kyte from opening.
+
+## Themes
+
+**Choose theme** in the palette opens a box of themes. The screen changes as you move through the list, Enter keeps one for the session, and Esc puts the old one back. To keep one, set `theme` in the settings file.
+
+| Theme | Look |
+| --- | --- |
+| Signal | Near black with vivid color, the default and the strongest contrast |
+| Harbor | Navy and teal |
+| Dusk | Blue-violet with soft amber |
+| Ember | Warm charcoal with orange and gold |
+| Moss | Muted forest greens |
+| Daybreak | Light, cool white with ink blue |
+
+Themes use 24-bit color when the terminal says it can, through `COLORTERM=truecolor` or `COLORTERM=24bit`, and a close 256-color match otherwise. SSH and sudo usually drop that variable, so to get 24-bit color there, start Kyte with `COLORTERM=truecolor kyte`. In 256 colors the dark themes share a plain dark gray background, because that palette has no soft dark blues, browns or greens, so they differ mainly in their text colors.
 
 ## Swap files and recovery
 
@@ -310,10 +384,12 @@ These Docker files have not been run yet, because the build machine had no Docke
 - UTF-8 files only (others are refused and left untouched).
 - Kyte keeps each line's ending as it is. New lines use the ending most of the file uses, and the status bar shows `CRLF` for those files. It doesn't convert a file from one to the other. A `\r` that isn't part of a line ending shows as a control picture.
 - Linux only (the swap lock checks `/proc`).
-- Files over 512 KiB aren't syntax highlighted, because each keystroke re-parses the file. Typing takes under about 25 ms per key at 100 KB, and 60 to 115 ms near the limit, depending on the language.
+- After a crash, Kyte offers to recover each file when that file is opened again. It doesn't list them for you.
+- Spell check is American English only for now.
+- Files over 512 KiB aren't syntax highlighted, because each keystroke re-parses the file. LaTeX is the exception: Kyte parses only the text around the screen, so its size doesn't matter, though a verbatim block or a math block longer than a few KB can color wrongly when you're inside it. Typing takes under about 25 ms per key at 100 KB, and 60 to 115 ms near the limit, depending on the language.
 - Search takes under about 30 ms per key on a 38 MB ASCII file. On a file that size with non-ASCII text, ignoring case takes about 240 ms per key.
 - A very long single line costs more per keystroke, depending on what's in it. At the end of a 5 MB line on the build machine, plain ASCII takes about 8 ms, a line full of tabs about 45 ms, and CJK text about 170 ms.
-- Not in this version: file tree, light and high-contrast themes, mouse, multiple buffers or splits, LSP, plugins, CRLF conversion, non-UTF-8 files, RPM/COPR packaging, and use as the default `$EDITOR`.
+- Not in this version: mouse, splits, LSP, plugins, CRLF conversion, non-UTF-8 files, and use as the default `$EDITOR`.
 
 ## Documentation
 

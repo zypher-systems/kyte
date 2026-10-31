@@ -8,16 +8,16 @@ Gate commands, all run from the repo root:
 cargo build --release                      # 0 warnings (also after `cargo clean --release -p kyte-editor`)
 cargo fmt --check                          # clean
 cargo clippy --all-targets -- -D warnings  # clean
-cargo test                                 # 504 passed, 0 failed, 1 ignored (the AC-25 demo test)
+cargo test                                 # 669 passed, 0 failed, 1 ignored (the AC-25 demo test)
 cargo test --test demo -- --ignored        # 1 passed (AC-25)
 make demo                                  # writes docs/demo/*
 ```
 
-Updated on 2026-10-30, on rustc 1.98.1 with SELinux enforcing. `cargo test` breakdown: lib unit tests 277, `tests/buffer_props.rs` 2 (proptest), `tests/e2e.rs` 135, `tests/e2e_highlight.rs` 11, `tests/fileio.rs` 19, `tests/history.rs` 31, `tests/smoke.rs` 4, `tests/swap.rs` 25, `tests/demo.rs` 0 run and 1 ignored. The full suite was also run three times in a row with no failures.
+Updated on 2026-10-30, on rustc 1.98.1 with SELinux enforcing. `cargo test` breakdown: lib unit tests 372, `tests/buffer_props.rs` 2 (proptest), `tests/e2e.rs` 201, `tests/e2e_highlight.rs` 15, `tests/fileio.rs` 19, `tests/history.rs` 31, `tests/smoke.rs` 4, `tests/swap.rs` 25, `tests/demo.rs` 0 run and 1 ignored. The full suite was also run three times in a row with no failures.
 
 | AC | Result | How it was verified |
 | --- | --- | --- |
-| AC-01 | pass | `cargo build --release` shows 0 warnings. `target/release/kyte --version` prints `kyte 0.5.0` with exit 0; `--help` exits 0; `--bogus` exits 2. Tests: `smoke.rs` `ac01_version_prints_and_exits_0`, `ac01_help_lists_options_and_exits_0` (checks every section 7 option), `ac01_unknown_option_exits_2`, `ac01_missing_value_exits_2`. |
+| AC-01 | pass | `cargo build --release` shows 0 warnings. `target/release/kyte --version` prints `kyte 0.6.0` with exit 0; `--help` exits 0; `--bogus` exits 2. Tests: `smoke.rs` `ac01_version_prints_and_exits_0`, `ac01_help_lists_options_and_exits_0` (checks every section 7 option), `ac01_unknown_option_exits_2`, `ac01_missing_value_exits_2`. |
 | AC-02 | pass | `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` are clean. `cargo test`: 180 passed; the only ignored test is the demo (`ac25_demo_script_writes_cast_frames_and_media`). |
 | AC-03 | pass | e2e `ac03_not_a_tty_exits_2`, `ac03_stdout_not_a_tty_exits_2`, `ac03_directory_exits_2`, `ac03_non_utf8_exits_2_and_file_unchanged` (byte comparison). By hand: `kyte /tmp </dev/null` exits 2 with "kyte: stdin and stdout must be a terminal". Library level: `tests/fileio.rs`. |
 | AC-04 | pass | e2e `ac04_new_file_type_save_quit`: the file is exactly `hello\nworld`, exit 0. |
@@ -43,6 +43,6 @@ Updated on 2026-10-30, on rustc 1.98.1 with SELinux enforcing. `cargo test` brea
 | AC-24 | pass | e2e `ac24_save_into_read_only_dir_fails_visibly_and_keeps_everything`, `ac24_save_through_symlink_updates_target_keeps_link`; `tests/fileio.rs`. |
 | AC-25 | pass | `make demo` ran headless (no display, no tmux) and wrote `docs/demo/demo.cast`, `demo.gif` (979x694, 33.75 s), `demo.mp4` (h264 978x694, 32.9 s; both checked with `ffprobe`), 13 PNGs, `steps.tsv` and 13 `frames/NN-*.txt`. `frames/03-legend.txt` contains the legend, `07-palette.txt` the palette, and `11-crash.txt` the Recover modal; PNGs 03, 07 and 11 were also inspected by eye. The skip path was checked with agg and ffmpeg removed from `PATH`: it wrote the cast, steps and frames and listed the gif, mp4 and PNGs as skipped. `cargo test --test demo -- --ignored` passed. |
 
-Syntax highlighting (feature `highlight`, on by default): `cargo build --release --no-default-features` 0 warnings, `cargo clippy --all-targets --no-default-features -- -D warnings` clean, `cargo test --no-default-features` 466 passed, 0 failed, 1 ignored. The default build adds 38 tests that need highlighting.
+Syntax highlighting (feature `highlight`, on by default): `cargo build --release --no-default-features` 0 warnings, `cargo clippy --all-targets --no-default-features -- -D warnings` clean, `cargo test --no-default-features` 605 passed, 0 failed, 1 ignored. The default build adds 64 tests that need highlighting.
 
 Not verified: `make docker-test` and the Dockerfile, because Docker is not installed on the first build machine (see `docs/DECISIONS.md`).

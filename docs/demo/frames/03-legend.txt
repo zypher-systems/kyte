@@ -6,11 +6,17 @@
   6 │ Press Esc twice for the command palette.
   7 │ fn bracket_demo(x: [u8; 4]) -> u8 {
   8 │     x[0] + (x[1] * x[2])
-  9 │ }
- 10 │ Unsaved work is written to a swap file,
- 11 │ so a crash never loses your edits.
- 12 │ Try the palette: Go to line, Find, Save.
- 13 │
+  9 │ }                   ╭──────────────────── Esc ─────────────────────╮
+ 10 │ Unsaved work is writ│                                              │
+ 11 │ so a crash never los│        w del word            s save          │
+ 12 │ Try the palette: Go │        d del line            h history       │
+ 13 │                     │        k del to end          v reader mode   │
+~                         │        % bracket             t file tree     │
+~                         │        / search              l line numbers  │
+~                         │        u undo          Esc Esc palette       │
+~                         │        r redo                                │
+~                         │                                              │
+~                         ╰──────────────────────────────────────────────╯
 ~
 ~
 ~
@@ -20,11 +26,5 @@
 ~
 ~
 ~
-~
-~
-~
-~
-~
-~
- ESC │ demo.txt [+] │ Ln 1, Col 42
- w del word  d del line  k del to end  % bracket  / search  u undo  r redo  s save  Esc Esc palette
+ ESC  demo.txt [+]                                                          Ln 1, Col 42 │ Spaces 2
+

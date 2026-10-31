@@ -8,6 +8,45 @@ use std::path::Path;
 /// Code larger than this isn't parsed on every key, because that would lag.
 pub const MAX_LIVE_PARSE_BYTES: usize = 512 * 1024;
 
+/// A kind of file meant for reading rather than running.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Prose {
+    Text,
+    Markdown,
+    Latex,
+}
+
+/// What kind of writing a file is. A `.txt` that a language claims isn't, such
+/// as `CMakeLists.txt`, and a style file is LaTeX code rather than a paper.
+pub fn prose(path: &Path, head: &str) -> Option<Prose> {
+    let name = path.file_name()?.to_str()?;
+    if name == "CMakeLists.txt" || shebang_program(head).is_some() {
+        return None;
+    }
+    match path.extension()?.to_str()? {
+        "txt" | "text" | "rst" | "adoc" | "org" => Some(Prose::Text),
+        "md" | "markdown" => Some(Prose::Markdown),
+        "tex" | "ltx" | "latex" => Some(Prose::Latex),
+        _ => None,
+    }
+}
+
+/// Words in plain text: runs without spaces that hold a letter or digit, so a
+/// list dash or a table rule doesn't count.
+pub fn plain_words(text: &str) -> usize {
+    text.split_whitespace()
+        .filter(|w| w.chars().any(char::is_alphanumeric))
+        .count()
+}
+
+/// The words in a file of this kind.
+pub fn word_count(prose: Prose, text: &str) -> usize {
+    match prose {
+        Prose::Latex => latex_words(text),
+        Prose::Text | Prose::Markdown => plain_words(text),
+    }
+}
+
 /// The program a `#!` line runs, without its directory. `env` and its own
 /// flags are looked past. `#![...]` is a Rust attribute, not a `#!` line.
 pub fn shebang_program(head: &str) -> Option<&str> {
@@ -30,10 +69,12 @@ fn extension_prefix(extension: &str) -> Option<&'static str> {
     match extension {
         "rs" | "c" | "h" | "cc" | "cpp" | "cxx" | "hh" | "hpp" | "hxx" | "go" | "java" | "js"
         | "mjs" | "cjs" | "jsx" | "ts" | "mts" | "cts" | "tsx" | "jsonc" | "swift" | "kt"
-        | "scala" | "cs" | "zig" => Some("//"),
+        | "scala" | "cs" | "zig" | "php" | "phtml" => Some("//"),
         "py" | "pyi" | "sh" | "bash" | "zsh" | "fish" | "rb" | "pl" | "toml" | "yaml" | "yml"
-        | "conf" | "ini" | "mk" | "r" | "ex" | "exs" => Some("#"),
+        | "conf" | "ini" | "cfg" | "mk" | "r" | "ex" | "exs" | "rake" | "gemspec" | "nix"
+        | "cmake" | "dockerfile" | "desktop" | "service" | "timer" | "socket" => Some("#"),
         "lua" | "sql" | "hs" => Some("--"),
+        "tex" | "ltx" | "latex" | "sty" | "cls" | "bib" | "bibtex" => Some("%"),
         "vim" => Some("\""),
         _ => None,
     }
@@ -47,6 +88,10 @@ pub fn comment_prefix(path: &Path, head: &str) -> Option<&'static str> {
         .and_then(|n| n.to_str())
         .and_then(|n| match n {
             ".bashrc" | ".bash_profile" | ".profile" | ".zshrc" | "PKGBUILD" => Some("#"),
+            "Makefile" | "makefile" | "GNUmakefile" | "Dockerfile" | "Containerfile"
+            | "Gemfile" | "Rakefile" | "Vagrantfile" | "Brewfile" | "CMakeLists.txt"
+            | ".gitconfig" | ".gitmodules" | ".editorconfig" => Some("#"),
+            n if n.starts_with("Dockerfile.") => Some("#"),
             _ => None,
         });
     let by_extension = path
@@ -55,7 +100,8 @@ pub fn comment_prefix(path: &Path, head: &str) -> Option<&'static str> {
         .and_then(extension_prefix);
     by_name.or(by_extension).or_else(|| {
         shebang_program(head).map(|program| match program {
-            "node" | "nodejs" | "deno" | "bun" => "//",
+            "node" | "nodejs" | "deno" | "bun" | "php" => "//",
+            "lua" => "--",
             _ => "#",
         })
     })
@@ -77,7 +123,9 @@ mod code {
         let kind = node.kind();
         match lang {
             Lang::Rust => kind == "function_item",
-            Lang::Python | Lang::Bash | Lang::C | Lang::Cpp => kind == "function_definition",
+            Lang::Python | Lang::Bash | Lang::C | Lang::Cpp | Lang::Fish => {
+                kind == "function_definition"
+            }
             Lang::JavaScript | Lang::TypeScript | Lang::Tsx => matches!(
                 kind,
                 "function_declaration"
@@ -87,6 +135,12 @@ mod code {
                     | "arrow_function"
             ),
             Lang::Go => matches!(kind, "function_declaration" | "method_declaration"),
+            Lang::Java | Lang::CSharp => {
+                matches!(kind, "method_declaration" | "constructor_declaration")
+            }
+            Lang::Php => matches!(kind, "function_definition" | "method_declaration"),
+            Lang::Ruby => matches!(kind, "method" | "singleton_method"),
+            Lang::Lua | Lang::Zig | Lang::Swift => kind == "function_declaration",
             _ => false,
         }
     }
@@ -111,6 +165,14 @@ mod code {
                     | Lang::C
                     | Lang::Cpp
                     | Lang::Go
+                    | Lang::Java
+                    | Lang::CSharp
+                    | Lang::Php
+                    | Lang::Ruby
+                    | Lang::Lua
+                    | Lang::Fish
+                    | Lang::Zig
+                    | Lang::Swift
             )
         )
     }
@@ -174,6 +236,20 @@ mod code {
             (Lang::Cpp, "namespace_definition") => ("namespace", "name"),
             (Lang::Go, "function_declaration") => ("func", "name"),
             (Lang::Go, "method_declaration") => ("func", "name"),
+            (Lang::Java | Lang::CSharp | Lang::Php, "class_declaration") => ("class", "name"),
+            (Lang::Java | Lang::CSharp, "interface_declaration") => ("interface", "name"),
+            (Lang::Java | Lang::CSharp | Lang::Php, "method_declaration") => ("method", "name"),
+            (Lang::Java | Lang::CSharp, "constructor_declaration") => ("new", "name"),
+            (Lang::CSharp, "namespace_declaration") => ("namespace", "name"),
+            (Lang::Php, "function_definition") => ("function", "name"),
+            (Lang::Ruby, "class") => ("class", "name"),
+            (Lang::Ruby, "module") => ("module", "name"),
+            (Lang::Ruby, "method" | "singleton_method") => ("def", "name"),
+            (Lang::Lua, "function_declaration") => ("function", "name"),
+            (Lang::Fish, "function_definition") => ("function", "name"),
+            (Lang::Zig, "function_declaration") => ("fn", "name"),
+            (Lang::Swift, "function_declaration") => ("func", "name"),
+            (Lang::Swift, "class_declaration") => ("class", "name"),
             _ => return None,
         };
         Some(format!("{word} {}", name(field)?))
@@ -196,6 +272,74 @@ mod code {
         }
         out.reverse();
         out
+    }
+
+    /// The words a reader would count in a LaTeX file: what's in the document
+    /// body, without commands, math, comments, citations or labels.
+    pub fn latex_words(text: &str) -> usize {
+        let Some(tree) = parse(Lang::Latex, text) else {
+            return plain_words(text);
+        };
+        let root = tree.root_node();
+        let body = document_body(root, text).unwrap_or(root);
+        count_text(body, text)
+    }
+
+    fn is_document(node: Node, text: &str) -> bool {
+        node.kind() == "generic_environment"
+            && node
+                .child_by_field_name("begin")
+                .and_then(|b| b.child_by_field_name("name"))
+                .is_some_and(|n| &text[n.byte_range()] == "{document}")
+    }
+
+    fn document_body<'a>(node: Node<'a>, text: &str) -> Option<Node<'a>> {
+        let mut cursor = node.walk();
+        let found = node
+            .named_children(&mut cursor)
+            .find(|n| is_document(*n, text));
+        found
+    }
+
+    fn count_text(node: Node, text: &str) -> usize {
+        match node.kind() {
+            // A citation can sit inside a run of text, so it's stepped around.
+            "text" => {
+                let (mut words, mut from) = (0, node.start_byte());
+                let mut cursor = node.walk();
+                for child in node.named_children(&mut cursor) {
+                    if !matches!(child.kind(), "word" | "operator" | "delimiter") {
+                        words += plain_words(&text[from..child.start_byte()]);
+                        words += count_text(child, text);
+                        from = child.end_byte();
+                    }
+                }
+                words + plain_words(&text[from..node.end_byte()])
+            }
+            "inline_formula"
+            | "displayed_equation"
+            | "math_environment"
+            | "line_comment"
+            | "block_comment"
+            | "comment_environment"
+            | "verbatim_environment"
+            | "listing_environment"
+            | "minted_environment"
+            | "citation"
+            | "label_definition"
+            | "label_reference"
+            | "begin"
+            | "end"
+            | "package_include"
+            | "class_include"
+            | "graphics_include"
+            | "brack_group_key_value" => 0,
+            _ => {
+                let mut cursor = node.walk();
+                let children: Vec<_> = node.named_children(&mut cursor).collect();
+                children.into_iter().map(|c| count_text(c, text)).sum()
+            }
+        }
     }
 
     /// The next larger piece of syntax around `range`.
@@ -260,6 +404,10 @@ mod code {
 mod code {
     use super::*;
 
+    pub fn latex_words(text: &str) -> usize {
+        plain_words(text)
+    }
+
     pub fn supported(_: &Path, _: &str) -> bool {
         false
     }
@@ -290,7 +438,8 @@ mod code {
 }
 
 pub use code::{
-    breadcrumb, expand, function_at, has_functions, next_function, prev_function, supported,
+    breadcrumb, expand, function_at, has_functions, latex_words, next_function, prev_function,
+    supported,
 };
 
 #[cfg(all(test, feature = "highlight"))]
@@ -312,6 +461,126 @@ mod tests {
         let at = SH.find("echo").unwrap();
         let r = function_at(Path::new("a.sh"), SH, at).unwrap();
         assert!(SH[r].starts_with("one()"));
+    }
+
+    /// `(file, text, a place inside, what the function starts with, its crumb)`.
+    const LATER: &[(&str, &str, &str, &str, &str)] = &[
+        (
+            "A.java",
+            "class A {\n  int one() {\n    return 1;\n  }\n}\n",
+            "return",
+            "int one",
+            "method one",
+        ),
+        (
+            "A.cs",
+            "class A {\n  int One() {\n    return 1;\n  }\n}\n",
+            "return",
+            "int One",
+            "method One",
+        ),
+        (
+            "a.php",
+            "<?php\nclass A {\n  function one() {\n    return 1;\n  }\n}\n",
+            "return",
+            "function one",
+            "method one",
+        ),
+        (
+            "a.php",
+            "<?php\nfunction one() {\n  return 1;\n}\n",
+            "return",
+            "function one",
+            "function one",
+        ),
+        (
+            "a.rb",
+            "class A\n  def one\n    1\n  end\nend\n",
+            "1",
+            "def one",
+            "def one",
+        ),
+        (
+            "a.lua",
+            "function one()\n  return 1\nend\n",
+            "return",
+            "function one",
+            "function one",
+        ),
+        (
+            "a.fish",
+            "function one\n  echo hi\nend\n",
+            "echo",
+            "function one",
+            "function one",
+        ),
+        (
+            "a.swift",
+            "class A {\n  func one() -> Int {\n    return 1\n  }\n}\n",
+            "return",
+            "func one",
+            "func one",
+        ),
+        (
+            "a.zig",
+            "fn one() u8 {\n    return 1;\n}\n",
+            "return",
+            "fn one",
+            "fn one",
+        ),
+    ];
+
+    #[test]
+    fn functions_are_found_in_the_later_languages() {
+        for (file, text, inside, start, crumb) in LATER {
+            let path = Path::new(file);
+            assert!(has_functions(path, text), "{file}");
+            let at = text.find(inside).unwrap();
+            let r = function_at(path, text, at).unwrap_or_else(|| panic!("{file}"));
+            assert!(text[r.clone()].starts_with(start), "{file}: {:?}", &text[r]);
+            let crumbs = breadcrumb(path, text, at);
+            assert_eq!(crumbs.last().map(String::as_str), Some(*crumb), "{file}");
+            let found = prev_function(path, text, text.len());
+            assert_eq!(found, Some(text.find(start).unwrap()), "{file}");
+        }
+    }
+
+    #[test]
+    fn languages_without_functions_keep_those_keys_off_the_menu() {
+        for file in [
+            "a.sql",
+            "a.xml",
+            "Dockerfile",
+            "Makefile",
+            "a.ini",
+            "a.diff",
+        ] {
+            assert!(!has_functions(Path::new(file), ""), "{file}");
+            assert!(supported(Path::new(file), ""), "{file}");
+        }
+    }
+
+    #[test]
+    fn latex_counts_what_a_reader_reads() {
+        let paper = concat!(
+            "\\documentclass{article}\n\\usepackage{amsmath}\n\\title{Not Counted}\n",
+            "\\begin{document}\n\\section{Two Words}\n",
+            "% a comment here\n",
+            "One \\textbf{two} three \\cite{knuth} four.\n",
+            "A sum $x + y = z$ five.\n",
+            "\\begin{equation}\n\\label{eq:a} a + b\n\\end{equation}\n",
+            "\\end{document}\n",
+            "After the end.\n",
+        );
+        assert_eq!(word_count(Prose::Latex, paper), 2 + 4 + 3);
+    }
+
+    #[test]
+    fn a_latex_fragment_with_no_document_counts_all_of_it() {
+        assert_eq!(
+            word_count(Prose::Latex, "Just some \\emph{text} here.\n"),
+            4
+        );
     }
 
     #[test]
@@ -481,12 +750,40 @@ mod prefix_tests {
     use super::*;
 
     #[test]
+    fn writing_is_told_from_code() {
+        let kind = |name| prose(Path::new(name), "");
+        assert_eq!(kind("notes.txt"), Some(Prose::Text));
+        assert_eq!(kind("README.md"), Some(Prose::Markdown));
+        assert_eq!(kind("paper.tex"), Some(Prose::Latex));
+        assert_eq!(kind("CMakeLists.txt"), None);
+        assert_eq!(kind("style.sty"), None);
+        assert_eq!(kind("a.rs"), None);
+        assert_eq!(kind("Makefile"), None);
+        assert_eq!(prose(Path::new("run.txt"), "#!/bin/sh\n"), None);
+    }
+
+    #[test]
+    fn plain_words_leave_out_marks_with_no_letters() {
+        assert_eq!(plain_words(""), 0);
+        assert_eq!(plain_words("  one two\n\nthree  "), 3);
+        assert_eq!(plain_words("# Title\n- item, here\n--- | ---\n"), 3);
+        assert_eq!(plain_words("don't state-of-the-art 3.5"), 3);
+    }
+
+    #[test]
     fn comment_prefixes_by_extension() {
         assert_eq!(comment_prefix(Path::new("a.rs"), ""), Some("//"));
         assert_eq!(comment_prefix(Path::new("a.py"), ""), Some("#"));
         assert_eq!(comment_prefix(Path::new("a.sql"), ""), Some("--"));
         assert_eq!(comment_prefix(Path::new("notes.txt"), ""), None);
-        assert_eq!(comment_prefix(Path::new("Makefile"), ""), None);
+        assert_eq!(comment_prefix(Path::new("Makefile"), ""), Some("#"));
+        assert_eq!(comment_prefix(Path::new("Dockerfile.dev"), ""), Some("#"));
+        assert_eq!(comment_prefix(Path::new("a.php"), ""), Some("//"));
+        assert_eq!(comment_prefix(Path::new("paper.tex"), ""), Some("%"));
+        assert_eq!(
+            comment_prefix(Path::new("tool"), "#!/usr/bin/lua\n"),
+            Some("--")
+        );
         assert_eq!(comment_prefix(Path::new("tool"), "#!/bin/sh\n"), Some("#"));
     }
 

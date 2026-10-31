@@ -26,5 +26,5 @@
 ~
 ~
 ~
- INSERT │ demo.txt [+] │ Ln 1, Col 42
+ INSERT  demo.txt [+]                                                       Ln 1, Col 42 │ Spaces 2
 

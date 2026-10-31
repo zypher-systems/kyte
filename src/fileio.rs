@@ -80,13 +80,18 @@ pub fn resolve_target(path: &Path) -> io::Result<PathBuf> {
     match fs::canonicalize(path) {
         Ok(p) => Ok(p),
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            // Nonexistent (or dangling) target: follow a dangling symlink once,
-            // otherwise keep the path and canonicalize its directory.
+            // Nonexistent (or dangling) target: follow a dangling symlink,
+            // otherwise keep the name and canonicalize its directory, so two
+            // spellings of one new file resolve the same.
             if let Ok(link) = fs::read_link(path) {
                 let base = path.parent().unwrap_or(Path::new("."));
-                return Ok(base.join(link));
+                return resolve_target(&base.join(link));
             }
-            absolute(path)
+            let abs = absolute(path)?;
+            match (abs.parent().map(fs::canonicalize), abs.file_name()) {
+                (Some(Ok(dir)), Some(name)) => Ok(dir.join(name)),
+                _ => Ok(abs),
+            }
         }
         Err(e) => Err(e),
     }

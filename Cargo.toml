@@ -1,9 +1,14 @@
 [package]
 name = "kyte-editor"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 description = "Kyte: a terminal text editor"
 license = "MIT"
+repository = "https://github.com/zypher-systems/kyte"
+homepage = "https://github.com/zypher-systems/kyte"
+readme = "README.md"
+keywords = ["editor", "terminal", "text-editor", "latex", "tui"]
+categories = ["text-editors", "command-line-utilities"]
 publish = false
 
 [lib]
@@ -21,8 +26,10 @@ unicode-segmentation = "1"
 unicode-width = "0.2"
 crc32fast = "1"
 anyhow = "1"
-rustix = { version = "1", features = ["fs"] }
+rustix = { version = "1", features = ["fs", "process"] }
 signal-hook = "0.3"
+# Spell checking, on by default.
+spellbook = { version = "0.4", optional = true }
 # Syntax highlighting, on by default (`--no-default-features` leaves it out).
 tree-sitter = { version = "0.27", optional = true }
 tree-sitter-highlight = { version = "0.27", optional = true }
@@ -40,9 +47,28 @@ tree-sitter-css = { version = "0.25", optional = true }
 tree-sitter-toml-ng = { version = "0.7", optional = true }
 tree-sitter-yaml = { version = "0.7", optional = true }
 tree-sitter-md = { version = "0.5", optional = true }
+tree-sitter-sequel = { version = "0.3", optional = true }
+tree-sitter-java = { version = "0.23", optional = true }
+tree-sitter-c-sharp = { version = "0.23", optional = true }
+tree-sitter-php = { version = "0.25", optional = true }
+tree-sitter-ruby = { version = "0.23", optional = true }
+tree-sitter-lua = { version = "0.5", optional = true }
+tree-sitter-make = { version = "1.1", optional = true }
+tree-sitter-containerfile = { version = "0.9", optional = true }
+tree-sitter-xml = { version = "0.7", optional = true }
+tree-sitter-diff = { version = "0.1", optional = true }
+tree-sitter-ini = { version = "1.4", optional = true }
+tree-sitter-cmake = { version = "0.7", optional = true }
+tree-sitter-fish = { version = "3.6", optional = true }
+tree-sitter-nix = { version = "0.3", optional = true }
+tree-sitter-zig = { version = "1.1", optional = true }
+tree-sitter-swift = { version = "0.7", optional = true }
+tree-sitter-latex = { version = "0.1", optional = true }
+tree-sitter-language = { version = "0.1", optional = true }
 
 [features]
-default = ["highlight"]
+default = ["highlight", "spell"]
+spell = ["dep:spellbook"]
 highlight = [
     "dep:tree-sitter",
     "dep:tree-sitter-highlight",
@@ -60,13 +86,70 @@ highlight = [
     "dep:tree-sitter-toml-ng",
     "dep:tree-sitter-yaml",
     "dep:tree-sitter-md",
+    "dep:tree-sitter-sequel",
+    "dep:tree-sitter-java",
+    "dep:tree-sitter-c-sharp",
+    "dep:tree-sitter-php",
+    "dep:tree-sitter-ruby",
+    "dep:tree-sitter-lua",
+    "dep:tree-sitter-make",
+    "dep:tree-sitter-containerfile",
+    "dep:tree-sitter-xml",
+    "dep:tree-sitter-diff",
+    "dep:tree-sitter-ini",
+    "dep:tree-sitter-cmake",
+    "dep:tree-sitter-fish",
+    "dep:tree-sitter-nix",
+    "dep:tree-sitter-zig",
+    "dep:tree-sitter-swift",
+    "dep:tree-sitter-latex",
+    "dep:tree-sitter-language",
+    "dep:cc",
 ]
+
+[build-dependencies]
+cc = { version = "1", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
 proptest = "1"
 portable-pty = "0.9"
 vt100 = "0.18"
+
+# `cargo generate-rpm --target <triple> -o dist/` (the release workflow does
+# this, after packaging/dist.sh).
+[package.metadata.generate-rpm]
+name = "kyte"
+summary = "A terminal text editor that doesn't lose your work"
+license = "MIT"
+url = "https://github.com/zypher-systems/kyte"
+assets = [
+    { source = "target/release/kyte", dest = "/usr/bin/kyte", mode = "755" },
+    { source = "LICENSE", dest = "/usr/share/licenses/kyte/LICENSE", mode = "644", doc = true },
+    { source = "README.md", dest = "/usr/share/doc/kyte/README.md", mode = "644", doc = true },
+    # Written by packaging/dist.sh: run it first.
+    { source = "dist/third-party/*", dest = "/usr/share/doc/kyte/third-party/", mode = "644", doc = true },
+]
+
+# `cargo deb --no-build --no-strip --target <triple> -o dist/` (the release
+# workflow does this, after packaging/dist.sh): the same files as the RPM.
+[package.metadata.deb]
+name = "kyte"
+maintainer = "Zypher Systems <zypher@zyphersystems.com>"
+copyright = "2026, Zypher Systems"
+license-file = ["LICENSE", "0"]
+section = "editors"
+priority = "optional"
+depends = ""
+extended-description = """Kyte is a terminal text editor. It starts in insert mode, keeps every edit in a
+history you can browse, and recovers your work after a crash. It highlights 33
+languages, keeps several files open, checks spelling in writing, and can cite
+from a BibTeX file and build a LaTeX paper's PDF."""
+assets = [
+    ["target/release/kyte", "usr/bin/", "755"],
+    ["README.md", "usr/share/doc/kyte/", "644"],
+    ["dist/third-party/*", "usr/share/doc/kyte/third-party/", "644"],
+]
 
 [profile.release]
 debug = false

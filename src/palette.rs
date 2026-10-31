@@ -2,7 +2,9 @@
 
 use std::sync::Arc;
 
+use crate::build::Problem;
 use crate::command::{Command, REGISTRY};
+use crate::ui::theme::ThemeName;
 
 /// Rows of results the popup shows at once.
 pub const VISIBLE_ROWS: usize = 8;
@@ -57,6 +59,30 @@ pub enum Entry {
     Line(usize),
     /// `/text` in the universal palette.
     Find(String),
+    /// A row of the theme picker.
+    Theme(ThemeName),
+    /// A work to cite, shown as `line`.
+    Citation {
+        key: String,
+        line: String,
+    },
+    /// Something a build reported.
+    Problem(Problem),
+    /// A spelling to put in place of the characters at `range`.
+    Spelling {
+        with: String,
+        range: std::ops::Range<usize>,
+    },
+    /// Keep this word for good.
+    AddWord(String),
+    /// Leave this word alone until Kyte closes.
+    IgnoreWord(String),
+    /// A file open in this Kyte, by its place among the open files.
+    OpenFile {
+        at: usize,
+        name: String,
+        note: &'static str,
+    },
 }
 
 impl Entry {
@@ -66,6 +92,13 @@ impl Entry {
             Entry::File(p) => p.clone(),
             Entry::Line(n) => format!("Go to line {n}"),
             Entry::Find(q) => format!("Find {q}"),
+            Entry::Theme(t) => t.label().to_string(),
+            Entry::OpenFile { name, .. } => name.clone(),
+            Entry::Citation { line, .. } => line.clone(),
+            Entry::Problem(p) => p.label(),
+            Entry::Spelling { with, .. } => with.clone(),
+            Entry::AddWord(word) => format!("Add {word} to my words"),
+            Entry::IgnoreWord(word) => format!("Ignore {word} for now"),
         }
     }
 
@@ -73,7 +106,16 @@ impl Entry {
         match self {
             Entry::Command(c) => c.hint(),
             Entry::File(_) => "file",
-            Entry::Line(_) | Entry::Find(_) => "",
+            Entry::Line(_)
+            | Entry::Find(_)
+            | Entry::Citation { .. }
+            | Entry::Problem(_)
+            | Entry::Spelling { .. }
+            | Entry::AddWord(_)
+            | Entry::IgnoreWord(_) => "",
+            Entry::Theme(t) if t.is_light() => "light",
+            Entry::Theme(_) => "dark",
+            Entry::OpenFile { note, .. } => note,
         }
     }
 }
@@ -122,8 +164,33 @@ pub struct PaletteState {
     pub query: String,
     pub selected: usize,
     pub results: Vec<Entry>,
-    /// The universal palette's file list; `None` for the command palette.
-    files: Option<Arc<Vec<String>>>,
+    source: Source,
+}
+
+/// What the palette lists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Source {
+    Commands,
+    /// The universal palette, with its file list.
+    Universal(Arc<Vec<String>>),
+    /// The theme picker, with the theme to go back to on Esc.
+    Themes {
+        before: ThemeName,
+    },
+    /// The open files.
+    OpenFiles(Arc<Vec<Entry>>),
+    /// The works to cite.
+    Citations(Arc<Vec<Entry>>),
+    /// What a build reported.
+    Problems {
+        title: String,
+        rows: Arc<Vec<Entry>>,
+    },
+    /// What to do about a misspelled word.
+    Spelling {
+        word: String,
+        rows: Arc<Vec<Entry>>,
+    },
 }
 
 impl Default for PaletteState {
@@ -132,7 +199,7 @@ impl Default for PaletteState {
             query: String::new(),
             selected: 0,
             results: filter("").into_iter().map(Entry::Command).collect(),
-            files: None,
+            source: Source::Commands,
         }
     }
 }
@@ -141,24 +208,150 @@ impl PaletteState {
     /// The Ctrl-K palette over `files`.
     pub fn universal(files: Vec<String>) -> PaletteState {
         let mut state = PaletteState {
-            files: Some(Arc::new(files)),
+            source: Source::Universal(Arc::new(files)),
             ..PaletteState::default()
         };
         state.set_query(String::new());
         state
     }
 
+    /// The theme picker, starting on `current`.
+    pub fn themes(current: ThemeName) -> PaletteState {
+        let mut state = PaletteState {
+            source: Source::Themes { before: current },
+            ..PaletteState::default()
+        };
+        state.set_query(String::new());
+        state.selected = ThemeName::ALL
+            .iter()
+            .position(|t| *t == current)
+            .unwrap_or(0);
+        state
+    }
+
+    /// The open files, starting on the row at `current`.
+    pub fn open_files(files: Vec<Entry>, current: usize) -> PaletteState {
+        let mut state = PaletteState {
+            source: Source::OpenFiles(Arc::new(files)),
+            ..PaletteState::default()
+        };
+        state.set_query(String::new());
+        state.selected = current;
+        state
+    }
+
+    /// The works to cite.
+    pub fn citations(rows: Vec<Entry>) -> PaletteState {
+        let mut state = PaletteState {
+            source: Source::Citations(Arc::new(rows)),
+            ..PaletteState::default()
+        };
+        state.set_query(String::new());
+        state
+    }
+
+    pub fn is_citations(&self) -> bool {
+        matches!(self.source, Source::Citations(_))
+    }
+
+    /// What a build reported, under `title`.
+    pub fn problems(title: String, rows: Vec<Entry>) -> PaletteState {
+        let mut state = PaletteState {
+            source: Source::Problems {
+                title,
+                rows: Arc::new(rows),
+            },
+            ..PaletteState::default()
+        };
+        state.set_query(String::new());
+        state
+    }
+
+    /// This box's title, if it carries its own.
+    pub fn own_title(&self) -> Option<String> {
+        match &self.source {
+            Source::Spelling { word, .. } => Some(format!("Fix {word}")),
+            Source::Problems { title, .. } => Some(title.clone()),
+            _ => None,
+        }
+    }
+
+    /// Whether rows are sentences, which need room and keep their start.
+    pub fn is_wide(&self) -> bool {
+        matches!(self.source, Source::Citations(_) | Source::Problems { .. })
+    }
+
+    /// What to do about the misspelled `word`.
+    pub fn spelling(word: String, rows: Vec<Entry>) -> PaletteState {
+        let mut state = PaletteState {
+            source: Source::Spelling {
+                word,
+                rows: Arc::new(rows),
+            },
+            ..PaletteState::default()
+        };
+        state.set_query(String::new());
+        state
+    }
+
+    /// The word this box is fixing.
+    pub fn spelling_word(&self) -> Option<&str> {
+        match &self.source {
+            Source::Spelling { word, .. } => Some(word),
+            _ => None,
+        }
+    }
+
+    pub fn is_open_files(&self) -> bool {
+        matches!(self.source, Source::OpenFiles(_))
+    }
+
     pub fn is_universal(&self) -> bool {
-        self.files.is_some()
+        matches!(self.source, Source::Universal(_))
+    }
+
+    /// The theme the picker started from.
+    pub fn theme_before(&self) -> Option<ThemeName> {
+        match self.source {
+            Source::Themes { before } => Some(before),
+            _ => None,
+        }
+    }
+
+    /// The theme on the selected row, to show while choosing.
+    pub fn theme_shown(&self) -> Option<ThemeName> {
+        match self.selected_entry() {
+            Some(Entry::Theme(t)) => Some(*t),
+            _ => None,
+        }
     }
 
     pub fn set_query(&mut self, q: String) {
         self.query = q;
-        self.results = match &self.files {
-            Some(files) => universal_filter(&self.query, files),
-            None => filter(&self.query)
+        self.results = match &self.source {
+            Source::Universal(files) => universal_filter(&self.query, files),
+            Source::Commands => filter(&self.query)
                 .into_iter()
                 .map(Entry::Command)
+                .collect(),
+            Source::Themes { .. } => ThemeName::ALL
+                .into_iter()
+                .filter(|t| score(&self.query, t.label()).is_some())
+                .map(Entry::Theme)
+                .collect(),
+            Source::OpenFiles(files) | Source::Citations(files) => {
+                let mut scored: Vec<(i64, &Entry)> = files
+                    .iter()
+                    .filter_map(|f| file_score(&self.query, &f.label()).map(|s| (s, f)))
+                    .collect();
+                // A stable sort, so an empty query keeps the rows in order.
+                scored.sort_by_key(|(s, _)| std::cmp::Reverse(*s));
+                scored.into_iter().map(|(_, f)| f.clone()).collect()
+            }
+            Source::Spelling { rows, .. } | Source::Problems { rows, .. } => rows
+                .iter()
+                .filter(|r| score(&self.query, &r.label()).is_some())
+                .cloned()
                 .collect(),
         };
         self.selected = 0;
@@ -210,7 +403,55 @@ mod tests {
     #[test]
     fn empty_query_keeps_registry_order() {
         assert_eq!(filter(""), REGISTRY.to_vec());
-        assert_eq!(PaletteState::default().results.len(), 22);
+        assert_eq!(PaletteState::default().results.len(), 36);
+    }
+
+    #[test]
+    fn the_theme_picker_starts_on_the_current_theme_and_filters() {
+        let mut s = PaletteState::themes(ThemeName::Ember);
+        assert_eq!(s.results.len(), ThemeName::ALL.len());
+        assert_eq!(s.theme_shown(), Some(ThemeName::Ember));
+        assert_eq!(s.theme_before(), Some(ThemeName::Ember));
+        typed(&mut s, "mos");
+        assert_eq!(s.results, vec![Entry::Theme(ThemeName::Moss)]);
+        assert_eq!(s.theme_shown(), Some(ThemeName::Moss));
+        typed(&mut s, "zz");
+        assert_eq!(s.theme_shown(), None);
+        assert_eq!(s.theme_before(), Some(ThemeName::Ember));
+    }
+
+    #[test]
+    fn the_open_files_list_filters_and_keeps_each_files_place() {
+        let row = |at, name: &str| Entry::OpenFile {
+            at,
+            name: name.to_string(),
+            note: "",
+        };
+        let mut s = PaletteState::open_files(vec![row(0, "a.rs"), row(1, "src/b.rs")], 1);
+        assert_eq!(s.selected, 1);
+        assert!(s.is_open_files());
+        typed(&mut s, "b.rs");
+        assert_eq!(s.results, vec![row(1, "src/b.rs")]);
+    }
+
+    #[test]
+    fn the_open_files_list_puts_the_best_match_first() {
+        let row = |at, name: &str| Entry::OpenFile {
+            at,
+            name: name.to_string(),
+            note: "",
+        };
+        let files = vec![row(0, "/tmp/bx/a.txt"), row(1, "/tmp/bx/b.txt")];
+        let mut s = PaletteState::open_files(files, 0);
+        typed(&mut s, "b.txt");
+        assert_eq!(s.selected_entry(), Some(&row(1, "/tmp/bx/b.txt")));
+    }
+
+    #[test]
+    fn only_the_light_theme_says_so() {
+        let hint = |t| Entry::Theme(t).hint();
+        assert_eq!(hint(ThemeName::Daybreak), "light");
+        assert_eq!(hint(ThemeName::Signal), "dark");
     }
 
     fn universal(files: &[&str]) -> PaletteState {
@@ -330,13 +571,13 @@ mod tests {
         for _ in 0..40 {
             s.down();
         }
-        assert_eq!(s.selected, 21);
+        assert_eq!(s.selected, 35);
         assert_eq!(s.selected_command(), Some(Command::ShowKeyHelp));
-        assert_eq!(s.scroll_offset(), 14);
+        assert_eq!(s.scroll_offset(), 28);
         s.push('s');
         assert_eq!(s.selected, 0);
         assert_eq!(s.selected_command(), Some(Command::Save));
         s.pop();
-        assert_eq!(s.results.len(), 22);
+        assert_eq!(s.results.len(), 36);
     }
 }

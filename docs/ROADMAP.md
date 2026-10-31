@@ -58,6 +58,7 @@ Kyte's pitch is an editor you can't lose work in and don't have to learn.
 ## Released: 0.4.0, working with other tools
 
 - [x] Review changes made by other tools, built on file history
+- [x] CI
 
 ## Released: 0.5.0, a working everyday editor
 
@@ -67,19 +68,34 @@ Kyte's pitch is an editor you can't lose work in and don't have to learn.
 - [x] A settings file
 - [x] Soft wrap
 
+## Released: 0.6.0, a public editor for code and writing
+
+- [x] Signal theme, centred boxes, and a redrawn status bar and cursor line
+- [x] Six themes, a `theme` setting and a theme picker
+- [x] Several files open at once
+- [x] A file tree
+- [x] Highlighting for 33 languages, including Swift, LaTeX and BibTeX
+- [x] A Writing setup for Markdown, text and LaTeX: wrap, word count and spell check
+- [x] Citation keys from `.bib` files as you type `\cite{`
+- [x] Building a paper's PDF from inside Kyte
+- [x] Releases with an installer, `.deb`, `.rpm` and signed checksums
+- [x] Open source on GitHub
+
 ## Next
 
-- [ ] Re-record the demo, which still shows the footer legend (needs `agg`)
+- [ ] A Fedora COPR and an Arch AUR package, so package managers can update Kyte
+- [ ] Multiple cursors and mouse support
+- [ ] Code intelligence (LSP)
 
-Looks are still open too, with details to be decided. Keep using Kyte for real work along the way, on actual terminals with the kitty keyboard protocol, and over SSH and tmux.
+Keep using Kyte for real work along the way, on actual terminals with the kitty keyboard protocol, and over SSH and tmux.
 
 ## Later
 
-- Light and high-contrast themes
-- File tree
-- Multiple buffers and splits
+- More spell check languages
+- A high-contrast theme
+- Splits
 - Incremental parsing, and languages embedded in others
-- Packaging, and use as `$EDITOR`
+- Use as `$EDITOR`
 
 ## What 1.0 means
 
@@ -98,3 +114,4 @@ Proposed, not yet confirmed.
 
 ## Repository
 
+Kyte is open source at [github.com/zypher-systems/kyte](https://github.com/zypher-systems/kyte). `main` holds releases, and `dev` collects finished work.

@@ -5,7 +5,8 @@ use ratatui::layout::Rect;
 
 use super::theme::Theme;
 use ratatui::layout::Rect as R;
-use ratatui::widgets::{Block, Borders, Clear, Widget};
+use ratatui::text::Line;
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Widget};
 
 use crate::app::{After, App, Mode, Prompt, SaveRisk};
 use crate::buffer::Indent;
@@ -24,63 +25,119 @@ pub fn status_bar(app: &App, area: Rect, cells: &mut Cells, theme: &Theme) {
     let w = area.width as usize;
     cells.set_stringn(area.x, area.y, &mode, w, mode_style);
     let name = app
+        .doc
         .buffer
         .path()
         .and_then(|p| p.file_name())
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "Untitled".to_string());
-    let dirty = if app.buffer.is_dirty() { " [+]" } else { "" };
-    let (l, c) = app.view_buffer().line_col();
-    let eol = if app.buffer.eol() == "\r\n" {
-        " │ CRLF"
+    let dirty = if app.doc.buffer.is_dirty() {
+        " [+]"
     } else {
         ""
     };
-    let sel = app
-        .buffer
-        .selection()
-        .map(|r| format!(" │ {} selected", r.len()))
-        .unwrap_or_default();
-    let indent = match app.buffer.indent() {
-        Indent::Tabs => String::new(),
-        Indent::Spaces(n) => format!(" │ Spaces {n}"),
-    };
-    let rest = match &app.mode {
-        Mode::History { timeline, at } => format!(
-            "│ {name} │ {} of {} │ {} │ {}",
-            at + 1,
-            timeline.len(),
-            history::ago_from_now(timeline.version(*at).time_ms),
-            timeline.describe(*at),
+    let (l, c) = app.view_buffer().line_col();
+    let place = format!("Ln {l}, Col {c}");
+    // In order of importance, because a narrow bar cuts from the end.
+    let mut facts = vec![place.clone()];
+    match (app.doc.buffer.selection(), app.selected_words()) {
+        (Some(_), Some(n)) => facts.push(format!("{} selected", plural(n, "word"))),
+        (Some(r), None) => facts.push(format!("{} selected", r.len())),
+        (None, _) => facts.extend(app.word_count().map(|n| plural(n, "word"))),
+    }
+    if let Indent::Spaces(n) = app.doc.buffer.indent() {
+        facts.push(format!("Spaces {n}"));
+    }
+    if app.doc.buffer.eol() == "\r\n" {
+        facts.push("CRLF".to_string());
+    }
+    let (rest, facts) = match &app.mode {
+        Mode::History { timeline, at } => (
+            format!(
+                " {name} │ {} of {} │ {} │ {}",
+                at + 1,
+                timeline.len(),
+                history::ago_from_now(timeline.version(*at).time_ms),
+                timeline.describe(*at),
+            ),
+            String::new(),
         ),
         Mode::Review(run) => {
             let (at, all) = run.position();
-            format!("│ {name}{dirty} │ change {at} of {all}")
+            (format!(" {name}{dirty} │ change {at} of {all}"), place)
         }
         Mode::Reader => {
             let crumbs = app.reader.as_ref().map_or("", |r| r.crumbs.as_str());
-            let place = if crumbs.is_empty() {
+            let crumbs = if crumbs.is_empty() {
                 String::new()
             } else {
                 format!(" │ {crumbs}")
             };
-            format!("│ {name}{dirty}{place} │ Ln {l}, Col {c}")
+            (format!(" {name}{dirty}{crumbs}"), place)
         }
-        _ => format!("│ {name}{dirty} │ Ln {l}, Col {c}{sel}{indent}{eol}"),
+        _ => {
+            let files = app
+                .files_summary()
+                .map_or(String::new(), |s| format!(" │ {s}"));
+            let building = if app.building() {
+                " │ building PDF"
+            } else {
+                ""
+            };
+            (
+                format!(" {name}{dirty}{files}{building}"),
+                facts.join(" │ "),
+            )
+        }
+    };
+    let unprotected = app.unprotected_others();
+    let other_note = format!(
+        " │ no crash recovery for {}",
+        plural(unprotected, "other file")
+    );
+    let note = if app.recovery_off() {
+        " │ no crash recovery"
+    } else if unprotected > 0 {
+        other_note.as_str()
+    } else if app.history_lost() {
+        " │ no history"
+    } else if app.has_outside_change() {
+        " │ changed on disk, Esc c reviews"
+    } else {
+        ""
     };
     let x = mode.chars().count();
     if x < w {
-        let (end, _) = cells.set_stringn(area.x + x as u16, area.y, rest, w - x, theme.status);
-        let left = (area.x + area.width).saturating_sub(end) as usize;
-        if app.recovery_off() {
-            cells.set_stringn(end, area.y, " │ no crash recovery", left, theme.error);
-        } else if app.history_lost() {
-            cells.set_stringn(end, area.y, " │ no history", left, theme.error);
-        } else if app.has_outside_change() {
-            let note = " │ changed on disk, Esc c reviews";
-            cells.set_stringn(end, area.y, note, left, theme.error);
-        }
+        // Facts hold the right edge. When it's tight, only the first stays.
+        let len = |s: &str| s.chars().count();
+        let used = x + len(&rest) + len(note);
+        let facts = if used + len(&facts) + 2 > w {
+            facts.split(" │ ").next().unwrap_or_default()
+        } else {
+            facts.as_str()
+        };
+        let start = area.x + x as u16;
+        let right = area.x + area.width;
+        let at = right.saturating_sub(len(facts) as u16 + 1).max(start);
+        let room = (at - start) as usize;
+        let (end, _) = cells.set_stringn(start, area.y, rest, room, theme.status);
+        let room = (at - end).saturating_sub(1) as usize;
+        cells.set_stringn(end, area.y, note, room, theme.error);
+        cells.set_stringn(at, area.y, facts, (right - at) as usize, theme.status);
     }
+}
+
+/// `1,234 things`, or `1 thing`.
+fn plural(n: usize, what: &str) -> String {
+    let digits = n.to_string();
+    let mut number = String::new();
+    for (i, d) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            number.push(',');
+        }
+        number.push(d);
+    }
+    format!("{number} {what}{}", if n == 1 { "" } else { "s" })
 }
 
 /// Message line. Returns the cursor position when a prompt owns the cursor.
@@ -147,33 +204,33 @@ fn input_prompt(
 struct Menu {
     title: String,
     rows: Vec<(&'static str, &'static str)>,
-    /// Keep clear of the cursor, because what's under it matters. Otherwise
-    /// the menu is a question and takes the middle of the screen.
-    beside_text: bool,
+    /// Keep the cursor's line showing, because the menu is about that line.
+    /// Every menu takes the middle of the screen; this one moves off it.
+    about_cursor: bool,
 }
 
 /// The menu the current mode wants, if any.
 fn menu_for(app: &App) -> Option<Menu> {
-    let question = |title: &str, rows| Menu {
+    let middle = |title: &str, rows| Menu {
         title: title.to_string(),
         rows,
-        beside_text: false,
+        about_cursor: false,
     };
-    let beside = |title: &str, rows| Menu {
+    let about_cursor = |title: &str, rows| Menu {
         title: title.to_string(),
         rows,
-        beside_text: true,
+        about_cursor: true,
     };
     Some(match &app.mode {
         Mode::Overlay { .. } => {
-            let title = if app.buffer.selection().is_some() {
+            let title = if app.doc.buffer.selection().is_some() {
                 "Selection"
             } else {
                 "Esc"
             };
-            beside(title, app.layer_rows())
+            middle(title, app.layer_rows())
         }
-        Mode::Prompt(Prompt::ReplaceConfirm(_)) => beside(
+        Mode::Prompt(Prompt::ReplaceConfirm(_)) => about_cursor(
             "Replace this one?",
             vec![
                 ("y", "Replace"),
@@ -182,7 +239,7 @@ fn menu_for(app: &App) -> Option<Menu> {
                 ("Esc", "Stop"),
             ],
         ),
-        Mode::Reader if app.reader.as_ref().is_some_and(|r| r.show_keys) => beside(
+        Mode::Reader if app.reader.as_ref().is_some_and(|r| r.show_keys) => middle(
             "Reader",
             vec![
                 ("Up Down", "read on"),
@@ -192,7 +249,7 @@ fn menu_for(app: &App) -> Option<Menu> {
                 ("Esc", "back to editing"),
             ],
         ),
-        Mode::History { .. } => beside(
+        Mode::History { .. } => about_cursor(
             "History",
             vec![
                 ("Left Right", "one edit"),
@@ -203,19 +260,23 @@ fn menu_for(app: &App) -> Option<Menu> {
                 ("Esc", "close"),
             ],
         ),
-        Mode::Prompt(Prompt::ConfirmLeave { then: After::Quit }) => question(
-            "Unsaved changes",
+        Mode::Prompt(Prompt::ConfirmLeave { then }) => {
+            let title = app.unsaved_title();
+            let rows = match (then, app.open_count() > 1) {
+                (After::Close, _) => [("y", "Save and close"), ("n", "Discard them and close")],
+                (_, false) => [("y", "Save and quit"), ("n", "Discard them and quit")],
+                (_, true) => [("y", "Save this file"), ("n", "Discard them")],
+            };
+            middle(&title, [&rows[..], &[("Esc", "Keep editing")]].concat())
+        }
+        Mode::Prompt(Prompt::ConfirmDiscardOthers { count }) => middle(
+            &format!(
+                "Discard unsaved changes in {}?",
+                plural(*count, "other file")
+            ),
             vec![
-                ("y", "Save and quit"),
-                ("n", "Discard them and quit"),
-                ("Esc", "Keep editing"),
-            ],
-        ),
-        Mode::Prompt(Prompt::ConfirmLeave { .. }) => question(
-            "Unsaved changes",
-            vec![
-                ("y", "Save, then open the file"),
-                ("n", "Discard them and open it"),
+                ("y", "Discard them and quit"),
+                ("n", "Keep editing"),
                 ("Esc", "Keep editing"),
             ],
         ),
@@ -226,7 +287,7 @@ fn menu_for(app: &App) -> Option<Menu> {
             } else {
                 format!("Change {at} of {all}")
             };
-            beside(
+            about_cursor(
                 &title,
                 vec![
                     ("y", "Take this change"),
@@ -242,9 +303,9 @@ fn menu_for(app: &App) -> Option<Menu> {
             if *risk == SaveRisk::ChangedOnDisk {
                 rows.insert(0, ("r", "Review the changes"));
             }
-            question(title, rows)
+            middle(title, rows)
         }
-        Mode::Prompt(Prompt::ConfirmDeleteHistory) => question(
+        Mode::Prompt(Prompt::ConfirmDeleteHistory) => middle(
             "Delete all history for this file?",
             vec![("y", "Delete it"), ("n", "Keep it"), ("Esc", "Keep it")],
         ),
@@ -252,59 +313,66 @@ fn menu_for(app: &App) -> Option<Menu> {
     })
 }
 
-/// Bottom right of `area`, moved out of the way if `cursor` is there.
-fn clear_of_cursor(area: Rect, w: u16, h: u16, cursor: Option<(u16, u16)>) -> Rect {
-    let (w, h) = (w.min(area.width), h.min(area.height));
-    let right = area.x + area.width - w;
-    let bottom = area.y + area.height - h;
-    let hits =
-        |r: Rect| cursor.is_some_and(|(x, y)| x >= r.x && x < r.x + w && y >= r.y && y < r.y + h);
-    [
-        R::new(right, bottom, w, h),
-        R::new(right, area.y, w, h),
-        R::new(area.x, bottom, w, h),
-        R::new(area.x, area.y, w, h),
-    ]
-    .into_iter()
-    .find(|r| !hits(*r))
-    .unwrap_or(R::new(right, bottom, w, h))
+/// The middle of `area`, moved up or down as little as it takes to leave the
+/// cursor's row showing. If it fits on neither side it stays in the middle.
+pub fn centered_off_row(area: Rect, w: u16, h: u16, cursor: Option<(u16, u16)>) -> Rect {
+    let mid = centered(area, w, h);
+    let Some((_, row)) = cursor else {
+        return mid;
+    };
+    if row < mid.y || row >= mid.y + mid.height {
+        return mid;
+    }
+    let above = (row >= area.y + mid.height).then(|| row - mid.height);
+    let below = (row + 1 + mid.height <= area.y + area.height).then_some(row + 1);
+    let y = match (above, below) {
+        (Some(a), Some(b)) if mid.y - a <= b - mid.y => a,
+        (Some(a), None) => a,
+        (_, Some(b)) => b,
+        (None, None) => mid.y,
+    };
+    R::new(mid.x, y, mid.width, mid.height)
 }
 
-/// Draws the current mode's menu. Rows that don't fit the height flow into
-/// more columns, so every key stays visible on a short terminal.
+/// Rows a menu can hold before it splits into two columns.
+const TALL_MENU: usize = 10;
+
+/// Draws the current mode's menu and returns its box. Rows that don't fit the
+/// height flow into more columns, so every key stays visible on a short
+/// terminal.
 pub fn menu(
     app: &App,
     text_area: Rect,
     cursor: Option<(u16, u16)>,
     cells: &mut Cells,
     theme: &Theme,
-) {
-    let Some(menu) = menu_for(app) else {
-        return;
-    };
+) -> Option<Rect> {
+    let menu = menu_for(app)?;
     let key_w = menu.rows.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
     let label_w = menu.rows.iter().map(|(_, l)| l.len()).max().unwrap_or(0);
     let cell_w = key_w + 1 + label_w + 2;
     let room = (text_area.height as usize).saturating_sub(2).max(1);
-    let per_col = menu.rows.len().min(room);
+    // A long menu reads better as two columns, and hides less of the text.
+    let tallest = if menu.rows.len() > TALL_MENU {
+        menu.rows.len().div_ceil(2)
+    } else {
+        menu.rows.len()
+    };
+    let per_col = tallest.min(room);
     let cols = menu.rows.len().div_ceil(per_col);
-    let w = (cell_w * cols + 3).max(menu.title.len() + 6) as u16;
-    let h = per_col as u16 + 2;
-    let area = if menu.beside_text {
-        clear_of_cursor(text_area, w, h, cursor)
+    let w = (cell_w * cols + 4).max(menu.title.len() + 6) as u16;
+    // A blank row above and below, when the terminal has them to spare.
+    let pad = (per_col + 4 <= text_area.height as usize) as u16;
+    let h = per_col as u16 + 2 + pad * 2;
+    let area = if menu.about_cursor {
+        centered_off_row(text_area, w, h, cursor)
     } else {
         centered(text_area, w, h)
     };
-    let inner = modal_box(
-        area,
-        cells,
-        &menu.title,
-        theme.palette,
-        theme.palette_border,
-    );
+    let inner = modal_box(area, text_area, cells, &menu.title, theme);
     for (i, (key, label)) in menu.rows.iter().enumerate() {
-        let x = inner.x + 1 + (i / per_col * cell_w) as u16;
-        let y = inner.y + (i % per_col) as u16;
+        let x = inner.x + 2 + (i / per_col * cell_w) as u16;
+        let y = inner.y + pad + (i % per_col) as u16;
         if x >= inner.x + inner.width || y >= inner.y + inner.height {
             continue;
         }
@@ -314,9 +382,10 @@ pub fn menu(
         let room = (inner.x + inner.width).saturating_sub(next + 1) as usize;
         cells.set_stringn(next + 1, y, label, room, theme.palette);
     }
+    Some(area)
 }
 
-/// Names Tab found in a file prompt, floating above the message line.
+/// Names Tab found in a file prompt, floating in the middle of the screen.
 pub fn completions(app: &App, text_area: Rect, cells: &mut Cells, theme: &Theme) {
     const MAX_ROWS: usize = 10;
     if app.completions.is_empty() {
@@ -330,9 +399,8 @@ pub fn completions(app: &App, text_area: Rect, cells: &mut Cells, theme: &Theme)
     let widest = rows.iter().map(|r| r.chars().count()).max().unwrap_or(0) as u16;
     let w = (widest + 4).max(16).min(text_area.width);
     let h = (rows.len() as u16 + 2).min(text_area.height);
-    let bottom = text_area.y + text_area.height - h;
-    let area = R::new(text_area.x, bottom, w, h);
-    let inner = modal_box(area, cells, "Matches", theme.palette, theme.palette_border);
+    let area = centered(text_area, w, h);
+    let inner = modal_box(area, text_area, cells, "Matches", theme);
     for (i, row) in rows.iter().enumerate() {
         let y = inner.y + i as u16;
         if y < inner.y + inner.height {
@@ -354,21 +422,28 @@ pub fn centered(area: Rect, w: u16, h: u16) -> Rect {
     )
 }
 
-/// Draws a bordered, titled box and returns its inner area.
+/// Draws a rounded, titled box with a shadow on `text_area`, and returns its
+/// inner area. The shadow is two cells wide to one tall, because a terminal
+/// cell is about twice as tall as it's wide.
 pub fn modal_box(
     area: Rect,
+    text_area: Rect,
     cells: &mut Cells,
     title: &str,
-    style: ratatui::style::Style,
-    border: ratatui::style::Style,
+    theme: &Theme,
 ) -> Rect {
+    let side = R::new(area.right(), area.y + 1, 2, area.height);
+    let below = R::new(area.x + 2, area.bottom(), area.width, 1);
+    cells.set_style(side.intersection(text_area), theme.shadow);
+    cells.set_style(below.intersection(text_area), theme.shadow);
     Clear.render(area, cells);
-    cells.set_style(area, style);
+    cells.set_style(area, theme.palette);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(border)
-        .style(style)
-        .title(format!(" {title} "));
+        .border_type(BorderType::Rounded)
+        .border_style(theme.palette_border)
+        .style(theme.palette)
+        .title(Line::styled(format!(" {title} "), theme.popup_title).centered());
     let inner = block.inner(area);
     block.render(area, cells);
     inner
@@ -380,20 +455,36 @@ pub fn palette(app: &App, text_area: Rect, cells: &mut Cells, theme: &Theme) -> 
         return None;
     };
     let rows = state.results.len().clamp(1, VISIBLE_ROWS) as u16;
-    let w = 54.min(text_area.width.saturating_sub(2)).max(10);
-    let area = centered(text_area, w, rows + 3);
+    let wide = if state.is_wide() { 76 } else { 54 };
+    let w = wide.min(text_area.width.saturating_sub(2)).max(10);
+    let rule = (text_area.height >= rows + 4) as u16;
+    let area = centered(text_area, w, rows + 3 + rule);
     let title = if state.is_universal() {
         "Commands, files, :line, /text"
+    } else if state.theme_before().is_some() {
+        "Choose theme"
+    } else if state.is_open_files() {
+        "Open files"
+    } else if state.is_citations() {
+        "Cite"
     } else {
         "Command palette"
     };
-    let inner = modal_box(area, cells, title, theme.palette, theme.palette_border);
+    let own = state.own_title();
+    let title = own.as_deref().unwrap_or(title);
+    let inner = modal_box(area, text_area, cells, title, theme);
     let input = format!("> {}", state.query);
     let iw = inner.width as usize;
     cells.set_stringn(inner.x, inner.y, &input, iw, theme.palette);
+    if rule == 1 {
+        let rule = format!("├{}┤", "─".repeat(iw));
+        let width = area.width as usize;
+        cells.set_stringn(area.x, inner.y + 1, rule, width, theme.palette_border);
+    }
+    let top = inner.y + 1 + rule;
     if state.results.is_empty() {
-        if inner.height > 1 {
-            cells.set_stringn(inner.x, inner.y + 1, "  No match", iw, theme.palette);
+        if top < inner.y + inner.height {
+            cells.set_stringn(inner.x, top, "  No match", iw, theme.popup_hint);
         }
     } else {
         let off = state.scroll_offset();
@@ -404,7 +495,7 @@ pub fn palette(app: &App, text_area: Rect, cells: &mut Cells, theme: &Theme) -> 
             .skip(off)
             .take(VISIBLE_ROWS)
         {
-            let y = inner.y + 1 + (i - off) as u16;
+            let y = top + (i - off) as u16;
             if y >= inner.y + inner.height {
                 break;
             }
@@ -412,12 +503,21 @@ pub fn palette(app: &App, text_area: Rect, cells: &mut Cells, theme: &Theme) -> 
             let style = if sel { theme.selected } else { theme.palette };
             let marker = if sel { "▸ " } else { "  " };
             let hint = entry.hint();
-            let label = fit_label(&entry.label(), iw.saturating_sub(hint.len() + 4));
+            let room = iw.saturating_sub(hint.len() + 4);
+            let label = if state.is_wide() {
+                entry.label().chars().take(room).collect()
+            } else {
+                fit_label(&entry.label(), room)
+            };
             let label = format!("{marker}{label}");
             let pad = iw.saturating_sub(label.chars().count() + hint.len() + 1);
             let line = format!("{label}{}{hint} ", " ".repeat(pad));
             cells.set_style(Rect::new(inner.x, y, inner.width, 1), style);
             cells.set_stringn(inner.x, y, line, iw, style);
+            if !sel && !hint.is_empty() {
+                let at = (inner.x + inner.width).saturating_sub(hint.len() as u16 + 1);
+                cells.set_stringn(at.max(inner.x), y, hint, iw, theme.popup_hint);
+            }
         }
     }
     let cx = inner.x + (input.chars().count() as u16).min(inner.width.saturating_sub(1));
@@ -435,10 +535,10 @@ fn fit_label(text: &str, width: usize) -> String {
     format!("…{tail}")
 }
 
-/// The "Show key help" modal.
-pub fn help(app: &App, text_area: Rect, cells: &mut Cells, theme: &Theme) {
+/// The "Show key help" modal. Returns its box.
+pub fn help(app: &App, text_area: Rect, cells: &mut Cells, theme: &Theme) -> Option<Rect> {
     let Mode::Help { top } = app.mode else {
-        return;
+        return None;
     };
     let w = 64.min(text_area.width.saturating_sub(2)).max(10);
     let h = (KEY_HELP.len() as u16 + 4).min(text_area.height);
@@ -449,7 +549,7 @@ pub fn help(app: &App, text_area: Rect, cells: &mut Cells, theme: &Theme) {
     } else {
         "Kyte keys (Esc closes)"
     };
-    let inner = modal_box(area, cells, title, theme.modal, theme.palette_border);
+    let inner = modal_box(area, text_area, cells, title, theme);
     for (i, (k, v)) in KEY_HELP.iter().skip(top.min(max_top)).enumerate() {
         let y = inner.y + 1 + i as u16;
         if y >= inner.y + inner.height {
@@ -457,7 +557,69 @@ pub fn help(app: &App, text_area: Rect, cells: &mut Cells, theme: &Theme) {
         }
         let line = format!(" {k:<26}{v}");
         cells.set_stringn(inner.x, y, line, inner.width as usize, theme.modal);
+        let keys = 1.min(inner.width) as usize + k.trim_end().chars().count();
+        cells.set_style(R::new(inner.x, y, keys as u16, 1), theme.menu_key);
     }
+    Some(area)
+}
+
+/// The file tree's box, in the middle of the screen like every other list.
+pub fn file_tree(app: &App, text_area: Rect, cells: &mut Cells, theme: &Theme) -> Option<Rect> {
+    let Mode::Tree(tree) = &app.mode else {
+        return None;
+    };
+    let w = 64.min(text_area.width.saturating_sub(2)).max(10);
+    let most = text_area.height.saturating_sub(6).clamp(1, 18) as usize;
+    let rows = tree.rows.len().clamp(1, most);
+    let hint = (text_area.height as usize >= rows + 4) as u16;
+    let h = (rows as u16 + 2 + hint).min(text_area.height);
+    let area = centered(text_area, w, h);
+    let folder = tree.root.file_name().unwrap_or_default().to_string_lossy();
+    let title = if tree.show_hidden {
+        format!("{folder}, hidden files shown")
+    } else {
+        folder.into_owned()
+    };
+    let inner = modal_box(area, text_area, cells, &title, theme);
+    let iw = inner.width as usize;
+    if tree.rows.is_empty() {
+        cells.set_stringn(inner.x, inner.y, "  Nothing here", iw, theme.popup_hint);
+    }
+    let off = tree.scroll_offset(rows);
+    for (i, row) in tree.rows.iter().enumerate().skip(off).take(rows) {
+        let y = inner.y + (i - off) as u16;
+        if y >= inner.y + inner.height {
+            break;
+        }
+        let sel = i == tree.selected;
+        let style = if sel { theme.selected } else { theme.palette };
+        let marker = if sel { "▸ " } else { "  " };
+        let fold = match (row.is_dir, row.open) {
+            (true, true) => "▾ ",
+            (true, false) => "▹ ",
+            _ => "  ",
+        };
+        let slash = if row.is_dir { "/" } else { "" };
+        let indent = "  ".repeat(row.depth);
+        let note = app.open_note(&row.path);
+        let left = 2 + indent.len() + 2 + note.len() + 1;
+        let name = fit_label(&format!("{}{slash}", row.name), iw.saturating_sub(left));
+        let label = format!("{marker}{indent}{fold}{name}");
+        let pad = iw.saturating_sub(label.chars().count() + note.len() + 1);
+        let line = format!("{label}{}{note} ", " ".repeat(pad));
+        cells.set_style(Rect::new(inner.x, y, inner.width, 1), style);
+        cells.set_stringn(inner.x, y, line, iw, style);
+        if !sel && !note.is_empty() {
+            let at = (inner.x + inner.width).saturating_sub(note.len() as u16 + 1);
+            cells.set_stringn(at.max(inner.x), y, note, iw, theme.popup_hint);
+        }
+    }
+    if hint == 1 {
+        let text = "  Enter open  Left Right fold  . hidden  Esc close";
+        let y = inner.y + inner.height - 1;
+        cells.set_stringn(inner.x, y, text, iw, theme.popup_hint);
+    }
+    Some(area)
 }
 
 /// The Recover (or Stale) modal shown at startup.
@@ -470,6 +632,12 @@ pub fn recover(app: &App, text_area: Rect, cells: &mut Cells, theme: &Theme) {
     } else {
         info.target.display().to_string()
     };
+    let leave = if app.open_count() > 1 {
+        "q  Close this file without changing anything (also Esc)"
+    } else {
+        "q  Quit without changing anything (also Esc)"
+    }
+    .to_string();
     let lines: Vec<String> = if info.recovered.is_some() {
         let mut l = vec![
             "Kyte found unsaved changes for:".to_string(),
@@ -483,7 +651,7 @@ pub fn recover(app: &App, text_area: Rect, cells: &mut Cells, theme: &Theme) {
             String::new(),
             "r  Recover the unsaved changes".to_string(),
             "d  Discard them and open the file as it is on disk".to_string(),
-            "q  Quit without changing anything (also Esc)".to_string(),
+            leave.clone(),
         ]);
         l
     } else {
@@ -494,7 +662,7 @@ pub fn recover(app: &App, text_area: Rect, cells: &mut Cells, theme: &Theme) {
             format!("Swap file written {}", info.modified),
             String::new(),
             "d  Discard the stale swap and open the file".to_string(),
-            "q  Quit without changing anything (also Esc)".to_string(),
+            leave,
         ]
     };
     let title = if info.recovered.is_some() {
@@ -506,7 +674,7 @@ pub fn recover(app: &App, text_area: Rect, cells: &mut Cells, theme: &Theme) {
     let w = (longest + 4).max(40).min(text_area.width);
     let h = (lines.len() as u16 + 2).min(text_area.height);
     let area = centered(text_area, w, h);
-    let inner = modal_box(area, cells, title, theme.modal, theme.palette_border);
+    let inner = modal_box(area, text_area, cells, title, theme);
     for (i, l) in lines.iter().enumerate() {
         let y = inner.y + i as u16;
         if y >= inner.y + inner.height {

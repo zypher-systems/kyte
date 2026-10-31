@@ -109,7 +109,10 @@ impl Spawn {
             program: program.into(),
             args: Vec::new(),
             // Tests must never read the settings of whoever runs them.
-            env: vec![("KYTE_CONFIG".to_string(), "/dev/null".to_string())],
+            env: vec![(
+                "KYTE_CONFIG".to_string(),
+                concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/settings.toml").to_string(),
+            )],
             cwd: None,
             rows: ROWS,
             cols: COLS,
@@ -331,6 +334,16 @@ impl Pty {
             .screen()
             .cell(row, col)
             .map(|c| c.bgcolor())
+    }
+
+    /// Whether the cell at (row, col) is underlined.
+    pub fn underlined(&self, row: u16, col: u16) -> bool {
+        self.parser
+            .lock()
+            .unwrap()
+            .screen()
+            .cell(row, col)
+            .is_some_and(|c| c.underline())
     }
 
     /// Foreground color of the cell at (row, col).

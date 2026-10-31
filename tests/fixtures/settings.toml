@@ -1,0 +1,2 @@
+# What the tests run with, so they don't read the settings of whoever runs them.
+writing = false

@@ -4,6 +4,7 @@
 
 use ratatui::buffer::Buffer as Cells;
 use ratatui::layout::Rect;
+use ratatui::style::Style;
 
 use super::theme::Theme;
 use crate::app::App;
@@ -80,7 +81,7 @@ fn screen_rows(app: &App, height: usize, width: usize) -> Vec<ScreenRow> {
     let buf = app.view_buffer();
     let (top, _) = app.scroll();
     let count = buf.line_count();
-    if !app.soft_wrap {
+    if !app.doc.soft_wrap {
         let rows = top..(top + height).min(count);
         return rows
             .map(|line| ScreenRow {
@@ -118,19 +119,23 @@ fn screen_rows(app: &App, height: usize, width: usize) -> Vec<ScreenRow> {
 pub fn render(app: &App, area: Rect, cells: &mut Cells, theme: &Theme) -> Option<(u16, u16)> {
     let buf = app.view_buffer();
     let (_, left) = app.scroll();
-    let gw = gutter_width(buf.line_count(), app.show_line_numbers);
+    let gw = gutter_width(buf.line_count(), app.doc.line_numbers);
     let text_w = (area.width as usize).saturating_sub(gw);
     cells.set_style(area, theme.text);
     let rows = screen_rows(app, area.height as usize, text_w);
     #[cfg(feature = "highlight")]
     let first_line = rows.first().map_or(0, |r| r.line);
     #[cfg(feature = "highlight")]
-    let spans = line_spans(
+    let (spans, not_prose) = line_spans(
         app,
         first_line,
         rows.last().map_or(0, |r| r.line + 1 - first_line),
         theme,
     );
+    #[cfg(not(feature = "highlight"))]
+    let not_prose: Vec<Vec<std::ops::Range<usize>>> = Vec::new();
+    #[cfg(not(feature = "highlight"))]
+    let first_line = rows.first().map_or(0, |r| r.line);
     let mut cursor = None;
     let mut full = (usize::MAX, String::new());
     for (i, row) in rows.iter().enumerate() {
@@ -142,6 +147,7 @@ pub fn render(app: &App, area: Rect, cells: &mut Cells, theme: &Theme) -> Option
         let text = &full.1;
         let bytes = row.segment.bytes.start.min(text.len())..row.segment.bytes.end.min(text.len());
         let piece = &text[bytes.clone()];
+        let on_cursor_line = line == buf.cursor_line() && app.reader.is_none();
         if gw > 0 {
             let first = row.segment.chars.start == 0;
             let label = if first {
@@ -150,7 +156,15 @@ pub fn render(app: &App, area: Rect, cells: &mut Cells, theme: &Theme) -> Option
                 String::new()
             };
             let num = format!("{label:>w$} │ ", w = gw - 3);
-            cells.set_stringn(area.x, y, num, gw, theme.gutter);
+            let style = if on_cursor_line {
+                theme.gutter_current
+            } else {
+                theme.gutter
+            };
+            cells.set_stringn(area.x, y, num, gw, style);
+            // Only the number lights up on the cursor's line.
+            let bar = Rect::new(area.x + gw as u16 - 2, y, 1, 1);
+            cells.set_style(bar, Style::new().fg(theme.gutter.fg.unwrap_or_default()));
         }
         let x = area.x + gw as u16;
         #[cfg(feature = "highlight")]
@@ -164,6 +178,16 @@ pub fn render(app: &App, area: Rect, cells: &mut Cells, theme: &Theme) -> Option
             render_line(cells, x, y, piece, left, text_w, theme);
         }
         let area_row = Rect::new(x, y, text_w as u16, 1);
+        if on_cursor_line {
+            cells.set_style(area_row, theme.current_line);
+        }
+        if app.checks_spelling() {
+            let skip = not_prose.get(line - first_line).map_or(&[][..], |s| &s[..]);
+            let wrong = app.misspelled(text, skip);
+            paint_ranges(&wrong, row, piece, area_row, app, cells, |_| {
+                theme.misspelled
+            });
+        }
         paint_matches(app, text, row, piece, area_row, cells, theme);
         paint_selection(app, row, piece, area_row, cells, theme);
         if let Some((ours, theirs)) = &app.review_marks {
@@ -182,7 +206,7 @@ pub fn render(app: &App, area: Rect, cells: &mut Cells, theme: &Theme) -> Option
         }
         if line == buf.cursor_line() {
             let off = buf.cursor() - buf.line_start(line);
-            let here = if app.soft_wrap {
+            let here = if app.doc.soft_wrap {
                 off >= row.segment.chars.start && (off < row.segment.chars.end || row.last)
             } else {
                 true
@@ -217,12 +241,31 @@ fn paint_matches(
     };
     let buf = app.view_buffer();
     let matches = crate::search::line_matches(line, query);
-    if matches.is_empty() {
+    let cursor = buf.cursor().wrapping_sub(buf.line_start(row.line));
+    paint_ranges(&matches, row, piece, area, app, cells, |m| {
+        if m.start == cursor {
+            theme.search_current
+        } else {
+            theme.search_match
+        }
+    });
+}
+
+/// Styles `ranges` of a line, in characters, sorted and not overlapping.
+fn paint_ranges(
+    ranges: &[std::ops::Range<usize>],
+    row: &ScreenRow,
+    piece: &str,
+    area: Rect,
+    app: &App,
+    cells: &mut Cells,
+    style_of: impl Fn(&std::ops::Range<usize>) -> Style,
+) {
+    if ranges.is_empty() {
         return;
     }
     let (_, left) = app.scroll();
     let right = left + area.width as usize;
-    let cursor = buf.cursor().wrapping_sub(buf.line_start(row.line));
     let start = row.segment.chars.start;
     let mut walk = graphemes_with_char_offsets(piece);
     let mut col = walk.skip_plain(left);
@@ -233,22 +276,17 @@ fn paint_matches(
         }
         let w = grapheme_width(g, col);
         let at = start + off;
-        while matches.get(next).is_some_and(|m| m.end <= at) {
+        while ranges.get(next).is_some_and(|m| m.end <= at) {
             next += 1;
         }
-        let Some(m) = matches.get(next) else {
+        let Some(m) = ranges.get(next) else {
             break;
         };
         if m.contains(&at) && col + w > left {
-            let style = if m.start == cursor {
-                theme.search_current
-            } else {
-                theme.search_match
-            };
             let from = col.max(left);
             let to = (col + w).min(right);
             let cell = Rect::new(area.x + (from - left) as u16, area.y, (to - from) as u16, 1);
-            cells.set_style(cell, style);
+            cells.set_style(cell, style_of(m));
         }
         col += w;
         if col < left {
@@ -304,24 +342,30 @@ pub fn render_line(
     cells.set_stringn(x, y, vis, width, theme.text);
 }
 
-/// Highlight styles for each visible row, as byte ranges within the line.
+/// Highlight styles for each visible row, as byte ranges within the line, and
+/// where those rows hold something other than prose, such as code or math.
 #[cfg(feature = "highlight")]
+#[allow(clippy::type_complexity)]
 fn line_spans(
     app: &App,
     top: usize,
     rows: usize,
     theme: &Theme,
-) -> Vec<Vec<(std::ops::Range<usize>, ratatui::style::Style)>> {
-    use crate::highlight::{highlight, Lang};
+) -> (
+    Vec<Vec<(std::ops::Range<usize>, ratatui::style::Style)>>,
+    Vec<Vec<std::ops::Range<usize>>>,
+) {
+    use crate::highlight::{highlight, HighlightKind, Lang};
     let mut per = vec![Vec::new(); rows];
+    let mut not_prose = vec![Vec::new(); rows];
     let buf = app.view_buffer();
     let head = buf.head();
     let Some(lang) = buf.path().and_then(|p| Lang::detect(p, &head)) else {
-        return per;
+        return (per, not_prose);
     };
     let end = (top + rows).min(buf.line_count());
     if top >= end {
-        return per;
+        return (per, not_prose);
     }
     let text = buf.to_string();
     let rope = buf.rope();
@@ -329,7 +373,7 @@ fn line_spans(
         if r.is_empty() {
             continue;
         }
-        let style = kind.style(theme.text);
+        let style = kind.style(theme);
         for l in rope.byte_to_line(r.start)..=rope.byte_to_line(r.end - 1) {
             if l < top || l >= end {
                 continue;
@@ -339,10 +383,14 @@ fn line_spans(
             let (a, b) = (r.start.max(ls) - ls, r.end.min(le) - ls);
             if a < b {
                 per[l - top].push((a..b, style));
+                // Headings color as keywords, and they're prose.
+                if kind != HighlightKind::Keyword {
+                    not_prose[l - top].push(a..b);
+                }
             }
         }
     }
-    per
+    (per, not_prose)
 }
 
 /// `render_line` with per-byte-range styles (feature `highlight`).

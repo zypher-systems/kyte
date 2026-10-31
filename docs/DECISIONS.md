@@ -12,6 +12,92 @@ These replace the matching parts of `ARCHITECTURE`. `docs/ROADMAP.md` holds the 
 - License: MIT. This settles section 16 and the section 4 note.
 - Kyte isn't tied to any one OS. It's meant to be open source for everyone.
 
+## Getting Kyte
+
+- A release carries a `.tar.gz` for x86-64 and arm64, a `.deb` and an `.rpm` for each, signed checksums and `install.sh`. They all come from one workflow, so what's tested is what ships.
+- Binaries are static, built against musl, so one build runs on any Linux whatever its glibc. Kyte depends on nothing at run time, so the packages declare nothing.
+- The installer needs no root and goes to `~/.local/bin`. It checks a signature against a key it carries, so a mirror can't swap the files. `--from` skips that for a file someone already has.
+- Kyte has no updater. The README promises it makes no network connections, and that's worth more than the convenience. Updating is the installer again, or a package manager.
+- A tag makes a draft release, which a person publishes. A tag can't be released unsigned.
+- Third-party notices ship in every package: the crates that reach the binary, and the files kept in `vendor/`.
+- Linux only, because the swap lock reads `/proc`.
+
+## Several open files
+
+- `App` holds the file on screen in `doc` and the rest in `parked`. Everything tied to one file moved into `Doc`, and what belongs to a modal screen stayed on `App`, because you can only change files from the editor itself.
+- A file is never open twice. Kyte's swap lock ignores its own process, so a second copy would take over the first one's swap and overwrite it. Every way in checks the canonical path first: Ctrl-O, Ctrl-K, the command line and Save As. Opening a file that's open shows it.
+- That ends one old behavior: opening the current file again used to reload it, discarding changes. It now says `Already open`. Discarding means Ctrl-W, then `n`, then opening it.
+- Ctrl-O no longer asks about unsaved changes, because nothing is lost: the file stays open. Quit does the asking. It walks every unsaved file, showing each, and Esc at any point keeps them all. Answers of `n` only take effect if the walk finishes.
+- **Quit without saving** used to quit unconditionally. It still does for the file on screen, but asks if another file has changes, since those aren't in view.
+- Swaps and histories of files not on screen are synced with the rest, and the status bar reports a file with no working swap even when it isn't the one showing.
+- The empty file Kyte starts with gives way to the first file opened, so the count stays honest. With text in it, it stays. That's why there's at most one untitled file, and no New file command yet: `SwapWriter::create_untitled_in` names swaps by process, so a second untitled file would need a different name.
+- Files on the command line open one at a time, stopping for any with crashed edits to recover. A later file that can't be opened is reported and skipped, and only the first decides the exit code.
+- Changing files uses Esc `b`, `.` and `,`. Ctrl-Tab doesn't reach programs in most terminals, and terminals with tabs take Ctrl-PageUp and Ctrl-PageDown.
+- After a crash, each file offers recovery when it's reopened. Nothing lists them all yet.
+- An independent review fuzzed thousands of random sessions and found ways to lose work, now fixed:
+  - `resolve_target` left `..` in a dangling symlink's path, so two spellings of one new file looked different and both opened. It now follows the whole chain and canonicalizes the directory. `write_file` also checks again before saving, because a symlink can move onto an open file mid-session.
+  - Save As only refused a live lock, so it could truncate a crashed session's swap. It now refuses recoverable and stale swaps too.
+  - Keeping your side of a review left a buffer that differed from disk marked clean, so closing it asked nothing. It's now marked unsaved.
+  - With no edits, that buffer was also missing from the swap, which keeps no copy of its base until the first edit. Fuzzing the fix found this. `keep_base` now writes the copy and an empty edit, so a crash offers the text, and recovery says the file moved on.
+
+## Writing
+
+- Writing is one setup rather than separate modes for novels or papers, because they want the same things: wrapped lines, a word count and spell check. The setup follows the file's kind, so nothing has to be switched on.
+- Wrap and line numbers moved onto each open file, so a `.md` beside a `.rs` shows each the way it should. Toggles change one file.
+- Line numbers stay on in writing. Hiding them in Markdown and text was tried, and taken back out on trying it. Esc `l` toggles them for one file, and `line_numbers = false` does it for all.
+- A `.txt` counts as writing unless it has a `#!` line, and `CMakeLists.txt` is code. `.sty` and `.cls` are code too.
+- A LaTeX word count needs to know what's prose, so it walks the parse tree: only `text` nodes in the document body, stepping around citations nested in them. It runs when typing pauses. Text and Markdown just split on spaces, at 0.4 ms for 500 KB, so they stay live.
+- LaTeX's grammar takes about 1.4 ms per KB, some fourteen times the others, because of its huge token list. Parsing the whole file made a 10,000-word paper cost 145 ms a key. `highlight` now parses only a window around the lines it's asked for: 4 KB before, from a blank line where there is one, and 1 KB after. That's about 4 ms a key at any length, so LaTeX also has no size limit. The price is that a block longer than the window can color wrongly when you're inside it.
+- Spell check uses `spellbook` with a compiled-in SCOWL en_US dictionary. Loading takes about 4 ms and a word about 50 ns, so visible lines are simply checked on every draw, and there's no background thread. The dictionary adds about 0.6 MB, and a system dictionary would have left SSH sessions and servers with nothing.
+- What isn't prose comes from the highlighter: anything colored is skipped, except keywords, which is how headings color. That one rule covers LaTeX math, commands, citations and comments, and code in Markdown, with no second parser. A build without highlighting checks everything except `\commands`.
+- Words with a digit, or written in capitals or mixed case, are skipped. In technical writing they're nearly always names, and flagging each one teaches people to ignore the underline.
+- Misspellings use the error color and an underline. An underline color would be better, but `SGR 58` makes a terminal that doesn't know it blink instead.
+- Next misspelling searches a LaTeX file 200 lines at a time and stops at the first hit, because parsing it is slow and the next one is usually close.
+- `words.txt` is plain text beside the settings, so it can be edited, copied and kept in a dotfiles repo. Adding a word still works for the session if the file can't be written.
+- `tests/fixtures/settings.toml` keeps the writing setup off for the end-to-end tests, which are about editing and mostly use `.txt` files. The writing tests turn it back on.
+- BibTeX files aren't spell checked. They're mostly names and titles, in a format that isn't prose.
+
+## Citations
+
+- The box opens by itself on `\cite{`, because that's the moment the key is wanted and few people remember keys. It's centered like every other list, and stays quiet if there's nothing to offer, because someone with no `.bib` file isn't asking for one.
+- Any command with `cite` in its name counts, which covers natbib and biblatex without a list to keep up to date.
+- `.bib` files are read by a small scanner rather than the grammar, so a half-written entry doesn't cost the others, and it works in builds without highlighting. They're read each time the box opens, so a new entry shows at once. An open copy wins over the one on disk.
+- Works are filtered on key, author and title and ranked best first, because the title is what people remember.
+- A comma keeps the box open, since `\cite{a,b}` is common and a comma can't be part of what you're searching for.
+- A named bibliography wins over one that merely sits beside the paper, because a folder can hold several.
+- A bibliography is read on a keypress, so only a regular file of at most 32 MB is read. A named path can be a pipe or a device, and reading those never ends. What's left out is reported. Absolute and `..` paths stay, because real bibliographies use them.
+- Only LaTeX gets this. Pandoc's `[@key]` in Markdown could use the same box.
+
+## Building PDFs
+
+- `latexmk` is the default because it knows how many passes a paper needs, and when to run BibTeX. `build_command` swaps it for `tectonic` or anything else, with `%f` shell-quoted.
+- The build runs as a child process, and its output goes to a thread, so the editor never waits. The event loop polls every 100 ms during a build, so its end shows soon after it happens.
+- The child gets its own process group, because `latexmk` starts `pdflatex` and stopping only the parent would leave that running. Quitting stops the build rather than waiting for it.
+- The parser was written against real `latexmk` output from TeX Live 2026 in a throwaway container, and that output is kept as test fixtures. Three things differed from the documented `file:line: message` form:
+  - A missing package prints `! LaTeX Error: ...` with no place, and the place comes a few lines later as `Emergency stop`. Those two lines become one problem, and `==> Fatal error` is dropped.
+  - A first pass warns about every citation, and later passes settle them. So warnings come from the last pass only, or every paper with citations would report warnings.
+  - `latexmk` ends with general advice, so a failure with no errors to list uses the line after `Collected error summary`.
+- `max_print_line=1000` stops TeX wrapping output at 79 columns, which would split file names.
+- Errors open the box by themselves, because the build failed and there's something to fix. Warnings don't, because the PDF exists and an undefined citation may be mid-draft.
+- Errors only open the box from plain editing, so a build ending can't take over a question or a search.
+- Being LaTeX is separate from showing for writing, so `writing = false` keeps citations and Ctrl-B. A test caught them disappearing together.
+- A chapter finds its root from `% !TEX root`, the convention other LaTeX editors use, and then from a `main.tex`.
+- A warning's file is checked against the source. Following TeX's `(` and `)` gives a first guess, but a log isn't reliably balanced: `\typeout` and other messages print stray parentheses that look the same. In 40 generated papers run through real LaTeX, 878 of 2,699 warnings landed on the wrong file.
+- The check reads the source for real citation and reference commands, across lines and without comments, and finds the exact key at or before the warning's line. TeX gives the line a command ends on, or inside a footnote or caption, the line that ends. A warning moves only if its own file neither cites the key nor mentions it near that line, and exactly one other file the build read cites it, so anything unclear stays put. The loose test on its own file matters: a form the scanner can't read must never send a warning away. Matching plain text was tried first, and a word like `keyholders` could pull a correct warning onto the wrong file.
+- The result was 0 wrong of 2,699, 0 of 2,398 with fresh seeds, and 0 of 4,982 in harder papers with multi-line citations, citations in footnotes and captions, and keys planted as prose and comments in other files. Each paper had known answers. A key cited near the same line of two files stays on the first guess, and so does a warning from a command with neither `cite` nor `ref` in its name.
+- The parentheses are still followed for those cases. Ordinary text has parentheses too, so all of them are tracked. Document text TeX echoes is skipped, because it needn't balance: around an error, in the text of an `\hbox` after `Overfull` or `Underfull`, up to a blank line or TeX's next page or file, and after `Runaway argument?` up to its error. These forms all come from real runs. A file name can hold spaces, so a name runs through its extension.
+- Problems keep the folder that was built, because the file on screen can change before someone picks one. A file that has since gone is reported, not opened as a new empty one.
+- Unsaved files other than the one on screen aren't saved first. Saving can ask questions, and asking about several files before a build is more than a keypress should do.
+
+## File tree
+
+- The tree is a box in the middle of the screen, not a sidebar. It's something you pick from, so it follows the rule for menus, and it leaves the text its full width.
+- A folder is read when it's unfolded, so a huge project costs nothing to open. Rows stop at 5,000, so unfolding everything can't stall the editor.
+- `target` and `node_modules` are listed, unlike in Ctrl-K. Search skips them because they'd bury results. In the tree they're folded and out of the way, and you may have gone looking for them.
+- Symlinked folders can be unfolded. A loop only goes as deep as someone keeps unfolding it.
+- A name that isn't UTF-8 is listed but refused. Swap names come from the path as text, so two such files could share a swap.
+- The letter keys jump, and don't filter. Ctrl-K already searches every file by name.
+
 ## Soft wrap
 
 - `wrap.rs` is the only code that decides where rows break. Nothing is stored: rows are worked out from the text and the width each time, so edits and resizes can't leave them stale.
@@ -57,8 +143,30 @@ These replace the matching parts of `ARCHITECTURE`. `docs/ROADMAP.md` holds the 
 - The cost is size: the binary goes from about 7 MB to about 15 MB, nearly all of it grammar tables, and the release profile now strips symbols. `--no-default-features` gives about 1.3 MB.
 - Typing at the end of a file, per key on a release build: 12 to 22 ms at 100 KB across languages, and 64 ms (Go) to 113 ms (C++) at 500 KB. That's usable, so the 512 KiB cap stays, and incremental parsing is still the way to improve it.
 
+## Even more languages
+
+- Added SQL, Java, C#, PHP, Ruby, Lua, Make, Dockerfile, XML, diff, INI, CMake, Fish, Nix and Zig, which makes 30. The ones with functions get `f`, `n`, `p` and the reader's focus.
+- Each grammar was tried on a real sample before it went in, because a query can load and still leave a file mostly plain. That found three problems, all from queries written for Neovim:
+  - `@comment @spell` left comments uncolored, because the second capture won. `adapted` strips `@spell` and `@nospell`.
+  - `#lua-match?` isn't a predicate here, and an unknown predicate doesn't filter, so it's mapped to `#match?`. SQL and CMake also needed their Lua patterns rewritten as regex.
+  - Older names such as `conditional`, `repeat` and `boolean` weren't Kyte colors, so `if` in Lua stayed plain. They're mapped now, along with `constructor`, `escape` and `variable.builtin`, which also adds color to `self` and `\n` in the earlier languages.
+- `tests` in `highlight.rs` check named tokens in a whole sample for each language, so a query update that drops comments will fail.
+- Left out, and why:
+  - `tree-sitter-dockerfile`: it needs an old tree-sitter. `tree-sitter-containerfile` covers Dockerfiles instead.
+  - Kotlin: one crate needs an old tree-sitter and the other has no highlight query.
+  - Protobuf and HCL: no highlight query in the crate.
+  - Perl: it doesn't resolve against tree-sitter 0.27.
+  - Scala, Haskell, Dart and Elixir: they work, but each adds megabytes for languages seldom edited in a Linux terminal. They can go in later.
+- The binary grows from about 15 MB to about 26 MB. C#, Ruby, SQL and PHP are most of that.
+- Swift followed, along with LaTeX and BibTeX, because research papers are something Kyte should be good for. They took the binary to about 34 MB.
+- LaTeX: `tree-sitter-latex` 0.1.0 publishes its parser without `scanner.c`, so it doesn't link. The upstream scanner is 141 lines with the same twelve tokens, so `vendor/` keeps that one file and `build.rs` compiles it, rather than keeping a 37 MB grammar. The crate has no query, so `queries/latex.scm` is Kyte's own. A `section` node holds the whole section, so only the title is colored. Prose stays plain, which is what you read most.
+- BibTeX: the crate needs tree-sitter 0.22, which can't sit beside 0.27 in one build, but its 56 KB parser uses a format 0.27 still reads. `vendor/` keeps the parser, and the crate isn't a dependency.
+- GNU ld resolves symbols in order and failed on the scanner, though rust-lld didn't. `highlight.rs` names the scanner to fix the order, and both linkers were checked.
+- Measured on a release build, mid-file on repeated samples: the first highlight of a language in a session takes 21 ms at most, for building its query. A keystroke costs 5 to 20 ms at 100 KB and 23 to 103 ms at 500 KB, so nothing is slower than C++ was, and the 512 KiB cap stays.
+
 ## CI
 
+- `.github/workflows/ci.yml` runs fmt, clippy and the tests, with and without default features, on pushes to `main`, `dev`, patch and hotfix branches, and on pull requests.
 - That image has no Node, which `actions/checkout` needs, so the job checks out with git.
 - The first runs found test races that never showed on the build machine, because the runner is slower: a popup's title could arrive before its rows. Tests now wait for what they check instead of reading the screen once.
 - The container runs as root, so the tests that need a read-only directory or file skip there. They run only on a normal user's machine, so run `cargo test` locally too.
@@ -98,8 +206,26 @@ These replace the matching parts of `ARCHITECTURE`. `docs/ROADMAP.md` holds the 
 
 - Anything the user picks from goes in a floating box, by the user's direction: the Esc layer, the unsaved, overwrite and delete questions, replace's choices, the history keys and Tab completions. The footer keeps status and passing messages.
 - Typed input for search, replace, go to line, Open and Save As stays on the message line, because there's nothing to pick from, and search needs the text in view.
-- A question takes the middle of the screen. The Esc layer, replace and history sit in a corner clear of the cursor, because what's under the cursor matters there.
+- Every box takes the middle of the screen, by the user's direction: a corner was easy to miss, including the Esc layer. Replace, change review and history are about the cursor's line, so they stay centred across and move up or down just enough to leave that line showing. If they fit on neither side, they stay in the middle.
+- The terminal cursor hides while a box covers it, because it would blink through the box's text.
 - Rows that don't fit the height flow into more columns, so every key stays visible on a short terminal. This replaces the short legend wording.
+
+## Looks
+
+- Boxes have rounded corners, a centred title, a blank margin and a shadow, so they read as floating. The shadow is two cells wide to one tall, because a terminal cell is about twice as tall as it's wide. It falls only on the text area, never on the status bar.
+- A menu of more than ten rows splits into two columns. The Esc layer's 17 rows covered most of the file.
+- The cursor's line has its own background, and its number lights up. Only the number does: a bright gutter bar read as a glitch.
+- The status bar keeps the file on the left and the facts (position, selection, indent, line endings) on the right. When the bar is tight, only position stays, and warnings are cut before position is.
+- Theme candidates were judged as real screens, rendered by Kyte's own code and dumped cell by cell, not as drawings.
+- Signal won from six candidates: near black with vivid color, 17.9:1 for text and 7.6:1 for comments. It replaced the old 256-color dark theme, whose comments fell short at 4.4:1.
+- The selection, added-line and faint colors moved slightly after the pick, because comments on a selection measured 3.3:1 and line numbers 4.1:1. Tests in `src/ui/theme.rs` hold code and chrome to 4.5:1 on every background they land on.
+- 24-bit color is used only when `COLORTERM` says `truecolor` or `24bit`. Anything else gets a hand-matched 256-color palette, since ratatui doesn't downsample and a wrong guess shows garbled colors. SSH and sudo usually drop `COLORTERM`, so those sessions get the 256-color palette, and `COLORTERM=truecolor kyte` overrides it.
+- The one known gap: the darkest green in 256 colors leaves code colors on added lines in change review under the minimum (keywords at 2.8:1 in Signal). Plain text there reaches it.
+- Six themes ship, and `theme` picks one. The other five moved from their mock-ups for the same reasons as Signal. Comments rose to about 7:1 on the editor background, so they stay readable on a selection, which is still clearly visible against the cursor's line.
+- Daybreak's search matches were white on yellow in the mock-up, so `on_matched` is its own color.
+- Dark backgrounds in 256 colors are gray, because that palette has nothing darker than `#00005f` in blue and nothing similar in brown or green. Harbor, Dusk, Ember and Moss differ there by their text colors.
+- The theme picker is the palette with a different list, so it filters and moves the same way. It shows each theme as the selection lands on it, because a name doesn't say what a theme looks like.
+- Enter keeps a theme for the session, as **Toggle soft wrap** does, and doesn't write the settings file. Kyte has never edited that file, which keeps a person's comments and layout safe.
 
 ## File history
 
@@ -148,7 +274,7 @@ These replace the matching parts of `ARCHITECTURE`. `docs/ROADMAP.md` holds the 
 
 ## 0.2.0 opening files
 
-- Ctrl-O opens a file, so it no longer saves. Kyte holds one buffer at a time; opening a file replaces it, and multiple buffers stay on the later list. The clipboard survives the switch, which makes it the way to move text between files.
+- Ctrl-O opens a file, so it no longer saves. In 0.2.0 Kyte held one buffer at a time; "Several open files" above replaced that, along with the unsaved prompt and the `q` behavior described here. The clipboard survives the switch, which makes it the way to move text between files.
 - Startup and Ctrl-O share `session.rs`, so a file opened either way gets the same swap checks, lock and recovery.
 - `session::check` runs when Enter is pressed and changes nothing, so a file that can't be opened leaves the buffer alone and the prompt open. Only then does Kyte ask about unsaved changes.
 - The unsaved prompt now says what it's for. `After` carries what a save was for through Save As and the save questions, so `y` while opening a file still reaches the file even if the buffer has no name yet.
@@ -322,6 +448,6 @@ The versioning rule makes any release with a new feature a MINOR bump, and 0.1.1
 - Every AC passed first, and the grammars resolved against tree-sitter 0.27, so T13 was built. Resolved versions: tree-sitter 0.27.x, tree-sitter-highlight 0.27.1, tree-sitter-rust 0.24.2, tree-sitter-python 0.25.0, tree-sitter-bash 0.25.1 (all grammar ABI 15). All are optional dependencies behind the `highlight` feature, which is off by default. `cargo tree -e normal` for the default build lists no tree-sitter crate.
 - `src/highlight.rs`: `Lang::from_path` picks the grammar by extension (`.rs`; `.py`/`.pyi`; `.sh`/`.bash`). `highlight(lang, text, lines) -> Vec<(Range<usize>, HighlightKind)>` returns byte ranges of the whole text that overlap the visible line range. It uses each grammar's bundled `highlights.scm` through `tree-sitter-highlight`; the capture names keyword, string, comment, function, type, constant and number map to `HighlightKind`, and the innermost capture wins. Query configurations are compiled once per language (`OnceLock`).
 - The function takes the whole text (not just the visible lines) so multi-line strings and comments are parsed correctly. Each redraw re-parses, so documents over 512 KiB are not highlighted. Incremental parsing is a later improvement.
-- Colors are 256-color indexed values on the text background: keyword 176 (bold), string 150, comment 245 (italic), function 111, type 180, constant/number 209.
+- Colors sit on the text background: keyword (bold), string, comment (italic), function, type and constant/number. `src/ui/theme.rs` has the values.
 - The text view uses a styled per-grapheme path only for lines that have spans; other lines take the unchanged `render_line` path. Without the feature, none of this code is compiled.
 - Tests: four unit tests in `highlight.rs` (a Rust snippet is tokenized into comment, keyword, function and string; only the requested lines are returned; the Python and Bash grammars load; extension mapping) and `tests/e2e_highlight.rs` (`fn` in a `.rs` file is drawn with foreground index 176 in the vt100 screen; a `.txt` file stays at the default 252).

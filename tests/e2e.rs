@@ -925,6 +925,29 @@ fn ac14_esc_ms_800_opens_palette_after_500ms() {
 }
 
 #[test]
+fn a_terminal_that_says_it_takes_24_bit_color_gets_it() {
+    let env = Env::new();
+    let f = env.write("colors.txt", "text\n");
+    for (colorterm, expected) in [
+        (Some("truecolor"), vt100::Color::Rgb(0x0b, 0x0c, 0x10)),
+        (Some("24bit"), vt100::Color::Rgb(0x0b, 0x0c, 0x10)),
+        (None, vt100::Color::Idx(232)),
+    ] {
+        let mut spawn = Spawn::new(bin())
+            .env("KYTE_STATE_DIR", env.state.to_string_lossy())
+            .arg("--no-kitty")
+            .arg(f.to_string_lossy());
+        if let Some(value) = colorterm {
+            spawn = spawn.env("COLORTERM", value);
+        }
+        let mut p = Pty::spawn(spawn);
+        p.wait_for("Ln 1, Col 1", TIMEOUT);
+        assert_eq!(p.bg(5, 40), Some(expected), "{colorterm:?}\n{}", p.dump());
+        quit_clean(&mut p);
+    }
+}
+
+#[test]
 fn ac14_kyte_esc_ms_env_is_honoured() {
     let env = Env::new();
     let f = env.write("pal.txt", "text\n");
@@ -1060,7 +1083,7 @@ fn ac16_empty_query_does_nothing() {
 
 // ---------------------------------------------------------------- AC-17
 
-const COMMANDS: [&str; 22] = [
+const COMMANDS: [&str; 36] = [
     "Save",
     "Save as",
     "Open file",
@@ -1078,6 +1101,20 @@ const COMMANDS: [&str; 22] = [
     "Toggle line numbers",
     "Toggle tabs and spaces",
     "Toggle soft wrap",
+    "Choose theme",
+    "File tree",
+    "Insert citation",
+    "Build PDF",
+    "Stop build",
+    "Show build problems",
+    "Open PDF",
+    "Fix spelling",
+    "Next misspelling",
+    "Toggle spell check",
+    "Open files",
+    "Next file",
+    "Previous file",
+    "Close file",
     "File history",
     "Delete file history",
     "Reader mode",
@@ -1091,14 +1128,18 @@ fn open_palette(p: &mut Pty) {
     p.wait_for("Command palette", TIMEOUT);
 }
 
-/// Row text of the first palette result (the row after the `> ` input line).
+/// Row text of the first palette result (below the `> ` input line and its rule).
 fn first_result(p: &Pty) -> String {
     let rows = p.rows();
     let i = rows
         .iter()
         .position(|r| r.contains("│> "))
         .expect("palette input row");
-    rows[i + 1].clone()
+    rows[i + 1..]
+        .iter()
+        .find(|r| !r.contains('├'))
+        .expect("palette result row")
+        .clone()
 }
 
 #[test]
@@ -1114,7 +1155,7 @@ fn ac17_palette_lists_every_command() {
         .collect();
     assert!(first_result(&p).contains("▸ Save"), "{}", p.dump());
     // 8 rows are visible at once; scrolling down reveals the rest
-    for _ in 0..21 {
+    for _ in 0..35 {
         p.send_keys(&["Down"]);
         std::thread::sleep(Duration::from_millis(5));
         for c in COMMANDS {
@@ -2066,7 +2107,7 @@ fn resizing_rewraps() {
 /// Kyte on `file` with a settings file holding `settings`.
 fn open_with_settings(env: &Env, file: &Path, settings: &str, extra: &[&str]) -> Pty {
     let config = env.path("config.toml");
-    fs::write(&config, settings).unwrap();
+    fs::write(&config, format!("{settings}writing = false\n")).unwrap();
     let mut spawn = Spawn::new(bin())
         .env("KYTE_STATE_DIR", env.state.to_string_lossy())
         .env("KYTE_CONFIG", config.to_string_lossy())
@@ -2077,6 +2118,46 @@ fn open_with_settings(env: &Env, file: &Path, settings: &str, extra: &[&str]) ->
     let pty = Pty::spawn(spawn.arg(file.to_str().unwrap()));
     pty.wait_for("Ln 1, Col 1", TIMEOUT);
     pty
+}
+
+/// Waits until the text area shows `color`, since a frame can arrive in parts.
+fn wait_for_bg(p: &Pty, color: vt100::Color) {
+    let deadline = Instant::now() + TIMEOUT;
+    while p.bg(5, 2) != Some(color) {
+        assert!(Instant::now() < deadline, "{color:?}\n{}", p.dump());
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn the_theme_setting_and_picker_change_the_colors() {
+    let harbor = vt100::Color::Rgb(0x0f, 0x1f, 0x2c);
+    let dusk = vt100::Color::Rgb(0x1b, 0x1d, 0x2b);
+    let env = Env::new();
+    let f = env.write("colors.txt", "text\n");
+    let config = env.dir.path().join("config.toml");
+    fs::write(&config, "theme = \"harbor\"\n").unwrap();
+    let mut p = Pty::spawn(
+        Spawn::new(bin())
+            .env("KYTE_STATE_DIR", env.state.to_string_lossy())
+            .env("KYTE_CONFIG", config.to_string_lossy())
+            .env("COLORTERM", "truecolor")
+            .arg("--no-kitty")
+            .arg(f.to_string_lossy()),
+    );
+    p.wait_for("Ln 1, Col 1", TIMEOUT);
+    assert_eq!(p.bg(5, 2), Some(harbor), "{}", p.dump());
+    p.send_keys(&["C-p"]);
+    p.wait_for("Command palette", TIMEOUT);
+    p.send_str("choose theme");
+    p.wait_for("Choose theme", TIMEOUT);
+    p.send_keys(&["Enter"]);
+    p.wait_for("Daybreak", TIMEOUT);
+    p.send_keys(&["Down"]);
+    wait_for_bg(&p, dusk);
+    p.send_keys(&["Esc"]);
+    wait_for_bg(&p, harbor);
+    quit_clean(&mut p);
 }
 
 #[test]
@@ -2200,7 +2281,7 @@ fn standard_terminal_shows_the_legend_and_help_in_full() {
     p.wait_for("▸ Show key help", TIMEOUT);
     p.send_keys(&["Enter"]);
     p.wait_for("Up, Down scroll", TIMEOUT);
-    for _ in 0..30 {
+    for _ in 0..35 {
         p.send_keys(&["Down"]);
     }
     p.wait_for("Esc (quickly)", TIMEOUT);
@@ -2482,28 +2563,6 @@ fn ctrl_k_opens_a_file_by_name_from_the_working_directory() {
 }
 
 #[test]
-fn ctrl_k_with_unsaved_changes_asks_before_it_opens_a_file() {
-    let env = Env::new();
-    let project = env.path("proj");
-    fs::create_dir(&project).unwrap();
-    let a = project.join("a.txt");
-    fs::write(&a, "first\n").unwrap();
-    fs::write(project.join("other.txt"), "second\n").unwrap();
-    let mut p = open_in(&env, &project, &a);
-    type_text(&mut p, "edit ");
-    p.send_keys(&["C-k"]);
-    p.wait_for("Commands, files", TIMEOUT);
-    p.send_str("other");
-    p.wait_for("▸ other.txt", TIMEOUT);
-    p.send_keys(&["Enter"]);
-    p.wait_for("Unsaved changes", TIMEOUT);
-    p.send_str("y");
-    p.wait_for("1 │ second", TIMEOUT);
-    assert_eq!(fs::read_to_string(&a).unwrap(), "edit first\n");
-    quit_clean(&mut p);
-}
-
-#[test]
 fn ctrl_k_goes_to_a_line_and_finds_text() {
     let env = Env::new();
     let f = env.write("k.txt", "one\ntwo\nthree\n");
@@ -2598,69 +2657,6 @@ fn open_from_prompt(p: &mut Pty, path: &str) {
     });
     p.send_str(path);
     p.send_keys(&["Enter"]);
-}
-
-#[test]
-fn ctrl_o_switches_files_and_moves_the_swap() {
-    let env = Env::new();
-    let a = work_file(&env, "a.txt", "first\n");
-    let b = work_file(&env, "b.txt", "second\n");
-    let mut p = env.open(&a);
-    open_from_prompt(&mut p, b.to_str().unwrap());
-    p.wait_for("Opened b.txt", TIMEOUT);
-    p.wait_for("1 │ second", TIMEOUT);
-    wait_status(&p, "b.txt");
-    let swaps = swap_files(&env);
-    assert_eq!(swaps.len(), 1);
-    assert!(swaps[0].to_string_lossy().contains("b.txt"));
-    type_text(&mut p, "more ");
-    save_and_wait(&mut p);
-    quit_clean(&mut p);
-    assert_eq!(fs::read_to_string(&b).unwrap(), "more second\n");
-    assert_eq!(fs::read_to_string(&a).unwrap(), "first\n");
-}
-
-#[test]
-fn ctrl_o_with_unsaved_changes_asks_first() {
-    let env = Env::new();
-    let a = work_file(&env, "a.txt", "first\n");
-    let b = work_file(&env, "b.txt", "second\n");
-    let mut p = env.open(&a);
-    type_text(&mut p, "edit ");
-    open_from_prompt(&mut p, b.to_str().unwrap());
-    p.wait_for("Unsaved changes", TIMEOUT);
-    p.send_keys(&["Esc"]);
-    p.wait_gone("Unsaved changes", TIMEOUT);
-    wait_status(&p, "a.txt [+]");
-    open_from_prompt(&mut p, b.to_str().unwrap());
-    p.wait_for("Unsaved changes", TIMEOUT);
-    p.send_str("y");
-    p.wait_for("1 │ second", TIMEOUT);
-    assert_eq!(fs::read_to_string(&a).unwrap(), "edit first\n");
-    type_text(&mut p, "gone ");
-    open_from_prompt(&mut p, a.to_str().unwrap());
-    p.wait_for("Unsaved changes", TIMEOUT);
-    p.send_str("n");
-    p.wait_for("1 │ edit first", TIMEOUT);
-    assert_eq!(fs::read_to_string(&b).unwrap(), "second\n");
-    quit_clean(&mut p);
-    assert!(swap_files(&env).is_empty());
-}
-
-#[test]
-fn ctrl_o_reopening_the_same_file_after_discarding_starts_clean() {
-    let env = Env::new();
-    let a = work_file(&env, "a.txt", "first\n");
-    let mut p = env.open(&a);
-    type_text(&mut p, "junk ");
-    open_from_prompt(&mut p, a.to_str().unwrap());
-    p.wait_for("Unsaved changes", TIMEOUT);
-    p.send_str("n");
-    p.wait_for("Opened a.txt", TIMEOUT);
-    p.wait_for("1 │ first", TIMEOUT);
-    assert!(!status(&p).contains("[+]"));
-    assert_eq!(swap_files(&env).len(), 1);
-    quit_clean(&mut p);
 }
 
 #[test]
@@ -3292,4 +3288,1510 @@ fn ac24_save_through_symlink_updates_target_keeps_link() {
         .file_type()
         .is_symlink());
     assert_eq!(fs::read_link(&link).unwrap(), real);
+}
+
+// ---------------------------------------------------------------- several open files
+
+/// Starts kyte on `files` and waits for the first frame.
+fn open_all(env: &Env, files: &[&Path]) -> Pty {
+    let args: Vec<&str> = files.iter().map(|f| f.to_str().unwrap()).collect();
+    let pty = Pty::kyte(&bin(), &env.state, &args);
+    pty.wait_for("Ln 1, Col 1", TIMEOUT);
+    pty
+}
+
+/// Esc, then one key of the layer.
+fn esc_then(p: &mut Pty, key: &str) {
+    open_overlay(p);
+    p.send_str(key);
+    wait_insert(p);
+}
+
+fn run_from_palette(p: &mut Pty, command: &str) {
+    open_palette(p);
+    p.send_str(command);
+    p.wait_for(&format!("▸ {command}"), TIMEOUT);
+    p.send_keys(&["Enter"]);
+}
+
+#[test]
+fn ctrl_o_keeps_both_files_open_each_with_its_swap() {
+    let env = Env::new();
+    let a = work_file(&env, "a.txt", "first\n");
+    let b = work_file(&env, "b.txt", "second\n");
+    let mut p = env.open(&a);
+    assert!(!status(&p).contains("file 1"), "{}", status(&p));
+    open_from_prompt(&mut p, b.to_str().unwrap());
+    p.wait_for("Opened b.txt", TIMEOUT);
+    p.wait_for("1 │ second", TIMEOUT);
+    wait_status(&p, "b.txt │ file 2 of 2");
+    assert_eq!(swap_files(&env).len(), 2);
+    type_text(&mut p, "more ");
+    save_and_wait(&mut p);
+    esc_then(&mut p, ",");
+    p.wait_for("1 │ first", TIMEOUT);
+    wait_status(&p, "a.txt │ file 1 of 2");
+    quit_clean(&mut p);
+    assert_eq!(fs::read_to_string(&b).unwrap(), "more second\n");
+    assert_eq!(fs::read_to_string(&a).unwrap(), "first\n");
+    assert!(swap_files(&env).is_empty());
+}
+
+#[test]
+fn ctrl_k_opening_a_file_leaves_unsaved_work_where_it_is() {
+    let env = Env::new();
+    let project = env.path("proj");
+    fs::create_dir(&project).unwrap();
+    let a = project.join("a.txt");
+    fs::write(&a, "first\n").unwrap();
+    fs::write(project.join("other.txt"), "second\n").unwrap();
+    let mut p = open_in(&env, &project, &a);
+    type_text(&mut p, "edit ");
+    p.send_keys(&["C-k"]);
+    p.wait_for("Commands, files", TIMEOUT);
+    p.send_str("other");
+    p.wait_for("▸ other.txt", TIMEOUT);
+    p.send_keys(&["Enter"]);
+    p.wait_for("1 │ second", TIMEOUT);
+    wait_status(&p, "file 2 of 2, 1 more unsaved");
+    assert_eq!(fs::read_to_string(&a).unwrap(), "first\n");
+    esc_then(&mut p, ".");
+    p.wait_for("1 │ edit first", TIMEOUT);
+    wait_status(&p, "a.txt [+]");
+    p.send_keys(&["C-z"]);
+    p.wait_for("1 │ first", TIMEOUT);
+    p.send_keys(&["C-q"]);
+    p.wait_for("Unsaved changes in a.txt", TIMEOUT);
+    p.send_str("n");
+    assert_eq!(p.wait_exit(TIMEOUT), 0);
+}
+
+#[test]
+fn a_crash_leaves_every_open_files_edits_recoverable() {
+    let env = Env::new();
+    let a = work_file(&env, "a.txt", "first\n");
+    let b = work_file(&env, "b.txt", "second\n");
+    let mut p = env.open(&a);
+    type_text(&mut p, "aa ");
+    open_from_prompt(&mut p, b.to_str().unwrap());
+    p.wait_for("1 │ second", TIMEOUT);
+    type_text(&mut p, "bb ");
+    esc_then(&mut p, ",");
+    p.wait_for("1 │ aa first", TIMEOUT);
+    type_text(&mut p, "again ");
+    p.kill9();
+    assert_eq!(print_swap(&env, &a), (0, "aa again first\n".to_string()));
+    assert_eq!(print_swap(&env, &b), (0, "bb second\n".to_string()));
+}
+
+#[test]
+fn opening_a_file_thats_open_moves_to_it_and_never_touches_its_swap() {
+    let env = Env::new();
+    let a = work_file(&env, "a.txt", "first\n");
+    let b = work_file(&env, "b.txt", "second\n");
+    let link = a.parent().unwrap().join("link.txt");
+    std::os::unix::fs::symlink(&a, &link).unwrap();
+    let mut p = env.open(&a);
+    type_text(&mut p, "keep ");
+    open_from_prompt(&mut p, b.to_str().unwrap());
+    p.wait_for("1 │ second", TIMEOUT);
+    open_from_prompt(&mut p, link.to_str().unwrap());
+    p.wait_for("1 │ keep first", TIMEOUT);
+    wait_status(&p, "a.txt [+] │ file 1 of 2");
+    assert_eq!(swap_files(&env).len(), 2);
+    open_from_prompt(&mut p, a.to_str().unwrap());
+    p.wait_for("Already open", TIMEOUT);
+    p.wait_for("1 │ keep first", TIMEOUT);
+    type_text(&mut p, "more ");
+    p.kill9();
+    assert_eq!(print_swap(&env, &a), (0, "keep more first\n".to_string()));
+}
+
+#[test]
+fn the_same_file_twice_on_the_command_line_opens_once() {
+    let env = Env::new();
+    let a = work_file(&env, "a.txt", "first\n");
+    let mut p = open_all(&env, &[&a, &a]);
+    p.wait_for("1 │ first", TIMEOUT);
+    assert!(!status(&p).contains("file 1"), "{}", status(&p));
+    assert_eq!(swap_files(&env).len(), 1);
+    quit_clean(&mut p);
+}
+
+#[test]
+fn moving_between_files_keeps_their_order() {
+    let env = Env::new();
+    let a = work_file(&env, "a.txt", "aaa\n");
+    let b = work_file(&env, "b.txt", "bbb\n");
+    let c = work_file(&env, "c.txt", "ccc\n");
+    let mut p = open_all(&env, &[&a, &b, &c]);
+    p.wait_for("1 │ aaa", TIMEOUT);
+    wait_status(&p, "a.txt │ file 1 of 3");
+    esc_then(&mut p, ".");
+    wait_status(&p, "b.txt │ file 2 of 3");
+    esc_then(&mut p, ".");
+    wait_status(&p, "c.txt │ file 3 of 3");
+    esc_then(&mut p, ".");
+    wait_status(&p, "a.txt │ file 1 of 3");
+    esc_then(&mut p, ",");
+    wait_status(&p, "c.txt │ file 3 of 3");
+    run_from_palette(&mut p, "Open files");
+    p.wait_for("Open files", TIMEOUT);
+    p.send_keys(&["Up", "Up"]);
+    p.wait_until("a.txt to be selected", TIMEOUT, |s| {
+        s.lines().any(|l| l.contains("▸ ") && l.contains("a.txt"))
+    });
+    p.send_keys(&["Enter"]);
+    wait_status(&p, "a.txt │ file 1 of 3");
+    esc_then(&mut p, ".");
+    wait_status(&p, "b.txt │ file 2 of 3");
+    esc_then(&mut p, ",");
+    wait_status(&p, "a.txt │ file 1 of 3");
+    esc_then(&mut p, ",");
+    wait_status(&p, "c.txt │ file 3 of 3");
+    quit_clean(&mut p);
+}
+
+#[test]
+fn the_open_files_box_says_which_are_unsaved() {
+    let env = Env::new();
+    let a = work_file(&env, "a.txt", "first\n");
+    let b = work_file(&env, "b.txt", "second\n");
+    let mut p = open_all(&env, &[&a, &b]);
+    p.wait_for("1 │ first", TIMEOUT);
+    type_text(&mut p, "x");
+    open_overlay(&mut p);
+    p.send_str("b");
+    p.wait_for("Open files", TIMEOUT);
+    p.wait_for("unsaved", TIMEOUT);
+    p.wait_for("b.txt", TIMEOUT);
+    p.send_str("b.txt");
+    p.wait_until("b.txt to be selected", TIMEOUT, |s| {
+        s.lines().any(|l| l.contains("▸ ") && l.contains("b.txt"))
+    });
+    p.send_keys(&["Enter"]);
+    wait_status(&p, "b.txt │ file 2 of 2, 1 more unsaved");
+    p.send_keys(&["C-q"]);
+    p.wait_for("Unsaved changes in a.txt", TIMEOUT);
+    p.send_str("n");
+    assert_eq!(p.wait_exit(TIMEOUT), 0);
+}
+
+#[test]
+fn quit_asks_about_each_unsaved_file_in_turn() {
+    let env = Env::new();
+    let a = work_file(&env, "a.txt", "aaa\n");
+    let b = work_file(&env, "b.txt", "bbb\n");
+    let c = work_file(&env, "c.txt", "ccc\n");
+    let mut p = open_all(&env, &[&a, &b, &c]);
+    p.wait_for("1 │ aaa", TIMEOUT);
+    type_text(&mut p, "1");
+    esc_then(&mut p, ".");
+    p.wait_for("1 │ bbb", TIMEOUT);
+    type_text(&mut p, "2");
+    esc_then(&mut p, ".");
+    p.wait_for("1 │ ccc", TIMEOUT);
+    p.send_keys(&["C-q"]);
+    p.wait_for("Unsaved changes in a.txt", TIMEOUT);
+    p.send_str("y");
+    p.wait_for("Unsaved changes in b.txt", TIMEOUT);
+    p.send_str("n");
+    assert_eq!(p.wait_exit(TIMEOUT), 0);
+    assert_eq!(fs::read_to_string(&a).unwrap(), "1aaa\n");
+    assert_eq!(fs::read_to_string(&b).unwrap(), "bbb\n");
+    assert!(swap_files(&env).is_empty());
+}
+
+#[test]
+fn esc_while_quitting_keeps_every_file_and_the_next_quit_asks_again() {
+    let env = Env::new();
+    let a = work_file(&env, "a.txt", "aaa\n");
+    let b = work_file(&env, "b.txt", "bbb\n");
+    let mut p = open_all(&env, &[&a, &b]);
+    p.wait_for("1 │ aaa", TIMEOUT);
+    type_text(&mut p, "1");
+    esc_then(&mut p, ".");
+    p.wait_for("1 │ bbb", TIMEOUT);
+    type_text(&mut p, "2");
+    p.send_keys(&["C-q"]);
+    p.wait_for("Unsaved changes in b.txt", TIMEOUT);
+    p.send_str("n");
+    p.wait_for("Unsaved changes in a.txt", TIMEOUT);
+    p.send_keys(&["Esc"]);
+    p.wait_gone("Unsaved changes", TIMEOUT);
+    p.send_keys(&["C-q"]);
+    p.wait_for("Unsaved changes in a.txt", TIMEOUT);
+    p.send_str("y");
+    p.wait_for("Unsaved changes in b.txt", TIMEOUT);
+    p.send_str("y");
+    assert_eq!(p.wait_exit(TIMEOUT), 0);
+    assert_eq!(fs::read_to_string(&a).unwrap(), "1aaa\n");
+    assert_eq!(fs::read_to_string(&b).unwrap(), "2bbb\n");
+}
+
+#[test]
+fn quit_without_saving_asks_when_another_file_is_unsaved() {
+    let env = Env::new();
+    let a = work_file(&env, "a.txt", "aaa\n");
+    let b = work_file(&env, "b.txt", "bbb\n");
+    let mut p = open_all(&env, &[&a, &b]);
+    p.wait_for("1 │ aaa", TIMEOUT);
+    type_text(&mut p, "1");
+    esc_then(&mut p, ".");
+    p.wait_for("1 │ bbb", TIMEOUT);
+    run_from_palette(&mut p, "Quit without saving");
+    p.wait_for("Discard unsaved changes in 1 other file?", TIMEOUT);
+    p.send_str("n");
+    p.wait_gone("Discard unsaved", TIMEOUT);
+    wait_status(&p, "b.txt │ file 2 of 2, 1 more unsaved");
+    run_from_palette(&mut p, "Quit without saving");
+    p.wait_for("Discard unsaved changes in 1 other file?", TIMEOUT);
+    p.send_str("y");
+    assert_eq!(p.wait_exit(TIMEOUT), 0);
+    assert_eq!(fs::read_to_string(&a).unwrap(), "aaa\n");
+    assert!(swap_files(&env).is_empty());
+}
+
+#[test]
+fn ctrl_w_closes_a_file_asking_if_its_unsaved_and_the_last_one_quits() {
+    let env = Env::new();
+    let a = work_file(&env, "a.txt", "aaa\n");
+    let b = work_file(&env, "b.txt", "bbb\n");
+    let c = work_file(&env, "c.txt", "ccc\n");
+    let mut p = open_all(&env, &[&a, &b, &c]);
+    p.wait_for("1 │ aaa", TIMEOUT);
+    esc_then(&mut p, ".");
+    p.wait_for("1 │ bbb", TIMEOUT);
+    p.send_keys(&["C-w"]);
+    p.wait_for("1 │ ccc", TIMEOUT);
+    wait_status(&p, "c.txt │ file 2 of 2");
+    assert_eq!(swap_files(&env).len(), 2);
+    type_text(&mut p, "1");
+    p.send_keys(&["C-w"]);
+    p.wait_for("Unsaved changes in c.txt", TIMEOUT);
+    p.send_keys(&["Esc"]);
+    p.wait_gone("Unsaved changes", TIMEOUT);
+    p.send_keys(&["C-w"]);
+    p.wait_for("Save and close", TIMEOUT);
+    p.send_str("y");
+    p.wait_for("1 │ aaa", TIMEOUT);
+    assert_eq!(fs::read_to_string(&c).unwrap(), "1ccc\n");
+    type_text(&mut p, "2");
+    p.send_keys(&["C-w"]);
+    p.wait_for("Unsaved changes", TIMEOUT);
+    p.send_str("n");
+    assert_eq!(p.wait_exit(TIMEOUT), 0);
+    assert_eq!(fs::read_to_string(&a).unwrap(), "aaa\n");
+    assert!(swap_files(&env).is_empty());
+}
+
+#[test]
+fn save_as_onto_a_file_open_here_is_refused() {
+    let env = Env::new();
+    let a = work_file(&env, "a.txt", "aaa\n");
+    let b = work_file(&env, "b.txt", "bbb\n");
+    let mut p = open_all(&env, &[&a, &b]);
+    p.wait_for("1 │ aaa", TIMEOUT);
+    save_as(&mut p, b.to_str().unwrap());
+    p.wait_for("close it first", TIMEOUT);
+    p.send_keys(&["Esc"]);
+    wait_insert(&p);
+    assert_eq!(fs::read_to_string(&b).unwrap(), "bbb\n");
+    assert_eq!(swap_files(&env).len(), 2);
+    quit_clean(&mut p);
+}
+
+#[test]
+fn an_empty_untitled_file_gives_way_but_one_with_text_stays() {
+    let env = Env::new();
+    let a = work_file(&env, "a.txt", "aaa\n");
+    let mut p = Pty::kyte(&bin(), &env.state, &[]);
+    p.wait_for("Ln 1, Col 1", TIMEOUT);
+    open_from_prompt(&mut p, a.to_str().unwrap());
+    p.wait_for("1 │ aaa", TIMEOUT);
+    assert!(!status(&p).contains("file 1"), "{}", status(&p));
+    assert_eq!(swap_files(&env).len(), 1);
+    quit_clean(&mut p);
+    let mut p = Pty::kyte(&bin(), &env.state, &[]);
+    p.wait_for("Ln 1, Col 1", TIMEOUT);
+    type_text(&mut p, "notes");
+    open_from_prompt(&mut p, a.to_str().unwrap());
+    p.wait_for("1 │ aaa", TIMEOUT);
+    wait_status(&p, "file 2 of 2, 1 more unsaved");
+    esc_then(&mut p, ".");
+    p.wait_for("1 │ notes", TIMEOUT);
+    p.kill9();
+}
+
+#[test]
+fn a_file_with_crashed_edits_can_be_left_without_quitting() {
+    let env = Env::new();
+    let a = work_file(&env, "a.txt", "aaa\n");
+    let b = work_file(&env, "b.txt", "bbb\n");
+    let mut p = env.open(&b);
+    type_text(&mut p, "lost ");
+    p.kill9();
+    let mut p = env.open(&a);
+    type_text(&mut p, "1");
+    open_from_prompt(&mut p, b.to_str().unwrap());
+    p.wait_for("Recover unsaved changes", TIMEOUT);
+    p.wait_for("Close this file", TIMEOUT);
+    p.send_str("q");
+    p.wait_for("1 │ 1aaa", TIMEOUT);
+    wait_status(&p, "a.txt [+]");
+    assert!(!status(&p).contains("file 1"), "{}", status(&p));
+    assert_eq!(print_swap(&env, &b), (0, "lost bbb\n".to_string()));
+    p.send_keys(&["C-q"]);
+    p.wait_for("Unsaved changes", TIMEOUT);
+    p.send_str("n");
+    assert_eq!(p.wait_exit(TIMEOUT), 0);
+    assert_eq!(print_swap(&env, &b), (0, "lost bbb\n".to_string()));
+}
+
+#[test]
+fn a_later_file_with_crashed_edits_stops_to_ask_then_the_rest_open() {
+    let env = Env::new();
+    let a = work_file(&env, "a.txt", "aaa\n");
+    let b = work_file(&env, "b.txt", "bbb\n");
+    let c = work_file(&env, "c.txt", "ccc\n");
+    let mut p = env.open(&b);
+    type_text(&mut p, "lost ");
+    p.kill9();
+    let mut p = Pty::kyte(
+        &bin(),
+        &env.state,
+        &[
+            a.to_str().unwrap(),
+            b.to_str().unwrap(),
+            c.to_str().unwrap(),
+        ],
+    );
+    p.wait_for("Recover unsaved changes", TIMEOUT);
+    p.send_str("r");
+    p.wait_for("1 │ aaa", TIMEOUT);
+    wait_status(&p, "file 1 of 3, 1 more unsaved");
+    esc_then(&mut p, ".");
+    p.wait_for("1 │ lost bbb", TIMEOUT);
+    esc_then(&mut p, ".");
+    p.wait_for("1 │ ccc", TIMEOUT);
+    p.send_keys(&["C-q"]);
+    p.wait_for("Unsaved changes in b.txt", TIMEOUT);
+    p.send_str("y");
+    assert_eq!(p.wait_exit(TIMEOUT), 0);
+    assert_eq!(fs::read_to_string(&b).unwrap(), "lost bbb\n");
+}
+
+#[test]
+fn a_file_kyte_cant_open_on_the_command_line_doesnt_stop_the_rest() {
+    let env = Env::new();
+    let a = work_file(&env, "a.txt", "aaa\n");
+    let bad = env.path("bin.dat");
+    fs::write(&bad, [0xff, 0xfe]).unwrap();
+    let c = work_file(&env, "c.txt", "ccc\n");
+    let mut p = open_all(&env, &[&a, &bad, &c]);
+    p.wait_for("not valid UTF-8", TIMEOUT);
+    wait_status(&p, "a.txt │ file 1 of 2");
+    assert_eq!(swap_files(&env).len(), 2);
+    quit_clean(&mut p);
+}
+
+#[test]
+fn a_change_to_a_file_not_on_screen_shows_up_when_you_look() {
+    let env = Env::new();
+    let a = work_file(&env, "a.txt", "aaa\n");
+    let b = work_file(&env, "b.txt", "bbb\n");
+    let mut p = open_all(&env, &[&a, &b]);
+    p.wait_for("1 │ aaa", TIMEOUT);
+    fs::write(&b, "outside\n").unwrap();
+    std::thread::sleep(Duration::from_millis(2300));
+    p.send_keys(&["Right"]);
+    esc_then(&mut p, ".");
+    wait_status(&p, "changed on disk");
+    quit_clean(&mut p);
+}
+
+#[test]
+fn two_spellings_of_a_new_file_open_once() {
+    let env = Env::new();
+    let dir = env.path("w");
+    fs::create_dir_all(dir.join("sub")).unwrap();
+    let link = dir.join("link");
+    std::os::unix::fs::symlink("sub/../new.txt", &link).unwrap();
+    let new = dir.join("new.txt");
+    let mut p = env.open(&link);
+    open_from_prompt(&mut p, new.to_str().unwrap());
+    p.wait_for("Already open", TIMEOUT);
+    assert_eq!(swap_files(&env).len(), 1);
+    quit_clean(&mut p);
+}
+
+#[test]
+fn a_symlink_moved_onto_an_open_file_cant_save_over_its_swap() {
+    let env = Env::new();
+    let a = work_file(&env, "a.txt", "aaa\n");
+    let b = work_file(&env, "b.txt", "bbb\n");
+    let link = a.parent().unwrap().join("link.txt");
+    std::os::unix::fs::symlink(&a, &link).unwrap();
+    let mut p = open_all(&env, &[&link, &b]);
+    p.wait_for("1 │ aaa", TIMEOUT);
+    esc_then(&mut p, ".");
+    p.wait_for("1 │ bbb", TIMEOUT);
+    type_text(&mut p, "precious ");
+    esc_then(&mut p, ",");
+    p.wait_for("1 │ aaa", TIMEOUT);
+    type_text(&mut p, "other ");
+    fs::remove_file(&link).unwrap();
+    std::os::unix::fs::symlink(&b, &link).unwrap();
+    p.send_keys(&["C-s"]);
+    p.wait_for("changed on disk", TIMEOUT);
+    p.send_str("y");
+    p.wait_for("That file is open here", TIMEOUT);
+    assert_eq!(fs::read_to_string(&b).unwrap(), "bbb\n");
+    p.kill9();
+    assert_eq!(print_swap(&env, &b), (0, "precious bbb\n".to_string()));
+}
+
+#[test]
+fn save_as_wont_overwrite_edits_left_by_a_crash() {
+    let env = Env::new();
+    let notes = env.path("work/notes.txt");
+    fs::create_dir_all(notes.parent().unwrap()).unwrap();
+    let a = work_file(&env, "a.txt", "aaa\n");
+    let mut p = env.open(&notes);
+    type_text(&mut p, "precious work");
+    p.kill9();
+    let mut p = env.open(&a);
+    save_as(&mut p, notes.to_str().unwrap());
+    p.wait_for("edits from a crash", TIMEOUT);
+    p.send_keys(&["Esc"]);
+    wait_insert(&p);
+    assert!(!notes.exists());
+    assert_eq!(print_swap(&env, &notes), (0, "precious work".to_string()));
+    quit_clean(&mut p);
+    assert_eq!(print_swap(&env, &notes), (0, "precious work".to_string()));
+}
+
+#[test]
+fn keeping_your_side_of_a_review_counts_as_unsaved() {
+    let env = Env::new();
+    let a = work_file(&env, "a.txt", "aaa\n");
+    let mut p = env.open(&a);
+    p.wait_for("1 │ aaa", TIMEOUT);
+    fs::write(&a, "theirs\n").unwrap();
+    wait_status(&p, "changed on disk");
+    open_overlay(&mut p);
+    p.send_str("c");
+    p.wait_for("Keep yours", TIMEOUT);
+    p.send_str("n");
+    p.wait_gone("Keep yours", TIMEOUT);
+    wait_status(&p, "a.txt [+]");
+    p.send_keys(&["C-w"]);
+    p.wait_for("Unsaved changes", TIMEOUT);
+    p.send_str("n");
+    assert_eq!(p.wait_exit(TIMEOUT), 0);
+}
+
+#[test]
+fn a_crash_right_after_keeping_your_side_of_a_review_loses_nothing() {
+    let env = Env::new();
+    let a = work_file(&env, "a.txt", "aaa\n");
+    let mut p = env.open(&a);
+    p.wait_for("1 │ aaa", TIMEOUT);
+    fs::write(&a, "theirs\n").unwrap();
+    wait_status(&p, "changed on disk");
+    open_overlay(&mut p);
+    p.send_str("c");
+    p.wait_for("Keep yours", TIMEOUT);
+    p.send_str("n");
+    wait_status(&p, "a.txt [+]");
+    p.kill9();
+    assert_eq!(print_swap(&env, &a), (0, "aaa\n".to_string()));
+    let mut p = Pty::kyte(&bin(), &env.state, &[a.to_str().unwrap()]);
+    p.wait_for("Recover unsaved changes", TIMEOUT);
+    p.send_str("r");
+    p.wait_for("1 │ aaa", TIMEOUT);
+    wait_status(&p, "a.txt [+]");
+    p.send_keys(&["C-q"]);
+    p.wait_for("Unsaved changes", TIMEOUT);
+    p.send_str("n");
+    assert_eq!(p.wait_exit(TIMEOUT), 0);
+}
+
+// ---------------------------------------------------------------- file tree
+
+/// A small project, and Kyte open on its README from inside it.
+fn in_project(env: &Env) -> (PathBuf, Pty) {
+    let project = env.path("proj");
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/lib.rs"), "fn lib() {}\n").unwrap();
+    fs::write(project.join("src/main.rs"), "fn main() {}\n").unwrap();
+    fs::write(project.join("README.md"), "# readme\n").unwrap();
+    let readme = project.join("README.md");
+    let p = open_in(env, &project, &readme);
+    p.wait_for("1 │ # readme", TIMEOUT);
+    (project, p)
+}
+
+fn selected(p: &Pty, name: &str) {
+    let name = name.to_string();
+    let what = format!("{name} to be selected");
+    p.wait_until(&what, TIMEOUT, move |s| {
+        s.lines().any(|l| l.contains("▸ ") && l.contains(&name))
+    });
+}
+
+#[test]
+fn the_tree_opens_on_the_current_file_and_a_file_from_it_stays_open_alongside() {
+    let env = Env::new();
+    let (_project, mut p) = in_project(&env);
+    p.send_keys(&["C-t"]);
+    p.wait_for("proj", TIMEOUT);
+    selected(&p, "README.md");
+    wait_status(&p, "FILES");
+    p.send_str("s");
+    selected(&p, "src/");
+    p.send_keys(&["Right"]);
+    p.wait_for("lib.rs", TIMEOUT);
+    p.send_keys(&["Down"]);
+    selected(&p, "lib.rs");
+    p.send_keys(&["Enter"]);
+    p.wait_for("1 │ fn lib() {}", TIMEOUT);
+    wait_status(&p, "lib.rs │ file 2 of 2");
+    open_overlay(&mut p);
+    p.send_str("t");
+    selected(&p, "lib.rs");
+    p.wait_for("open", TIMEOUT);
+    p.send_keys(&["Esc"]);
+    wait_insert(&p);
+    wait_status(&p, "lib.rs │ file 2 of 2");
+    quit_clean(&mut p);
+}
+
+#[test]
+fn choosing_an_open_file_in_the_tree_moves_to_it() {
+    let env = Env::new();
+    let (_project, mut p) = in_project(&env);
+    type_text(&mut p, "edit ");
+    p.send_keys(&["C-t"]);
+    selected(&p, "README.md");
+    p.wait_for("unsaved", TIMEOUT);
+    p.send_str("s");
+    selected(&p, "src/");
+    p.send_keys(&["Enter"]);
+    p.wait_for("main.rs", TIMEOUT);
+    p.send_keys(&["Down", "Down"]);
+    selected(&p, "main.rs");
+    p.send_keys(&["Enter"]);
+    p.wait_for("1 │ fn main() {}", TIMEOUT);
+    p.send_keys(&["C-t"]);
+    selected(&p, "main.rs");
+    p.send_str("r");
+    selected(&p, "README.md");
+    p.send_keys(&["Enter"]);
+    p.wait_for("1 │ edit # readme", TIMEOUT);
+    wait_status(&p, "README.md [+] │ file 1 of 2");
+    assert_eq!(swap_files(&env).len(), 2);
+    p.send_keys(&["C-q"]);
+    p.wait_for("Unsaved changes in README.md", TIMEOUT);
+    p.send_str("n");
+    assert_eq!(p.wait_exit(TIMEOUT), 0);
+}
+
+#[test]
+fn the_tree_shows_hidden_files_on_request_and_folds_with_left() {
+    let env = Env::new();
+    let (project, mut p) = in_project(&env);
+    fs::write(project.join(".env"), "A=1\n").unwrap();
+    p.send_keys(&["C-t"]);
+    selected(&p, "README.md");
+    assert!(!p.screen().contains(".env"), "{}", p.dump());
+    p.send_str(".");
+    p.wait_for("hidden files shown", TIMEOUT);
+    p.wait_for(".env", TIMEOUT);
+    p.send_str(".");
+    p.wait_gone(".env", TIMEOUT);
+    p.send_str("s");
+    selected(&p, "src/");
+    p.send_keys(&["Right"]);
+    p.wait_for("lib.rs", TIMEOUT);
+    p.send_keys(&["Left"]);
+    p.wait_gone("lib.rs", TIMEOUT);
+    p.send_keys(&["Esc"]);
+    wait_insert(&p);
+    quit_clean(&mut p);
+}
+
+#[test]
+fn a_file_the_tree_cant_open_is_reported_and_nothing_changes() {
+    let env = Env::new();
+    let (project, mut p) = in_project(&env);
+    fs::write(project.join("bin.dat"), [0xff, 0xfe]).unwrap();
+    p.send_keys(&["C-t"]);
+    selected(&p, "README.md");
+    p.send_str("b");
+    selected(&p, "bin.dat");
+    p.send_keys(&["Enter"]);
+    p.wait_for("not valid UTF-8", TIMEOUT);
+    wait_insert(&p);
+    assert!(!status(&p).contains("file 1"), "{}", status(&p));
+    assert_eq!(swap_files(&env).len(), 1);
+    quit_clean(&mut p);
+}
+
+// ---------------------------------------------------------------- writing
+
+/// Starts Kyte on `file` with the settings a person would have.
+fn open_writing(env: &Env, file: &Path, settings: &str) -> Pty {
+    let config = env.path("writing.toml");
+    fs::write(&config, settings).unwrap();
+    let p = Pty::spawn(
+        Spawn::new(bin())
+            .env("KYTE_STATE_DIR", env.state.to_string_lossy())
+            .env("KYTE_CONFIG", config.to_string_lossy())
+            .arg("--no-kitty")
+            .arg(file.to_str().unwrap()),
+    );
+    p.wait_for("Ln 1, Col 1", TIMEOUT);
+    p
+}
+
+#[test]
+fn text_and_markdown_open_for_writing() {
+    let env = Env::new();
+    let long = "word ".repeat(40);
+    let f = env.write("notes.md", &format!("# Title\n{long}\n"));
+    let mut p = open_writing(&env, &f, "");
+    p.wait_for("# Title", TIMEOUT);
+    p.wait_for("1 │ # Title", TIMEOUT);
+    wait_status(&p, "41 words");
+    assert!(
+        p.screen().lines().nth(2).unwrap().contains("word"),
+        "wrapped"
+    );
+    quit_clean(&mut p);
+}
+
+#[cfg(feature = "highlight")]
+#[test]
+fn latex_keeps_its_line_numbers_and_counts_only_what_a_reader_reads() {
+    let env = Env::new();
+    let text =
+        "\\documentclass{article}\n\\begin{document}\nOne two \\cite{a} three.\n\\end{document}\n";
+    let f = env.write("paper.tex", text);
+    let mut p = open_writing(&env, &f, "");
+    p.wait_for("1 │", TIMEOUT);
+    wait_status(&p, "3 words");
+    quit_clean(&mut p);
+}
+
+#[test]
+fn code_shows_as_code_and_each_file_keeps_its_own_view() {
+    let env = Env::new();
+    let md = env.write("a.md", "one two\n");
+    let rs = env.write("b.rs", "fn main() {}\n");
+    let mut p = open_writing(&env, &md, "");
+    p.wait_for("one two", TIMEOUT);
+    wait_status(&p, "2 words");
+    open_from_prompt(&mut p, rs.to_str().unwrap());
+    p.wait_for("1 │ fn main", TIMEOUT);
+    assert!(!status(&p).contains("words"), "{}", status(&p));
+    esc_then(&mut p, "l");
+    p.wait_gone("1 │ fn", TIMEOUT);
+    esc_then(&mut p, ",");
+    p.wait_for("1 │ one two", TIMEOUT);
+    wait_status(&p, "2 words");
+    esc_then(&mut p, ".");
+    p.wait_for("fn main", TIMEOUT);
+    assert!(!p.screen().contains("1 │ fn"), "{}", p.dump());
+    quit_clean(&mut p);
+}
+
+#[test]
+fn line_numbers_show_by_default_and_esc_l_toggles_them() {
+    let env = Env::new();
+    let f = env.write("notes.md", "one two\n");
+    let mut p = open_writing(&env, &f, "");
+    p.wait_for("1 │ one two", TIMEOUT);
+    open_overlay(&mut p);
+    p.wait_for("l line numbers", TIMEOUT);
+    p.send_str("l");
+    p.wait_gone("1 │ one", TIMEOUT);
+    p.wait_for("one two", TIMEOUT);
+    esc_then(&mut p, "l");
+    p.wait_for("1 │ one two", TIMEOUT);
+    quit_clean(&mut p);
+}
+
+#[test]
+fn the_line_numbers_setting_still_turns_them_off_everywhere() {
+    let env = Env::new();
+    let f = env.write("notes.md", "one two\n");
+    let mut p = open_writing(&env, &f, "line_numbers = false\n");
+    p.wait_for("one two", TIMEOUT);
+    assert!(!p.screen().contains("1 │ one"), "{}", p.dump());
+    quit_clean(&mut p);
+}
+
+#[test]
+fn the_writing_setting_turns_it_off() {
+    let env = Env::new();
+    let f = env.write("notes.md", "one two\n");
+    let mut p = open_writing(&env, &f, "writing = false\n");
+    p.wait_for("1 │ one two", TIMEOUT);
+    assert!(!status(&p).contains("words"), "{}", status(&p));
+    quit_clean(&mut p);
+}
+
+#[test]
+fn saving_under_a_writing_name_changes_the_view() {
+    let env = Env::new();
+    let a = work_file(&env, "a.rs", "one two\n");
+    let md = a.parent().unwrap().join("b.md");
+    let mut p = open_writing(&env, &a, "");
+    p.wait_for("1 │ one two", TIMEOUT);
+    save_as(&mut p, md.to_str().unwrap());
+    wait_status(&p, "2 words");
+    quit_clean(&mut p);
+}
+
+#[test]
+fn selecting_text_counts_its_words() {
+    let env = Env::new();
+    let f = env.write("notes.md", "one two three\n");
+    let mut p = open_writing(&env, &f, "");
+    p.wait_for("one two", TIMEOUT);
+    for _ in 0..7 {
+        p.send(b"\x1b[1;2C");
+    }
+    wait_status(&p, "2 words selected");
+    p.send_keys(&["C-q"]);
+    assert_eq!(p.wait_exit(TIMEOUT), 0);
+}
+
+// ---------------------------------------------------------------- spelling
+
+/// Whether `word` shows underlined. Screen columns are found from its text.
+#[cfg(feature = "spell")]
+fn word_underlined(p: &Pty, word: &str) -> bool {
+    let screen = p.screen();
+    screen.lines().enumerate().any(|(row, line)| {
+        line.find(word).is_some_and(|at| {
+            let col = line[..at].chars().count() as u16;
+            p.underlined(row as u16, col)
+        })
+    })
+}
+
+#[cfg(feature = "spell")]
+fn wait_underlined(p: &Pty, word: &str) {
+    let deadline = Instant::now() + TIMEOUT;
+    while !word_underlined(p, word) {
+        assert!(
+            Instant::now() < deadline,
+            "{word} isn't underlined\n{}",
+            p.dump()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[cfg(feature = "spell")]
+#[test]
+fn a_misspelled_word_is_underlined_and_can_be_fixed_then_undone() {
+    let env = Env::new();
+    let f = env.write("notes.md", "This is teh word.\n");
+    let mut p = open_writing(&env, &f, "");
+    p.wait_for("This is teh word", TIMEOUT);
+    wait_underlined(&p, "teh");
+    assert!(!word_underlined(&p, "This"), "{}", p.dump());
+    open_overlay(&mut p);
+    p.wait_for("next misspelling", TIMEOUT);
+    assert!(
+        !p.screen().contains("fix spelling"),
+        "not on a misspelling yet"
+    );
+    p.send_str("m");
+    wait_status(&p, "Col 9");
+    open_overlay(&mut p);
+    p.wait_for("fix spelling", TIMEOUT);
+    p.send_str("z");
+    p.wait_for("Fix teh", TIMEOUT);
+    p.wait_for("▸ the", TIMEOUT);
+    p.wait_for("Add teh to my words", TIMEOUT);
+    p.send_keys(&["Enter"]);
+    p.wait_for("This is the word", TIMEOUT);
+    p.send_keys(&["C-z"]);
+    p.wait_for("This is teh word", TIMEOUT);
+    p.send_keys(&["C-q"]);
+    p.wait_for("Unsaved changes", TIMEOUT);
+    p.send_str("n");
+    assert_eq!(p.wait_exit(TIMEOUT), 0);
+}
+
+#[cfg(feature = "spell")]
+#[test]
+fn a_word_you_add_stays_added_in_the_next_session() {
+    let env = Env::new();
+    let f = env.write("notes.md", "A kytely word.\n");
+    let mut p = open_writing(&env, &f, "");
+    wait_underlined(&p, "kytely");
+    esc_then(&mut p, "m");
+    open_overlay(&mut p);
+    p.send_str("z");
+    p.wait_for("Fix kytely", TIMEOUT);
+    p.send_str("add");
+    p.wait_for("▸ Add kytely to my words", TIMEOUT);
+    p.send_keys(&["Enter"]);
+    p.wait_for("Added kytely to your words", TIMEOUT);
+    assert_eq!(
+        fs::read_to_string(env.path("words.txt")).unwrap(),
+        "kytely\n"
+    );
+    quit_clean(&mut p);
+    let mut p = open_writing(&env, &f, "");
+    p.wait_for("A kytely word", TIMEOUT);
+    assert!(!word_underlined(&p, "kytely"), "{}", p.dump());
+    quit_clean(&mut p);
+}
+
+#[cfg(feature = "spell")]
+#[test]
+fn ignoring_a_word_lasts_only_until_kyte_closes() {
+    let env = Env::new();
+    let f = env.write("notes.md", "A kytely word.\n");
+    let mut p = open_writing(&env, &f, "");
+    wait_underlined(&p, "kytely");
+    esc_then(&mut p, "m");
+    open_overlay(&mut p);
+    p.send_str("z");
+    p.wait_for("Fix kytely", TIMEOUT);
+    p.send_str("ignore");
+    p.wait_for("▸ Ignore kytely for now", TIMEOUT);
+    p.send_keys(&["Enter"]);
+    wait_insert(&p);
+    assert!(!env.path("words.txt").exists());
+    assert!(!word_underlined(&p, "kytely"), "{}", p.dump());
+    quit_clean(&mut p);
+    let mut p = open_writing(&env, &f, "");
+    wait_underlined(&p, "kytely");
+    quit_clean(&mut p);
+}
+
+#[cfg(all(feature = "spell", feature = "highlight"))]
+#[test]
+fn latex_commands_math_and_citations_arent_spell_checked() {
+    let env = Env::new();
+    let text = concat!(
+        "\\documentclass{tehclass}\n",
+        "\\begin{document}\n",
+        "\\section{Introdction}\n",
+        "Prose wrongg here \\tehcmd{} and \\cite{tehkey} and $tehmath$.\n",
+        "% tehcomment\n",
+        "\\label{sec:tehlabel}\n",
+        "\\end{document}\n",
+    );
+    let f = env.write("paper.tex", text);
+    let mut p = open_writing(&env, &f, "");
+    wait_underlined(&p, "wrongg");
+    wait_underlined(&p, "Introdction");
+    for fine in [
+        "tehclass",
+        "tehcmd",
+        "tehkey",
+        "tehmath",
+        "tehcomment",
+        "tehlabel",
+    ] {
+        assert!(!word_underlined(&p, fine), "{fine}\n{}", p.dump());
+    }
+    quit_clean(&mut p);
+}
+
+#[cfg(all(feature = "spell", feature = "highlight"))]
+#[test]
+fn code_in_markdown_isnt_spell_checked() {
+    let env = Env::new();
+    let f = env.write("a.md", "Some wrongg text.\n\n```\nlet tehvar = 1;\n```\n");
+    let mut p = open_writing(&env, &f, "");
+    wait_underlined(&p, "wrongg");
+    assert!(!word_underlined(&p, "tehvar"), "{}", p.dump());
+    quit_clean(&mut p);
+}
+
+#[cfg(feature = "spell")]
+#[test]
+fn code_files_have_no_spell_check_until_asked() {
+    let env = Env::new();
+    let f = env.write("a.xyz", "wrongg\n");
+    let mut p = open_writing(&env, &f, "");
+    p.wait_for("wrongg", TIMEOUT);
+    assert!(!word_underlined(&p, "wrongg"), "{}", p.dump());
+    open_overlay(&mut p);
+    assert!(!p.screen().contains("next misspelling"), "{}", p.dump());
+    p.send_keys(&["Esc"]);
+    p.wait_for("Command palette", TIMEOUT);
+    p.send_keys(&["Esc"]);
+    wait_insert(&p);
+    run_from_palette(&mut p, "Toggle spell check");
+    wait_underlined(&p, "wrongg");
+    quit_clean(&mut p);
+}
+
+#[cfg(feature = "spell")]
+#[test]
+fn the_setting_turns_spell_check_off() {
+    let env = Env::new();
+    let f = env.write("a.md", "wrongg\n");
+    let mut p = open_writing(&env, &f, "spell_check = false\n");
+    p.wait_for("wrongg", TIMEOUT);
+    wait_status(&p, "1 word");
+    assert!(!word_underlined(&p, "wrongg"), "{}", p.dump());
+    esc_then(&mut p, "m");
+    p.wait_for("Spell check is off", TIMEOUT);
+    quit_clean(&mut p);
+}
+
+#[cfg(feature = "spell")]
+#[test]
+fn next_misspelling_wraps_and_says_when_there_are_none() {
+    let env = Env::new();
+    let f = env.write("a.md", "one wrongg\ntwo\nthree wrongger\n");
+    let mut p = open_writing(&env, &f, "");
+    wait_underlined(&p, "wrongg");
+    esc_then(&mut p, "m");
+    wait_status(&p, "Ln 1, Col 5");
+    esc_then(&mut p, "m");
+    wait_status(&p, "Ln 3, Col 7");
+    esc_then(&mut p, "m");
+    wait_status(&p, "Ln 1, Col 5");
+    quit_clean(&mut p);
+    let clean = env.write("b.md", "all fine\n");
+    let mut p = open_writing(&env, &clean, "");
+    esc_then(&mut p, "m");
+    p.wait_for("No misspellings", TIMEOUT);
+    quit_clean(&mut p);
+}
+
+#[cfg(feature = "highlight")]
+#[test]
+fn a_latex_word_count_catches_up_when_typing_pauses() {
+    let env = Env::new();
+    let f = env.write("paper.tex", "One two.\n");
+    let mut p = open_writing(&env, &f, "");
+    wait_status(&p, "2 words");
+    type_text(&mut p, "three ");
+    wait_status(&p, "3 words");
+    p.send_keys(&["C-q"]);
+    p.wait_for("Unsaved changes", TIMEOUT);
+    p.send_str("n");
+    assert_eq!(p.wait_exit(TIMEOUT), 0);
+}
+
+// ---------------------------------------------------------------- citations
+
+const REFS: &str = "@article{knuth84,\n  author = {Knuth, Donald},\n  title = {Literate Programming},\n  year = 1984,\n}\n@book{lamport94,\n  author = {Lamport, Leslie},\n  title = {LaTeX: A Document Preparation System},\n  year = 1994,\n}\n";
+
+/// A folder with `refs.bib`, and Kyte open on a paper in it.
+fn open_paper(env: &Env, tex: &str) -> (PathBuf, Pty) {
+    let paper = work_file(env, "paper.tex", tex);
+    fs::write(paper.parent().unwrap().join("refs.bib"), REFS).unwrap();
+    let p = open_writing(env, &paper, "");
+    p.wait_for("Ln 1, Col 1", TIMEOUT);
+    (paper, p)
+}
+
+/// Quits without saving and asks nothing more.
+fn abandon(p: &mut Pty) {
+    p.send_keys(&["C-q"]);
+    p.wait_for("Unsaved changes", TIMEOUT);
+    p.send_str("n");
+    assert_eq!(p.wait_exit(TIMEOUT), 0);
+}
+
+#[test]
+fn typing_a_citation_offers_the_bibliography_and_inserts_the_key() {
+    let env = Env::new();
+    let (_paper, mut p) = open_paper(&env, "As shown.\n");
+    p.send_str("\\cite{");
+    p.wait_for(" Cite ", TIMEOUT);
+    p.wait_for("knuth84  Knuth, Literate Programming (1984)", TIMEOUT);
+    p.wait_for("lamport94  Lamport", TIMEOUT);
+    p.send_str("lamport");
+    p.wait_for("▸ lamport94", TIMEOUT);
+    p.send_keys(&["Enter"]);
+    p.wait_for("\\cite{lamport94}As shown.", TIMEOUT);
+    p.wait_gone(" Cite ", TIMEOUT);
+    p.send_str(" more");
+    p.wait_for("\\cite{lamport94} moreAs shown.", TIMEOUT);
+    abandon(&mut p);
+}
+
+#[test]
+fn a_citation_can_be_found_by_author_or_title_and_holds_several_works() {
+    let env = Env::new();
+    let (_paper, mut p) = open_paper(&env, "x\n");
+    p.send_str("\\citep[p. 3]{");
+    p.wait_for(" Cite ", TIMEOUT);
+    p.send_str("Literate");
+    p.wait_for("▸ knuth84", TIMEOUT);
+    p.send_str(",");
+    p.wait_for("\\citep[p. 3]{knuth84,x", TIMEOUT);
+    p.send_str("Preparation");
+    p.wait_for("▸ lamport94", TIMEOUT);
+    p.send_keys(&["Enter"]);
+    p.wait_for("\\citep[p. 3]{knuth84,lamport94}x", TIMEOUT);
+    abandon(&mut p);
+}
+
+#[test]
+fn esc_leaves_the_citation_as_typed() {
+    let env = Env::new();
+    let (_paper, mut p) = open_paper(&env, "x\n");
+    p.send_str("\\cite{");
+    p.wait_for(" Cite ", TIMEOUT);
+    p.send_keys(&["Esc"]);
+    p.wait_gone(" Cite ", TIMEOUT);
+    p.wait_for("\\cite{x", TIMEOUT);
+    abandon(&mut p);
+}
+
+#[test]
+fn esc_q_starts_a_citation_or_fills_in_the_one_at_the_cursor() {
+    let env = Env::new();
+    let (_paper, mut p) = open_paper(&env, "\\cite{}\n");
+    p.send_keys(&["End"]);
+    open_overlay(&mut p);
+    p.wait_for("insert citation", TIMEOUT);
+    p.send_str("q");
+    p.wait_for(" Cite ", TIMEOUT);
+    p.send_keys(&["Enter"]);
+    p.wait_for("\\cite{}\\cite{knuth84}", TIMEOUT);
+    p.send_keys(&["Left"]);
+    p.send_keys(&["Home"]);
+    for _ in 0..6 {
+        p.send_keys(&["Right"]);
+    }
+    wait_status(&p, "Col 7");
+    open_overlay(&mut p);
+    p.send_str("q");
+    p.wait_for(" Cite ", TIMEOUT);
+    p.send_str("lamport");
+    p.wait_for("▸ lamport94", TIMEOUT);
+    p.send_keys(&["Enter"]);
+    p.wait_for("\\cite{lamport94}\\cite{knuth84}", TIMEOUT);
+    wait_status(&p, "Col 17");
+    abandon(&mut p);
+}
+
+#[test]
+fn with_no_bibliography_typing_is_left_alone_and_asking_says_so() {
+    let env = Env::new();
+    let paper = work_file(&env, "paper.tex", "x\n");
+    let mut p = open_writing(&env, &paper, "");
+    p.send_str("\\cite{");
+    p.wait_for("\\cite{x", TIMEOUT);
+    assert!(!p.screen().contains(" Cite "), "{}", p.dump());
+    esc_then(&mut p, "q");
+    p.wait_for("No references", TIMEOUT);
+    abandon(&mut p);
+}
+
+#[test]
+fn the_bibliography_the_paper_names_wins_over_one_beside_it() {
+    let env = Env::new();
+    let paper = work_file(&env, "paper.tex", "\\bibliography{lib/mine}\n");
+    let dir = paper.parent().unwrap();
+    fs::write(dir.join("other.bib"), "@misc{ignored, title = {No}}\n").unwrap();
+    fs::create_dir(dir.join("lib")).unwrap();
+    fs::write(dir.join("lib/mine.bib"), "@misc{chosen, title = {Yes}}\n").unwrap();
+    let mut p = open_writing(&env, &paper, "");
+    esc_then_box(&mut p);
+    p.wait_for("chosen  Yes", TIMEOUT);
+    assert!(!p.screen().contains("ignored"), "{}", p.dump());
+    p.send_keys(&["Esc"]);
+    wait_insert(&p);
+    abandon(&mut p);
+}
+
+fn esc_then_box(p: &mut Pty) {
+    open_overlay(p);
+    p.send_str("q");
+    p.wait_for(" Cite ", TIMEOUT);
+}
+
+#[test]
+fn a_reference_added_but_not_yet_saved_can_be_cited() {
+    let env = Env::new();
+    let (paper, mut p) = open_paper(&env, "x\n");
+    let refs = paper.parent().unwrap().join("refs.bib");
+    open_from_prompt(&mut p, refs.to_str().unwrap());
+    p.wait_for("@article{knuth84", TIMEOUT);
+    p.send_str("@misc{fresh, title = {New}}");
+    p.send_keys(&["Enter"]);
+    p.wait_for("@misc{fresh", TIMEOUT);
+    esc_then(&mut p, ",");
+    wait_status(&p, "paper.tex");
+    esc_then_box(&mut p);
+    p.wait_for("fresh  New", TIMEOUT);
+    p.send_keys(&["Esc"]);
+    wait_insert(&p);
+    run_from_palette(&mut p, "Quit without saving");
+    p.wait_for("Discard unsaved changes", TIMEOUT);
+    p.send_str("y");
+    assert_eq!(p.wait_exit(TIMEOUT), 0);
+}
+
+#[test]
+fn other_files_type_cite_as_plain_text() {
+    let env = Env::new();
+    let f = work_file(&env, "notes.md", "x\n");
+    fs::write(f.parent().unwrap().join("refs.bib"), REFS).unwrap();
+    let mut p = open_writing(&env, &f, "");
+    p.send_str("\\cite{");
+    p.wait_for("\\cite{x", TIMEOUT);
+    assert!(!p.screen().contains(" Cite "), "{}", p.dump());
+    abandon(&mut p);
+}
+
+// ---------------------------------------------------------------- building PDFs
+
+/// A paper, with `build_command` set to a script of the test's own.
+fn open_build(env: &Env, tex: &str, script: &str) -> (PathBuf, Pty) {
+    let paper = work_file(env, "paper.tex", tex);
+    let dir = paper.parent().unwrap();
+    fs::write(dir.join("build.sh"), script).unwrap();
+    let settings = "build_command = \"sh build.sh %f\"\npdf_command = \"sh show.sh %f\"\n";
+    let p = open_writing(env, &paper, settings);
+    (paper, p)
+}
+
+#[test]
+fn ctrl_b_saves_then_builds_in_the_papers_folder() {
+    let env = Env::new();
+    let script = "cat \"$1\" > seen.txt; pwd > where.txt; touch paper.pdf\n";
+    let (paper, mut p) = open_build(&env, "text\n", script);
+    type_text(&mut p, "new ");
+    p.send_keys(&["C-b"]);
+    p.wait_for("Built paper.pdf in", TIMEOUT);
+    let dir = paper.parent().unwrap();
+    assert_eq!(
+        fs::read_to_string(dir.join("seen.txt")).unwrap(),
+        "new text\n"
+    );
+    let found = fs::read_to_string(dir.join("where.txt")).unwrap();
+    assert_eq!(Path::new(found.trim()), dir.canonicalize().unwrap());
+    assert_eq!(fs::read_to_string(&paper).unwrap(), "new text\n");
+    quit_clean(&mut p);
+}
+
+#[test]
+fn a_failed_build_lists_its_errors_and_enter_goes_to_the_line() {
+    let env = Env::new();
+    let script = "echo './paper.tex:3: Undefined control sequence.'; echo './paper.tex:1: Other.'; exit 12\n";
+    let (_paper, mut p) = open_build(&env, "one\ntwo\nthree\n", script);
+    p.send_keys(&["C-b"]);
+    p.wait_for("2 build problems", TIMEOUT);
+    p.wait_for("▸ paper.tex:3  Undefined control sequence.", TIMEOUT);
+    p.send_keys(&["Enter"]);
+    wait_status(&p, "Ln 3, Col 1");
+    assert!(!p.screen().contains("build problems"), "{}", p.dump());
+    run_from_palette(&mut p, "Show build problems");
+    p.wait_for("2 build problems", TIMEOUT);
+    p.send_keys(&["Down", "Enter"]);
+    wait_status(&p, "Ln 1, Col 1");
+    quit_clean(&mut p);
+}
+
+#[test]
+fn an_error_in_another_file_opens_that_file() {
+    let env = Env::new();
+    let script = "echo './ch1.tex:2: Boom.'; exit 1\n";
+    let (paper, mut p) = open_build(&env, "\\input{ch1}\n", script);
+    fs::write(paper.parent().unwrap().join("ch1.tex"), "a\nb\n").unwrap();
+    p.send_keys(&["C-b"]);
+    p.wait_for("▸ ch1.tex:2  Boom.", TIMEOUT);
+    p.send_keys(&["Enter"]);
+    wait_status(&p, "ch1.tex");
+    wait_status(&p, "Ln 2, Col 1");
+    quit_clean(&mut p);
+}
+
+#[test]
+fn a_build_with_undefined_references_succeeds_and_says_so() {
+    let env = Env::new();
+    let script = "echo \"LaTeX Warning: Citation \\`foo' on page 1 undefined on input line 2.\"\n";
+    let (_paper, mut p) = open_build(&env, "one\ntwo\n", script);
+    p.send_keys(&["C-b"]);
+    p.wait_for("Built paper.pdf with 1 warning", TIMEOUT);
+    assert!(
+        !p.screen().contains("build problem "),
+        "no box for a warning\n{}",
+        p.dump()
+    );
+    run_from_palette(&mut p, "Show build problems");
+    p.wait_for("▸ paper.tex:2  Citation `foo' on page 1 undefined", TIMEOUT);
+    p.send_keys(&["Enter"]);
+    wait_status(&p, "Ln 2, Col 1");
+    quit_clean(&mut p);
+}
+
+#[test]
+fn a_failure_with_nothing_to_list_says_what_it_can() {
+    let env = Env::new();
+    let (_paper, mut p) = open_build(&env, "x\n", "echo 'it went wrong'; exit 3\n");
+    p.send_keys(&["C-b"]);
+    p.wait_for("Build failed: it went wrong", TIMEOUT);
+    quit_clean(&mut p);
+}
+
+#[test]
+fn typing_carries_on_during_a_build_and_it_can_be_stopped() {
+    let env = Env::new();
+    let script = "sleep 2 && touch finished.txt\n";
+    let (paper, mut p) = open_build(&env, "x\n", script);
+    p.send_keys(&["C-b"]);
+    wait_status(&p, "building PDF");
+    type_text(&mut p, "typed ");
+    p.send_keys(&["C-b"]);
+    p.wait_for("Already building", TIMEOUT);
+    run_from_palette(&mut p, "Stop build");
+    p.wait_for("Build stopped", TIMEOUT);
+    assert!(!status(&p).contains("building"), "{}", status(&p));
+    std::thread::sleep(Duration::from_millis(2300));
+    assert!(!paper.parent().unwrap().join("finished.txt").exists());
+    run_from_palette(&mut p, "Stop build");
+    p.wait_for("No build is running", TIMEOUT);
+    abandon(&mut p);
+}
+
+#[test]
+fn quitting_stops_a_build_and_doesnt_wait_for_it() {
+    let env = Env::new();
+    let script = "sleep 3 && touch finished.txt\n";
+    let (paper, mut p) = open_build(&env, "x\n", script);
+    p.send_keys(&["C-b"]);
+    wait_status(&p, "building PDF");
+    let start = Instant::now();
+    quit_clean(&mut p);
+    assert!(
+        start.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        start.elapsed()
+    );
+    std::thread::sleep(Duration::from_millis(3300));
+    assert!(!paper.parent().unwrap().join("finished.txt").exists());
+}
+
+#[test]
+fn only_latex_builds_and_a_missing_latexmk_is_explained() {
+    let env = Env::new();
+    let f = work_file(&env, "notes.md", "x\n");
+    let mut p = open_writing(&env, &f, "");
+    p.send_keys(&["C-b"]);
+    p.wait_for("Build PDF works on LaTeX files", TIMEOUT);
+    quit_clean(&mut p);
+    let paper = work_file(&env, "paper.tex", "x\n");
+    let empty = env.path("no-programs");
+    fs::create_dir(&empty).unwrap();
+    let mut p = Pty::spawn(
+        Spawn::new(bin())
+            .env("KYTE_STATE_DIR", env.state.to_string_lossy())
+            .env("PATH", empty.to_string_lossy())
+            .arg("--no-kitty")
+            .arg(paper.to_str().unwrap()),
+    );
+    p.wait_for("Ln 1, Col 1", TIMEOUT);
+    p.send_keys(&["C-b"]);
+    p.wait_for("latexmk isn't installed", TIMEOUT);
+    quit_clean(&mut p);
+}
+
+#[test]
+fn latex_tools_work_with_the_writing_setup_off() {
+    let env = Env::new();
+    let paper = work_file(&env, "paper.tex", "x\n");
+    let dir = paper.parent().unwrap();
+    fs::write(dir.join("refs.bib"), REFS).unwrap();
+    let settings = "writing = false\nbuild_command = \"true\"\n";
+    let mut p = open_writing(&env, &paper, settings);
+    p.wait_for("1 │ x", TIMEOUT);
+    assert!(!status(&p).contains("word"), "{}", status(&p));
+    p.send_str("\\cite{");
+    p.wait_for(" Cite ", TIMEOUT);
+    p.send_keys(&["Enter"]);
+    p.wait_for("\\cite{knuth84}x", TIMEOUT);
+    p.send_keys(&["C-b"]);
+    p.wait_for("Built paper.pdf", TIMEOUT);
+    quit_clean(&mut p);
+}
+
+#[test]
+fn a_chapter_builds_the_root_it_names() {
+    let env = Env::new();
+    let paper = work_file(&env, "ch1.tex", "% !TEX root = thesis.tex\ntext\n");
+    let dir = paper.parent().unwrap();
+    fs::write(dir.join("thesis.tex"), "\\documentclass{book}\n").unwrap();
+    fs::write(dir.join("build.sh"), "echo \"$1\" > built.txt\n").unwrap();
+    let mut p = open_writing(&env, &paper, "build_command = \"sh build.sh %f\"\n");
+    p.send_keys(&["C-b"]);
+    p.wait_for("Built thesis.pdf", TIMEOUT);
+    assert_eq!(
+        fs::read_to_string(dir.join("built.txt")).unwrap(),
+        "thesis.tex\n"
+    );
+    quit_clean(&mut p);
+}
+
+#[test]
+fn esc_o_shows_the_pdf_once_there_is_one() {
+    let env = Env::new();
+    let (paper, mut p) = open_build(&env, "x\n", "touch paper.pdf\n");
+    let dir = paper.parent().unwrap();
+    fs::write(dir.join("show.sh"), "echo \"$1\" > shown.txt\n").unwrap();
+    open_overlay(&mut p);
+    p.wait_for("open PDF", TIMEOUT);
+    p.send_str("o");
+    p.wait_for("No PDF yet", TIMEOUT);
+    p.send_keys(&["C-b"]);
+    p.wait_for("Built paper.pdf", TIMEOUT);
+    esc_then(&mut p, "o");
+    let shown = dir.join("shown.txt");
+    let deadline = Instant::now() + TIMEOUT;
+    while !shown.exists() {
+        assert!(Instant::now() < deadline, "the viewer didn't run");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    quit_clean(&mut p);
+    assert_eq!(fs::read_to_string(&shown).unwrap().trim(), "paper.pdf");
+}
+
+#[test]
+fn a_build_problem_goes_to_the_paper_that_was_built_whatever_is_on_screen() {
+    let env = Env::new();
+    let script = "echo './paper.tex:2: Boom.'; exit 1\n";
+    let settings = "build_command = \"sh build.sh %f\"\n";
+    let root = env.path("papers");
+    let (a, b) = (root.join("a"), root.join("b"));
+    fs::create_dir_all(&a).unwrap();
+    fs::create_dir_all(&b).unwrap();
+    fs::write(a.join("paper.tex"), "a1\nright project\n").unwrap();
+    fs::write(b.join("paper.tex"), "b1\nwrong project\n").unwrap();
+    fs::write(a.join("build.sh"), script).unwrap();
+    let notes = root.join("notes.rs");
+    fs::write(&notes, "fn notes() {}\n").unwrap();
+    let mut p = open_writing(&env, &a.join("paper.tex"), settings);
+    p.send_keys(&["C-b"]);
+    p.wait_for("▸ paper.tex:2  Boom.", TIMEOUT);
+    p.send_keys(&["Esc"]);
+    wait_insert(&p);
+    open_from_prompt(&mut p, b.join("paper.tex").to_str().unwrap());
+    p.wait_for("wrong project", TIMEOUT);
+    run_from_palette(&mut p, "Show build problems");
+    p.wait_for("▸ paper.tex:2  Boom.", TIMEOUT);
+    p.send_keys(&["Enter"]);
+    p.wait_for("right project", TIMEOUT);
+    wait_status(&p, "Ln 2, Col 1");
+    assert!(!p.screen().contains("Already open"), "{}", p.dump());
+    open_from_prompt(&mut p, notes.to_str().unwrap());
+    p.wait_for("fn notes", TIMEOUT);
+    run_from_palette(&mut p, "Show build problems");
+    p.wait_for("▸ paper.tex:2  Boom.", TIMEOUT);
+    p.send_keys(&["Enter"]);
+    p.wait_for("right project", TIMEOUT);
+    quit_clean(&mut p);
+}
+
+#[test]
+fn a_build_problem_in_a_file_thats_gone_says_so_and_makes_nothing() {
+    let env = Env::new();
+    let script = "echo './gone.tex:2: Boom.'; exit 1\n";
+    let (paper, mut p) = open_build(&env, "x\n", script);
+    p.send_keys(&["C-b"]);
+    p.wait_for("▸ gone.tex:2  Boom.", TIMEOUT);
+    p.send_keys(&["Enter"]);
+    p.wait_for("gone.tex is gone", TIMEOUT);
+    assert!(!status(&p).contains("gone.tex"), "{}", status(&p));
+    assert!(!paper.parent().unwrap().join("gone.tex").exists());
+    quit_clean(&mut p);
+}
+
+#[test]
+fn a_warning_inside_a_chapter_opens_that_chapter() {
+    let env = Env::new();
+    let script = "cat log.txt\n";
+    let (paper, mut p) = open_build(&env, "root one\nroot two\n", script);
+    let dir = paper.parent().unwrap();
+    fs::create_dir(dir.join("ch")).unwrap();
+    fs::write(dir.join("ch/one.tex"), "a\nb\nchapter line\n").unwrap();
+    let log = "This is pdfTeX\n(./paper.tex\n(./ch/one.tex\n\nLaTeX Warning: Citation `x' on page 1 undefined on input line 3.\n\n))\n";
+    fs::write(dir.join("log.txt"), log).unwrap();
+    p.send_keys(&["C-b"]);
+    p.wait_for("with 1 warning", TIMEOUT);
+    run_from_palette(&mut p, "Show build problems");
+    p.wait_for("▸ ch/one.tex:3  Citation", TIMEOUT);
+    p.send_keys(&["Enter"]);
+    p.wait_for("chapter line", TIMEOUT);
+    wait_status(&p, "one.tex");
+    wait_status(&p, "Ln 3, Col 1");
+    quit_clean(&mut p);
+}
+
+#[test]
+fn a_bibliography_that_isnt_a_plain_file_cant_hang_the_editor() {
+    let env = Env::new();
+    let paper = work_file(&env, "paper.tex", "x\n");
+    let dir = paper.parent().unwrap();
+    fs::write(dir.join("good.bib"), REFS).unwrap();
+    std::os::unix::fs::symlink("/dev/zero", dir.join("zero.bib")).unwrap();
+    let fifo = dir.join("pipe.bib");
+    rustix::fs::mknodat(
+        rustix::fs::CWD,
+        &fifo,
+        rustix::fs::FileType::Fifo,
+        rustix::fs::Mode::from_raw_mode(0o600),
+        0,
+    )
+    .unwrap();
+    let huge = fs::File::create(dir.join("huge.bib")).unwrap();
+    huge.set_len(33 * 1024 * 1024).unwrap();
+    let mut p = open_writing(&env, &paper, "");
+    p.send_str("\\cite{");
+    p.wait_for(" Cite ", TIMEOUT);
+    p.wait_for("knuth84", TIMEOUT);
+    p.wait_for("Left out 3 bibliography files", TIMEOUT);
+    p.send_keys(&["Esc"]);
+    wait_insert(&p);
+    abandon(&mut p);
+}
+
+#[test]
+fn a_named_bibliography_outside_the_folder_still_works() {
+    let env = Env::new();
+    let refs = env.path("shared/lib.bib");
+    fs::create_dir_all(refs.parent().unwrap()).unwrap();
+    fs::write(&refs, "@misc{far, title = {Away}}\n").unwrap();
+    let tex = format!("\\bibliography{{{}}}\n", refs.display());
+    let paper = work_file(&env, "paper.tex", &tex);
+    let mut p = open_writing(&env, &paper, "");
+    esc_then_box(&mut p);
+    p.wait_for("far  Away", TIMEOUT);
+    p.send_keys(&["Esc"]);
+    wait_insert(&p);
+    abandon(&mut p);
+}
+
+#[cfg(all(feature = "spell", feature = "highlight"))]
+#[test]
+fn next_misspelling_walks_a_long_paper_in_batches_and_wraps() {
+    let env = Env::new();
+    let body = "A fine line of text.\n".repeat(450);
+    let tex = format!("wrongg top\n{body}$tehmath$ and wrongger there\n");
+    let f = env.write("paper.tex", &tex);
+    let mut p = open_writing(&env, &f, "");
+    wait_underlined(&p, "wrongg");
+    esc_then(&mut p, "m");
+    wait_status(&p, "Ln 452, Col 15");
+    esc_then(&mut p, "m");
+    wait_status(&p, "Ln 1, Col 1");
+    quit_clean(&mut p);
 }

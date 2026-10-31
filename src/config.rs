@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 use crate::buffer::Indent;
 use crate::cli::Options;
+use crate::ui::theme::ThemeName;
 
 const MAX_TAB_WIDTH: usize = 16;
 
@@ -27,6 +28,21 @@ pub const TEMPLATE: &str = r#"# Kyte settings. Remove the # from a line to use i
 
 # Wrap long lines at the edge of the screen.
 # soft_wrap = false
+
+# Show Markdown, text and LaTeX files for writing: wrapped, with a word count.
+# writing = true
+
+# Underline misspelled words in writing.
+# spell_check = true
+
+# What builds a LaTeX file, run in its folder. %f is the file.
+# build_command = "latexmk -pdf -interaction=nonstopmode -file-line-error %f"
+
+# What shows a PDF.
+# pdf_command = "xdg-open %f"
+
+# Colors: "signal", "harbor", "dusk", "ember", "moss" or "daybreak".
+# theme = "signal"
 
 # Milliseconds to press Esc a second time for the palette.
 # esc_ms = 300
@@ -88,6 +104,11 @@ fn apply(opts: &mut Options, key: &str, value: &str) -> Option<Result<(), ()>> {
         }
         "line_numbers" => opts.line_numbers = boolean(value)?,
         "soft_wrap" => opts.soft_wrap = boolean(value)?,
+        "writing" => opts.writing = boolean(value)?,
+        "spell_check" => opts.spell_check = boolean(value)?,
+        "build_command" => opts.build_command = Some(value.to_string()),
+        "pdf_command" => opts.pdf_command = Some(value.to_string()),
+        "theme" => opts.theme = ThemeName::parse(value)?,
         "esc_ms" => opts.esc_ms = number(value, 10_000)?,
         "history" => opts.no_history = !boolean(value)?,
         "history_limit_mb" => {
@@ -206,6 +227,16 @@ mod tests {
         assert_eq!(o.esc_ms, 500);
         assert!(o.no_history);
         assert_eq!(o.history_limit_mb, 20);
+    }
+
+    #[test]
+    fn the_theme_setting_is_read_and_a_bad_one_is_reported() {
+        let (o, p) = parsed("theme = \"daybreak\"\n");
+        assert!(p.is_empty(), "{p:?}");
+        assert_eq!(o.theme, ThemeName::Daybreak);
+        let (o, p) = parsed("theme = \"sepia\"\n");
+        assert_eq!(p, vec!["line 1: bad value for theme".to_string()]);
+        assert_eq!(o.theme, ThemeName::Signal);
     }
 
     #[test]

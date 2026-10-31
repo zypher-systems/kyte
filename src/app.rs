@@ -5,7 +5,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 
+use crate::bib;
 use crate::buffer::{Buffer, Edit, GroupKind, Indent};
+use crate::build::{self, Build, Outcome, Problem};
 use crate::cli::Options;
 use crate::command::{self, Command};
 use crate::fileio::{self, DiskState};
@@ -17,8 +19,11 @@ use crate::reader::{self, Reader};
 use crate::review::{self, Change as ReviewChange};
 use crate::search;
 use crate::session::{self, Opened};
+use crate::spell::{self, Speller};
 use crate::swap::{self, RecoverInfo, SwapStatus, SwapWriter};
-use crate::syntax;
+use crate::syntax::{self, Prose};
+use crate::tree::FileTree;
+use crate::ui::theme::ThemeName;
 
 /// How soon after Esc a `[` or `O` counts as the rest of a split key sequence.
 /// A person can't reach those keys this fast, and they do nothing in the layer.
@@ -53,6 +58,8 @@ pub enum Mode {
         timeline: SharedTimeline,
         at: usize,
     },
+    /// The file tree.
+    Tree(FileTree),
     /// The "Show key help" modal, scrolled to row `top`; Esc closes it.
     Help {
         top: usize,
@@ -104,6 +111,10 @@ pub enum Prompt {
         path: std::path::PathBuf,
         then: After,
     },
+    /// "Quit without saving" with `count` other files unsaved.
+    ConfirmDiscardOthers {
+        count: usize,
+    },
 }
 
 /// What a save was for.
@@ -111,7 +122,10 @@ pub enum Prompt {
 pub enum After {
     Stay,
     Quit,
-    Open(std::path::PathBuf),
+    /// Close the file on screen.
+    Close,
+    /// Build the PDF.
+    Build,
 }
 
 /// A review of outside changes in progress.
@@ -179,18 +193,35 @@ enum EscTail {
     Ss3,
 }
 
-pub struct App {
+/// The settings that decide how a file shows.
+#[derive(Debug, Clone, Copy)]
+struct View {
+    line_numbers: bool,
+    soft_wrap: bool,
+    writing: bool,
+    spell_check: bool,
+}
+
+/// One open file and everything tied to it.
+pub struct Doc {
     pub buffer: Buffer,
-    pub mode: Mode,
-    /// Shown on the message line until the next key.
-    pub message: Option<String>,
-    /// The message is an error (drawn in the error style).
-    pub message_is_error: bool,
-    pub show_line_numbers: bool,
-    pub esc_window: Duration,
-    pub quit: bool,
     /// Leave the swap on disk at exit (Recover modal `q`).
     pub keep_swap: bool,
+    /// While quitting, the answer was to discard this file's changes.
+    discard: bool,
+    /// What kind of writing this is, if it isn't code.
+    pub prose: Option<Prose>,
+    /// It shows for writing: the word count, and the view that goes with it.
+    writing: bool,
+    /// This file's spelling is being checked.
+    spelling: bool,
+    /// LaTeX's words, counted when typing pauses, because that needs a parse.
+    latex_words: Option<usize>,
+    /// The text has changed since `latex_words` was counted.
+    recount: bool,
+    pub line_numbers: bool,
+    /// Long lines wrap at the edge of the screen.
+    pub soft_wrap: bool,
     swap: Option<SwapWriter>,
     /// Canonical path the swap is keyed by.
     swap_target: Option<std::path::PathBuf>,
@@ -198,6 +229,161 @@ pub struct App {
     disk: Option<DiskState>,
     /// A swap write failed, so the swap no longer holds every edit.
     swap_failed: bool,
+    history: Option<FileHistory>,
+    /// A history write failed, so no more are being kept.
+    history_failed: bool,
+    /// The file's text as last read or written, what a review compares with.
+    disk_text: Option<ropey::Rope>,
+    /// The file's size and time when last checked, to spot a change cheaply.
+    disk_stamp: Option<(u64, std::time::SystemTime)>,
+    /// The file on disk has moved on and the change hasn't been reviewed.
+    outside_change: bool,
+    scroll_top: usize,
+    scroll_left: usize,
+    /// With soft wrap, which row of the top line is at the top of the screen.
+    scroll_row: usize,
+}
+
+impl Doc {
+    fn new(buffer: Buffer, swap: Option<SwapWriter>) -> Doc {
+        let swap_target = buffer.path().and_then(|p| fileio::resolve_target(p).ok());
+        let disk = Some(DiskState::of_rope(buffer.rope()));
+        let disk_text = Some(buffer.rope().clone());
+        Doc {
+            buffer,
+            keep_swap: false,
+            discard: false,
+            prose: None,
+            writing: false,
+            spelling: false,
+            latex_words: None,
+            recount: false,
+            line_numbers: true,
+            soft_wrap: false,
+            swap,
+            swap_target,
+            disk,
+            swap_failed: false,
+            history: None,
+            history_failed: false,
+            disk_text,
+            disk_stamp: None,
+            outside_change: false,
+            scroll_top: 0,
+            scroll_left: 0,
+            scroll_row: 0,
+        }
+    }
+
+    /// Sets how this file shows, from its kind and the settings.
+    fn with_view(mut self, view: View) -> Doc {
+        self.set_view(view);
+        self
+    }
+
+    fn set_view(&mut self, view: View) {
+        let head = self.buffer.head();
+        self.prose = self.buffer.path().and_then(|p| syntax::prose(p, &head));
+        self.writing = view.writing && self.prose.is_some();
+        self.spelling = view.spell_check && self.writing;
+        self.soft_wrap = view.soft_wrap || self.writing;
+        self.line_numbers = view.line_numbers;
+    }
+
+    fn name(&self) -> String {
+        self.buffer
+            .path()
+            .and_then(|p| p.file_name())
+            .map_or("Untitled".to_string(), |n| n.to_string_lossy().into_owned())
+    }
+
+    /// Whether this is the empty file Kyte starts with when given none. It
+    /// gives way to the first file opened.
+    fn is_blank(&self) -> bool {
+        self.buffer.path().is_none()
+            && !self.buffer.is_dirty()
+            && self.buffer.rope().len_chars() == 0
+    }
+
+    /// Whether a crash now could lose this file's edits.
+    fn unprotected(&self) -> bool {
+        self.swap.is_none() || self.swap_failed
+    }
+
+    /// Whether quitting has to ask about this file.
+    fn needs_answer(&self) -> bool {
+        self.buffer.is_dirty() && !self.discard
+    }
+
+    /// Syncs the swap and history to disk. Returns what went wrong.
+    fn sync(&mut self) -> Option<String> {
+        if let Some(w) = self.swap.as_mut() {
+            if let Err(e) = w.fsync_if_pending() {
+                self.swap_failed = true;
+                return Some(format!("Swap fsync failed: {e}"));
+            }
+        }
+        if let Some(h) = self.history.as_mut() {
+            if let Err(e) = h.fsync_if_pending() {
+                self.history = None;
+                self.history_failed = true;
+                return Some(format!("History write failed: {e}"));
+            }
+        }
+        None
+    }
+
+    /// Looks for a change on disk. Returns whether the answer moved.
+    fn check_disk(&mut self) -> bool {
+        let Some(path) = self.buffer.path().map(|p| p.to_path_buf()) else {
+            return false;
+        };
+        let Ok(meta) = std::fs::metadata(&path) else {
+            return false;
+        };
+        let stamp = meta.modified().ok().map(|t| (meta.len(), t));
+        if stamp == self.disk_stamp {
+            return false;
+        }
+        self.disk_stamp = stamp;
+        let changed = matches!(fileio::disk_state(&path), Ok(Some(s)) if Some(s) != self.disk);
+        let moved = changed != self.outside_change;
+        self.outside_change = changed;
+        moved
+    }
+
+    /// Ends this file's session: closes its history and removes its swap,
+    /// unless the swap must stay.
+    fn close(&mut self) {
+        let text = self.buffer.rope().clone();
+        if let Some(h) = self.history.as_mut() {
+            let _ = h.close(&text);
+        }
+        self.history = None;
+        if let Some(w) = self.swap.take() {
+            if self.keep_swap {
+                let _ = { w }.fsync_if_pending();
+            } else {
+                let _ = w.remove();
+            }
+        }
+    }
+}
+
+pub struct App {
+    pub doc: Doc,
+    /// The other open files, in order. The file on screen sits before `parked[at]`.
+    parked: Vec<Doc>,
+    at: usize,
+    /// Files from the command line still to open.
+    queued: std::collections::VecDeque<std::path::PathBuf>,
+    pub mode: Mode,
+    /// Shown on the message line until the next key.
+    pub message: Option<String>,
+    /// The message is an error (drawn in the error style).
+    pub message_is_error: bool,
+    pub esc_window: Duration,
+    pub quit: bool,
     /// Characters still to discard from a split key sequence.
     esc_tail: Option<(EscTail, Instant)>,
     clipboard: String,
@@ -207,22 +393,14 @@ pub struct App {
     terminal_output: Option<String>,
     /// Names Tab found in a file prompt, shown until the next key.
     pub completions: Vec<String>,
+    pub theme: ThemeName,
     /// File history is wanted this session.
     history_on: bool,
     history_limit: u64,
     /// What Tab inserts in a file with no indent to go by.
     default_indent: Indent,
-    history: Option<FileHistory>,
-    /// A history write failed, so no more are being kept.
-    history_failed: bool,
     /// The version being browsed, while `Mode::History` is open.
     version_view: Option<Buffer>,
-    /// The file's text as last read or written, what a review compares with.
-    disk_text: Option<ropey::Rope>,
-    /// The file's size and time when last checked, to spot a change cheaply.
-    disk_stamp: Option<(u64, std::time::SystemTime)>,
-    /// The file on disk has moved on and the change hasn't been reviewed.
-    outside_change: bool,
     /// Something changed on screen with no key pressed.
     needs_redraw: bool,
     /// The view lines of the change on screen: (yours, theirs).
@@ -230,16 +408,42 @@ pub struct App {
     /// Reader mode's state, while it's open.
     pub reader: Option<Reader>,
     last_fsync: Option<Instant>,
-    scroll_top: usize,
-    scroll_left: usize,
-    /// With soft wrap, which row of the top line is at the top of the screen.
-    scroll_row: usize,
-    /// Long lines wrap at the edge of the screen.
-    pub soft_wrap: bool,
+    /// The settings a file starts with.
+    default_view: View,
+    /// Loaded the first time a file needs it.
+    speller: Option<Speller>,
+    /// The PDF being built.
+    build: Option<Build>,
+    /// What the last build reported, and the folder its paths start from.
+    build_problems: Vec<Problem>,
+    build_dir: std::path::PathBuf,
+    build_command: Option<String>,
+    pdf_command: Option<String>,
+    last_key: Option<Instant>,
     /// The column Up and Down hold to while moving by wrapped rows.
     visual_col: Option<usize>,
     view: (u16, u16),
 }
+
+/// The end of a count's word: `s` unless there's one.
+fn plural(n: usize) -> &'static str {
+    if n == 1 {
+        ""
+    } else {
+        "s"
+    }
+}
+
+/// A bibliography is read on a keypress, so past this it's left out.
+const MAX_BIBLIOGRAPHY_BYTES: u64 = 32 * 1024 * 1024;
+/// How many lines a LaTeX file is searched for misspellings at a time, because
+/// parsing it is slow and the next one is usually close.
+const SPELL_BATCH: usize = 200;
+
+/// Counting words reads the whole file on every key, so past this it stops.
+const MAX_COUNTED_BYTES: usize = 2 * 1024 * 1024;
+/// How long typing stops before a LaTeX file's words are counted again.
+const RECOUNT_PAUSE: Duration = Duration::from_millis(500);
 
 /// Shown on the message line only while the overlay is open (section 5.4).
 /// The Esc layer's core keys, shown on top of whatever the context adds.
@@ -254,6 +458,8 @@ pub const LEGEND: &[(&str, &str)] = &[
     ("s", "save"),
     ("h", "history"),
     ("v", "reader mode"),
+    ("t", "file tree"),
+    ("l", "line numbers"),
 ];
 
 /// The double-tap key, listed last.
@@ -262,44 +468,44 @@ const PALETTE_KEY: (&str, &str) = ("Esc Esc", "palette");
 impl App {
     pub fn new(mut buffer: Buffer, swap: Option<SwapWriter>, opts: &Options) -> App {
         buffer.default_indent_to(opts.default_indent);
-        let swap_target = buffer.path().and_then(|p| fileio::resolve_target(p).ok());
-        let disk = Some(DiskState::of_rope(buffer.rope()));
-        let disk_text = Some(buffer.rope().clone());
+        let default_view = View {
+            line_numbers: opts.line_numbers,
+            soft_wrap: opts.soft_wrap,
+            writing: opts.writing,
+            spell_check: opts.spell_check,
+        };
         App {
-            keep_swap: false,
-            swap,
-            swap_target,
-            disk,
-            swap_failed: false,
+            doc: Doc::new(buffer, swap).with_view(default_view),
+            speller: None,
+            last_key: None,
+            build: None,
+            build_problems: Vec::new(),
+            build_dir: std::path::PathBuf::new(),
+            build_command: opts.build_command.clone(),
+            pdf_command: opts.pdf_command.clone(),
+            parked: Vec::new(),
+            at: 0,
+            queued: Default::default(),
             esc_tail: None,
             clipboard: String::new(),
             clipboard_whole_line: false,
             terminal_output: None,
             completions: Vec::new(),
+            theme: opts.theme,
             history_on: false,
             history_limit: opts.history_limit_mb.saturating_mul(1_000_000),
             default_indent: opts.default_indent,
-            history: None,
-            history_failed: false,
             version_view: None,
-            disk_text,
-            disk_stamp: None,
-            outside_change: false,
             needs_redraw: false,
             review_marks: None,
             reader: None,
             last_fsync: None,
-            buffer,
             mode: Mode::Insert,
             message: None,
             message_is_error: false,
-            show_line_numbers: opts.line_numbers,
             esc_window: Duration::from_millis(opts.esc_ms),
             quit: false,
-            scroll_top: 0,
-            scroll_left: 0,
-            scroll_row: 0,
-            soft_wrap: opts.soft_wrap,
+            default_view,
             visual_col: None,
             view: (0, 0),
         }
@@ -307,7 +513,7 @@ impl App {
 
     /// The buffer on screen: the version being browsed, or the file.
     pub fn view_buffer(&self) -> &Buffer {
-        self.version_view.as_ref().unwrap_or(&self.buffer)
+        self.version_view.as_ref().unwrap_or(&self.doc.buffer)
     }
 
     /// Starts keeping history for this session.
@@ -318,42 +524,41 @@ impl App {
 
     /// Points the history at the current file and text.
     fn start_history(&mut self) {
-        self.history = None;
-        self.history_failed = false;
+        self.doc.history = None;
+        self.doc.history_failed = false;
         if self.history_on {
-            self.history = self
-                .swap_target
-                .as_ref()
-                .map(|t| FileHistory::new(t, self.buffer.rope()).with_limit(self.history_limit));
+            self.doc.history = self.doc.swap_target.as_ref().map(|t| {
+                FileHistory::new(t, self.doc.buffer.rope()).with_limit(self.history_limit)
+            });
         }
     }
 
     /// Runs one history write. A failure stops history but never the editing.
     fn with_history(&mut self, f: impl FnOnce(&mut FileHistory) -> std::io::Result<()>) {
-        let Some(h) = self.history.as_mut() else {
+        let Some(h) = self.doc.history.as_mut() else {
             return;
         };
         if let Err(e) = f(h) {
-            self.history = None;
-            self.history_failed = true;
+            self.doc.history = None;
+            self.doc.history_failed = true;
             self.set_error(format!("History write failed: {e}"));
         }
     }
 
     /// Whether edits have stopped reaching the history.
     pub fn history_lost(&self) -> bool {
-        self.history_failed
+        self.doc.history_failed
     }
 
     /// The row of the top line at the top of the screen, with soft wrap.
     pub fn scroll_row(&self) -> usize {
-        self.scroll_row
+        self.doc.scroll_row
     }
 
     /// Columns of text beside the gutter.
     fn text_width(&self) -> usize {
         let buf = self.view_buffer();
-        let gw = crate::ui::text_view::gutter_width(buf.line_count(), self.show_line_numbers);
+        let gw = crate::ui::text_view::gutter_width(buf.line_count(), self.doc.line_numbers);
         (self.view.0 as usize).saturating_sub(gw).max(1)
     }
 
@@ -378,21 +583,21 @@ impl App {
             l -= 1;
             r = rows_of(l).len() - 1;
         }
-        let top_rows = rows_of(self.scroll_top.min(line)).len();
-        let mut at = (self.scroll_top, self.scroll_row.min(top_rows - 1));
+        let top_rows = rows_of(self.doc.scroll_top.min(line)).len();
+        let mut at = (self.doc.scroll_top, self.doc.scroll_row.min(top_rows - 1));
         if (line, row) < at {
             at = (line, row);
         } else if at < (l, r) {
             at = (l, r);
         }
-        (self.scroll_top, self.scroll_row) = at;
-        self.scroll_left = 0;
+        (self.doc.scroll_top, self.doc.scroll_row) = at;
+        self.doc.scroll_left = 0;
     }
 
     /// One wrapped row up or down, holding the column.
     fn visual_step(&mut self, down: bool) {
         let width = self.text_width();
-        let b = &self.buffer;
+        let b = &self.doc.buffer;
         let line = b.cursor_line();
         let text = b.line_text(line);
         let segments = crate::wrap::segments(&text, width);
@@ -428,13 +633,13 @@ impl App {
             at = at.saturating_sub(1);
         }
         let target = b.line_start(target_line) + seg.chars.start + at;
-        self.buffer.move_to(target);
+        self.doc.buffer.move_to(target);
         self.visual_col = Some(col);
     }
 
     /// (top line, left display column) of the text view.
     pub fn scroll(&self) -> (usize, usize) {
-        (self.scroll_top, self.scroll_left)
+        (self.doc.scroll_top, self.doc.scroll_left)
     }
 
     fn text_height(&self) -> usize {
@@ -448,30 +653,34 @@ impl App {
     /// Records the terminal size and scrolls so the cursor stays visible.
     /// Call before every render.
     pub fn layout(&mut self, width: u16, height: u16) {
+        let counted = self.doc.writing && self.doc.prose == Some(Prose::Latex);
+        if counted && self.doc.latex_words.is_none() {
+            self.count_latex();
+        }
         self.view = (width, height);
         let h = (height as usize).saturating_sub(2).max(1);
-        if self.soft_wrap {
+        if self.doc.soft_wrap {
             let w = self.text_width();
             self.layout_wrapped(h, w);
             return;
         }
         let buf = self.view_buffer();
-        let gw = crate::ui::text_view::gutter_width(buf.line_count(), self.show_line_numbers);
+        let gw = crate::ui::text_view::gutter_width(buf.line_count(), self.doc.line_numbers);
         let w = (width as usize).saturating_sub(gw).max(1);
         let line = buf.cursor_line();
         let lines = buf.line_count();
         let col = buf.cursor_display_col();
-        if line < self.scroll_top {
-            self.scroll_top = line;
-        } else if line >= self.scroll_top + h {
-            self.scroll_top = line + 1 - h;
+        if line < self.doc.scroll_top {
+            self.doc.scroll_top = line;
+        } else if line >= self.doc.scroll_top + h {
+            self.doc.scroll_top = line + 1 - h;
         }
         let max_top = lines.saturating_sub(1);
-        self.scroll_top = self.scroll_top.min(max_top);
-        if col < self.scroll_left {
-            self.scroll_left = col;
-        } else if col >= self.scroll_left + w {
-            self.scroll_left = col + 1 - w;
+        self.doc.scroll_top = self.doc.scroll_top.min(max_top);
+        if col < self.doc.scroll_left {
+            self.doc.scroll_left = col;
+        } else if col >= self.doc.scroll_left + w {
+            self.doc.scroll_left = col + 1 - w;
         }
     }
 
@@ -533,17 +742,18 @@ impl App {
 
     /// Write-ahead: every edit reaches `write()` before anything else happens.
     fn flush_edits(&mut self) {
-        let edits = self.buffer.take_pending_edits();
+        let edits = self.doc.buffer.take_pending_edits();
         if edits.is_empty() {
             return;
         }
+        self.doc.recount = true;
         self.with_history(|h| h.append(&edits));
-        if self.swap_failed {
+        if self.doc.swap_failed {
             return;
         }
-        if let Some(w) = self.swap.as_mut() {
+        if let Some(w) = self.doc.swap.as_mut() {
             if let Err(e) = w.append(&edits) {
-                self.swap_failed = true;
+                self.doc.swap_failed = true;
                 self.set_error(format!("Swap write failed: {e}"));
             }
         }
@@ -553,7 +763,7 @@ impl App {
     /// working swap, so it can't scroll away like a message.
     pub fn recovery_off(&self) -> bool {
         let recovering = matches!(self.mode, Mode::Recover(_));
-        !recovering && (self.swap.is_none() || self.swap_failed)
+        !recovering && (self.doc.swap.is_none() || self.doc.swap_failed)
     }
 
     /// Bytes waiting to go to the terminal, such as a clipboard copy.
@@ -563,23 +773,20 @@ impl App {
 
     /// Whether a swap file is being written.
     pub fn swap_path(&self) -> Option<&std::path::Path> {
-        self.swap.as_ref().map(|w| w.path())
+        self.doc.swap.as_ref().map(|w| w.path())
     }
 
-    /// Called once after the event loop: removes the swap unless it must be kept.
+    /// Called once after the event loop: removes the swaps unless they must be kept.
     pub fn finish(&mut self) {
-        let text = self.buffer.rope().clone();
-        self.with_history(|h| h.close(&text));
-        if let Some(w) = self.swap.take() {
-            if self.keep_swap {
-                let _ = { w }.fsync_if_pending();
-            } else {
-                let _ = w.remove();
-            }
+        if let Some(b) = self.build.as_mut() {
+            b.stop();
         }
+        self.doc.close();
+        self.parked.iter_mut().for_each(Doc::close);
     }
 
     fn key_inner(&mut self, key: Key, now: Instant) {
+        self.last_key = Some(now);
         self.message = None;
         self.message_is_error = false;
         self.completions.clear();
@@ -599,6 +806,7 @@ impl App {
             Mode::Insert => self.insert_key(key, now),
             Mode::Overlay { opened_at } => self.overlay_key(key, opened_at, now),
             Mode::Palette(state) => self.palette_key(key, state),
+            Mode::Tree(tree) => self.tree_key(key, tree),
             Mode::Prompt(Prompt::Search { query, origin }) => self.search_key(key, query, origin),
             Mode::Prompt(Prompt::GotoLine { text }) => self.goto_key(key, text),
             Mode::Prompt(Prompt::ReplaceFind { query }) => self.replace_find_key(key, query),
@@ -644,9 +852,15 @@ impl App {
                 }
                 Key::Char('n') => {
                     self.mode = Mode::Insert;
+                    self.doc.discard = then == After::Quit;
                     self.after_save(then);
                 }
                 Key::Esc => self.mode = Mode::Insert,
+                _ => {}
+            },
+            Mode::Prompt(Prompt::ConfirmDiscardOthers { .. }) => match key {
+                Key::Char('y') => self.quit = true,
+                Key::Char('n') | Key::Esc => self.mode = Mode::Insert,
                 _ => {}
             },
             Mode::Prompt(Prompt::ConfirmSave { risk, path, then }) => match key {
@@ -673,22 +887,22 @@ impl App {
         match key {
             Key::Char('r') if info.recovered.is_some() => {
                 let text = info.recovered.clone().unwrap_or_default();
-                let path = self.buffer.path().map(|p| p.to_path_buf());
-                self.buffer = Buffer::from_str(&text, path);
-                self.buffer.default_indent_to(self.default_indent);
-                self.buffer.set_dirty();
+                let path = self.doc.buffer.path().map(|p| p.to_path_buf());
+                self.doc.buffer = Buffer::from_str(&text, path);
+                self.doc.buffer.default_indent_to(self.default_indent);
+                self.doc.buffer.set_dirty();
                 self.mode = Mode::Insert;
                 if info.file_changed {
                     // Saving this version replaces what's on disk, so ask first.
-                    self.disk = None;
-                    self.disk_text = None;
+                    self.doc.disk = None;
+                    self.doc.disk_text = None;
                 }
                 self.start_history();
-                let recovered = self.buffer.rope().clone();
+                let recovered = self.doc.buffer.rope().clone();
                 self.with_history(|h| h.snapshot(&recovered, SnapshotKind::Recovered));
                 match SwapWriter::adopt(&info.swap_path) {
                     Ok(w) => {
-                        self.swap = Some(w);
+                        self.doc.swap = Some(w);
                         self.set_message("Recovered unsaved changes; Ctrl-S saves them");
                     }
                     Err(e) => {
@@ -702,33 +916,39 @@ impl App {
                 let fresh = if info.target.as_os_str().is_empty() {
                     SwapWriter::create_untitled()
                 } else {
-                    SwapWriter::create(&info.target, self.buffer.rope())
+                    SwapWriter::create(&info.target, self.doc.buffer.rope())
                 };
                 match fresh {
                     Ok(w) => {
-                        self.swap = Some(w);
+                        self.doc.swap = Some(w);
                         self.set_message("Discarded the swap file");
                     }
                     Err(e) => self.set_error(format!("Discarded the swap; new swap failed: {e}")),
                 }
             }
             Key::Char('q') | Key::Esc => {
-                self.keep_swap = true;
-                self.quit = true;
+                self.doc.keep_swap = true;
+                self.mode = Mode::Insert;
+                self.close_file_now();
             }
             _ => {}
         }
     }
 
     fn insert_key(&mut self, key: Key, now: Instant) {
-        let b = &mut self.buffer;
+        let b = &mut self.doc.buffer;
         match key {
             Key::Esc | Key::Ctrl(' ') => self.mode = Mode::Overlay { opened_at: now },
             Key::Ctrl('p') => self.open_palette(),
             Key::Ctrl('k') => self.open_universal(),
             Key::Ctrl('f') => self.open_search(),
             Key::Ctrl('r') => self.open_replace(),
-            Key::Char(c) => b.insert_str(&c.to_string(), GroupKind::Typing),
+            Key::Char(c) => {
+                b.insert_str(&c.to_string(), GroupKind::Typing);
+                if c == '{' && self.in_citation() {
+                    self.open_citations(false);
+                }
+            }
             Key::Enter => b.insert_newline(),
             Key::Tab => b.insert_tab(),
             Key::BackTab => b.shift_lines(true),
@@ -747,9 +967,9 @@ impl App {
             Key::WordLeft => self.motion(Motion::WordLeft),
             Key::WordRight => self.motion(Motion::WordRight),
             Key::Select(m) => {
-                let anchor = self.buffer.selection_anchor();
+                let anchor = self.doc.buffer.selection_anchor();
                 self.motion(m);
-                self.buffer.set_selection_anchor(anchor);
+                self.doc.buffer.set_selection_anchor(anchor);
             }
             Key::WordBackspace => {
                 if !b.delete_selection() {
@@ -770,6 +990,9 @@ impl App {
             Key::Ctrl('s') => self.save(),
             Key::Ctrl('o') => self.open_prompt(),
             Key::Ctrl('q') => self.request_quit(),
+            Key::Ctrl('w') => self.close_file(),
+            Key::Ctrl('t') => self.open_tree(),
+            Key::Ctrl('b') => self.build_pdf(),
             Key::Ctrl('z') => self.undo(),
             Key::Ctrl('y') => self.redo(),
             _ => {}
@@ -779,11 +1002,11 @@ impl App {
     /// Moves the cursor. A plain move also ends any selection.
     fn motion(&mut self, m: Motion) {
         let page = self.text_height() as isize;
-        let b = &mut self.buffer;
+        let b = &mut self.doc.buffer;
         match m {
             Motion::Left => b.move_left(),
             Motion::Right => b.move_right(),
-            Motion::Up | Motion::Down | Motion::PageUp | Motion::PageDown if self.soft_wrap => {
+            Motion::Up | Motion::Down | Motion::PageUp | Motion::PageDown if self.doc.soft_wrap => {
                 let steps = if matches!(m, Motion::Up | Motion::Down) {
                     1
                 } else {
@@ -810,7 +1033,7 @@ impl App {
     /// The text Ctrl-C or Ctrl-X takes: the selection, or the whole line with
     /// its line ending. `None` when there is nothing to take.
     fn clip_text(&self) -> Option<(String, bool)> {
-        let b = &self.buffer;
+        let b = &self.doc.buffer;
         if let Some(r) = b.selection() {
             return Some((b.slice_string(r), false));
         }
@@ -860,7 +1083,7 @@ impl App {
         if whole_line {
             self.op_line();
         } else {
-            self.buffer.delete_selection();
+            self.doc.buffer.delete_selection();
         }
         self.set_clipboard(text, whole_line);
     }
@@ -874,22 +1097,22 @@ impl App {
         let text = self
             .clipboard
             .replace("\r\n", "\n")
-            .replace('\n', self.buffer.eol());
-        if self.clipboard_whole_line && self.buffer.selection().is_none() {
-            let start = self.buffer.line_start(self.buffer.cursor_line());
-            self.buffer.move_to(start);
+            .replace('\n', self.doc.buffer.eol());
+        if self.clipboard_whole_line && self.doc.buffer.selection().is_none() {
+            let start = self.doc.buffer.line_start(self.doc.buffer.cursor_line());
+            self.doc.buffer.move_to(start);
         }
-        self.buffer.insert_str(&text, GroupKind::Paste);
+        self.doc.buffer.insert_str(&text, GroupKind::Paste);
     }
 
     fn overlay_key(&mut self, key: Key, opened_at: Instant, now: Instant) {
         self.mode = Mode::Insert;
         let split = now.saturating_duration_since(opened_at) <= ESC_TAIL_WINDOW;
-        let selecting = self.buffer.selection().is_some();
+        let selecting = self.doc.buffer.selection().is_some();
         match key {
             Key::Char('[') if split => self.esc_tail = Some((EscTail::Csi, now)),
             Key::Char('O') if split => self.esc_tail = Some((EscTail::Ss3, now)),
-            Key::Esc if selecting => self.buffer.clear_selection(),
+            Key::Esc if selecting => self.doc.buffer.clear_selection(),
             Key::Esc => {
                 if now.saturating_duration_since(opened_at) <= self.esc_window {
                     self.open_palette();
@@ -904,33 +1127,39 @@ impl App {
 
     /// The file's path, when Kyte can parse its language.
     fn code_path(&self) -> Option<&std::path::Path> {
-        let head = self.buffer.head();
-        self.buffer.path().filter(|p| syntax::supported(p, &head))
+        let head = self.doc.buffer.head();
+        self.doc
+            .buffer
+            .path()
+            .filter(|p| syntax::supported(p, &head))
     }
 
     /// Whether the file's language has functions to work with.
     fn has_functions(&self) -> bool {
-        let head = self.buffer.head();
-        self.buffer
+        let head = self.doc.buffer.head();
+        self.doc
+            .buffer
             .path()
             .is_some_and(|p| syntax::has_functions(p, &head))
     }
 
     fn comment_prefix(&self) -> Option<&'static str> {
-        let head = self.buffer.head();
-        self.buffer
+        let head = self.doc.buffer.head();
+        self.doc
+            .buffer
             .path()
             .and_then(|p| syntax::comment_prefix(p, &head))
     }
 
     /// Whether the cursor is on a bracket that has a partner.
     fn on_bracket(&self) -> bool {
-        let at = self.buffer.cursor();
-        self.buffer
+        let at = self.doc.buffer.cursor();
+        self.doc
+            .buffer
             .rope()
             .get_char(at)
             .is_some_and(|c| "()[]{}".contains(c))
-            && ops::match_bracket(self.buffer.rope(), at).is_some()
+            && ops::match_bracket(self.doc.buffer.rope(), at).is_some()
     }
 
     /// The Esc layer's keys, for where the cursor is now. Each one here needs
@@ -939,7 +1168,7 @@ impl App {
         let code = self.code_path().is_some();
         let comment = self.comment_prefix().is_some();
         let mut rows = Vec::new();
-        if self.buffer.selection().is_some() {
+        if self.doc.buffer.selection().is_some() {
             rows.extend([("x", "cut"), ("c", "copy")]);
             rows.extend([("/", "find this"), ("R", "replace this")]);
             if comment {
@@ -953,7 +1182,25 @@ impl App {
             return rows;
         }
         rows.extend_from_slice(LEGEND);
-        if self.outside_change {
+        if self.doc.prose == Some(Prose::Latex) {
+            rows.push(("q", "insert citation"));
+            rows.push(("g", "build PDF"));
+            rows.push(("o", "open PDF"));
+        }
+        if self.checks_spelling() {
+            if self.misspelled_at_cursor().is_some() {
+                rows.push(("z", "fix spelling"));
+            }
+            rows.push(("m", "next misspelling"));
+        }
+        if self.open_count() > 1 {
+            rows.extend([
+                ("b", "open files"),
+                (".", "next file"),
+                (",", "previous file"),
+            ]);
+        }
+        if self.doc.outside_change {
             rows.push(("c", "review outside changes"));
         }
         if self.on_bracket() {
@@ -988,7 +1235,17 @@ impl App {
             's' => self.save(),
             'h' => self.open_history(),
             'v' => self.open_reader(),
-            'c' if self.outside_change => self.open_review(),
+            't' => self.open_tree(),
+            'l' => self.run_command(Command::ToggleLineNumbers),
+            'q' if self.doc.prose == Some(Prose::Latex) => self.insert_citation(),
+            'g' if self.doc.prose == Some(Prose::Latex) => self.build_pdf(),
+            'o' if self.doc.prose == Some(Prose::Latex) => self.open_pdf(),
+            'z' => self.fix_spelling(),
+            'm' => self.next_misspelling(),
+            'b' => self.open_files_list(),
+            '.' => self.next_file(1),
+            ',' => self.next_file(self.open_count() - 1),
+            'c' if self.doc.outside_change => self.open_review(),
             'i' if self.on_bracket() => self.select_inside_brackets(),
             '#' => self.toggle_comment(),
             'e' if self.code_path().is_some() => self.expand_selection(),
@@ -1006,9 +1263,9 @@ impl App {
             '/' => self.open_search(),
             'R' => self.open_replace(),
             '#' => self.toggle_comment(),
-            'U' => self.buffer.transform_selection(|s| s.to_uppercase()),
-            'L' => self.buffer.transform_selection(|s| s.to_lowercase()),
-            'S' => self.buffer.sort_lines(),
+            'U' => self.doc.buffer.transform_selection(|s| s.to_uppercase()),
+            'L' => self.doc.buffer.transform_selection(|s| s.to_lowercase()),
+            'S' => self.doc.buffer.sort_lines(),
             'e' if self.code_path().is_some() => self.expand_selection(),
             _ => {}
         }
@@ -1016,14 +1273,16 @@ impl App {
 
     fn toggle_comment(&mut self) {
         if let Some(prefix) = self.comment_prefix() {
-            self.buffer.toggle_comment(prefix);
+            self.doc.buffer.toggle_comment(prefix);
         }
     }
 
     fn select_inside_brackets(&mut self) {
-        let at = self.buffer.cursor();
-        if let Some(other) = ops::match_bracket(self.buffer.rope(), at) {
-            self.buffer.select_range(at.min(other) + 1..at.max(other));
+        let at = self.doc.buffer.cursor();
+        if let Some(other) = ops::match_bracket(self.doc.buffer.rope(), at) {
+            self.doc
+                .buffer
+                .select_range(at.min(other) + 1..at.max(other));
         }
     }
 
@@ -1033,15 +1292,19 @@ impl App {
         f: impl FnOnce(&std::path::Path, &str, usize) -> Option<T>,
     ) -> Option<T> {
         let path = self.code_path()?;
-        let at = self.buffer.rope().char_to_byte(self.buffer.cursor());
-        f(path, &self.buffer.to_string(), at)
+        let at = self
+            .doc
+            .buffer
+            .rope()
+            .char_to_byte(self.doc.buffer.cursor());
+        f(path, &self.doc.buffer.to_string(), at)
     }
 
     /// Selects a byte range of the text.
     fn select_bytes(&mut self, r: std::ops::Range<usize>) {
-        let rope = self.buffer.rope();
+        let rope = self.doc.buffer.rope();
         let range = rope.byte_to_char(r.start)..rope.byte_to_char(r.end);
-        self.buffer.select_range(range);
+        self.doc.buffer.select_range(range);
     }
 
     fn select_function(&mut self) {
@@ -1053,11 +1316,12 @@ impl App {
 
     /// Selects the piece of syntax around the selection or cursor.
     fn expand_selection(&mut self) {
-        let rope = self.buffer.rope();
+        let rope = self.doc.buffer.rope();
         let chars = self
+            .doc
             .buffer
             .selection()
-            .unwrap_or(self.buffer.cursor()..self.buffer.cursor());
+            .unwrap_or(self.doc.buffer.cursor()..self.doc.buffer.cursor());
         let bytes = rope.char_to_byte(chars.start)..rope.char_to_byte(chars.end);
         match self.with_code(|p, t, _| syntax::expand(p, t, bytes)) {
             Some(r) => self.select_bytes(r),
@@ -1073,8 +1337,8 @@ impl App {
         });
         match found {
             Some(b) => {
-                let at = self.buffer.rope().byte_to_char(b);
-                self.buffer.move_to(at);
+                let at = self.doc.buffer.rope().byte_to_char(b);
+                self.doc.buffer.move_to(at);
             }
             None => self.set_message("No more functions"),
         }
@@ -1084,18 +1348,20 @@ impl App {
     pub fn open_search(&mut self) {
         let query = self.selected_query();
         let origin = self
+            .doc
             .buffer
             .selection()
-            .map_or(self.buffer.cursor(), |r| r.start);
-        self.buffer.move_to(origin);
+            .map_or(self.doc.buffer.cursor(), |r| r.start);
+        self.doc.buffer.move_to(origin);
         self.mode = Mode::Prompt(Prompt::Search { query, origin });
     }
 
     /// The selection as a starting query, if it fits on one line.
     fn selected_query(&self) -> String {
-        self.buffer
+        self.doc
+            .buffer
             .selection()
-            .map(|r| self.buffer.slice_string(r))
+            .map(|r| self.doc.buffer.slice_string(r))
             .filter(|s| !s.contains('\n'))
             .unwrap_or_default()
     }
@@ -1114,27 +1380,27 @@ impl App {
     fn search_key(&mut self, key: Key, mut query: String, origin: usize) {
         match key {
             Key::Esc => {
-                let at = self.buffer.cursor();
-                if !search::matches_at(self.buffer.rope(), &query, at) {
-                    self.buffer.move_to(origin);
+                let at = self.doc.buffer.cursor();
+                if !search::matches_at(self.doc.buffer.rope(), &query, at) {
+                    self.doc.buffer.move_to(origin);
                 }
                 self.mode = Mode::Insert;
                 return;
             }
             Key::Enter | Key::Down | Key::Ctrl('f') => {
                 if !query.is_empty() {
-                    let at = self.buffer.cursor();
-                    match search::find_next(self.buffer.rope(), &query, at) {
-                        Some(i) => self.buffer.move_to(i),
+                    let at = self.doc.buffer.cursor();
+                    match search::find_next(self.doc.buffer.rope(), &query, at) {
+                        Some(i) => self.doc.buffer.move_to(i),
                         None => self.set_error("No match"),
                     }
                 }
             }
             Key::Up => {
                 if !query.is_empty() {
-                    let at = self.buffer.cursor();
-                    match search::find_prev(self.buffer.rope(), &query, at) {
-                        Some(i) => self.buffer.move_to(i),
+                    let at = self.doc.buffer.cursor();
+                    match search::find_prev(self.doc.buffer.rope(), &query, at) {
+                        Some(i) => self.doc.buffer.move_to(i),
                         None => self.set_error("No match"),
                     }
                 }
@@ -1155,13 +1421,13 @@ impl App {
     /// Jumps to the first match at or after `origin`, or back to `origin`.
     fn incremental(&mut self, query: &str, origin: usize) {
         if query.is_empty() {
-            self.buffer.move_to(origin);
+            self.doc.buffer.move_to(origin);
             return;
         }
-        match search::find_from(self.buffer.rope(), query, origin) {
-            Some(i) => self.buffer.move_to(i),
+        match search::find_from(self.doc.buffer.rope(), query, origin) {
+            Some(i) => self.doc.buffer.move_to(i),
             None => {
-                self.buffer.move_to(origin);
+                self.doc.buffer.move_to(origin);
                 self.set_error("No match");
             }
         }
@@ -1170,8 +1436,8 @@ impl App {
     /// Opens the replace prompt, starting from the selection if there is one.
     fn open_replace(&mut self) {
         let query = self.selected_query();
-        if let Some(r) = self.buffer.selection() {
-            self.buffer.move_to(r.start);
+        if let Some(r) = self.doc.buffer.selection() {
+            self.doc.buffer.move_to(r.start);
         }
         self.mode = Mode::Prompt(Prompt::ReplaceFind { query });
     }
@@ -1205,7 +1471,7 @@ impl App {
                 return;
             }
             Key::Enter => {
-                let from = self.buffer.cursor();
+                let from = self.doc.buffer.cursor();
                 let run = ReplaceRun {
                     query,
                     with,
@@ -1227,7 +1493,7 @@ impl App {
 
     /// Stops at the next match from `from`, or finishes.
     fn replace_advance(&mut self, mut run: ReplaceRun, from: usize) {
-        let rope = self.buffer.rope();
+        let rope = self.doc.buffer.rope();
         let mut hit = search::find_forward(rope, &run.query, from);
         if hit.is_none() && !run.wrapped {
             run.wrapped = true;
@@ -1235,7 +1501,7 @@ impl App {
         }
         match hit.filter(|i| !run.wrapped || *i < run.origin) {
             Some(i) => {
-                self.buffer.move_to(i);
+                self.doc.buffer.move_to(i);
                 self.mode = Mode::Prompt(Prompt::ReplaceConfirm(run));
             }
             None => self.finish_replace(run.count),
@@ -1252,13 +1518,14 @@ impl App {
     }
 
     fn replace_confirm_key(&mut self, key: Key, mut run: ReplaceRun) {
-        let at = self.buffer.cursor();
+        let at = self.doc.buffer.cursor();
         match key {
             Key::Char('y') => {
                 let edit = self.replacement_at(at, &run);
                 let inserted = edit.inserted.chars().count();
                 let removed = edit.removed.chars().count();
-                self.buffer
+                self.doc
+                    .buffer
                     .apply_with_cursor(edit, GroupKind::Operator, at + inserted);
                 run.count += 1;
                 if run.wrapped {
@@ -1269,7 +1536,7 @@ impl App {
             Key::Char('n') => self.replace_advance(run, at + 1),
             Key::Char('a') => {
                 let (origin, wrapped) = (run.origin, run.wrapped);
-                let hits = search::find_all(self.buffer.rope(), &run.query);
+                let hits = search::find_all(self.doc.buffer.rope(), &run.query);
                 let mut edits: Vec<Edit> = hits
                     .into_iter()
                     .filter(|i| {
@@ -1284,7 +1551,7 @@ impl App {
                 // Last first, so earlier positions stay right.
                 edits.reverse();
                 let count = run.count + edits.len();
-                self.buffer.apply_group(edits, at);
+                self.doc.buffer.apply_group(edits, at);
                 self.finish_replace(count);
             }
             Key::Char('q') | Key::Esc => self.finish_replace(run.count),
@@ -1296,7 +1563,7 @@ impl App {
         let n = run.query.chars().count();
         Edit {
             at,
-            removed: self.buffer.slice_string(at..at + n),
+            removed: self.doc.buffer.slice_string(at..at + n),
             inserted: run.with.clone(),
         }
     }
@@ -1323,9 +1590,40 @@ impl App {
                 }
             }
             Entry::Line(n) => self.go_to_line(n),
+            Entry::OpenFile { at, .. } => self.show_file(at),
+            Entry::Citation { key, .. } => self.finish_citation(&key),
+            Entry::Problem(p) => self.go_to_problem(&p),
+            Entry::Spelling { with, range } => {
+                let b = &mut self.doc.buffer;
+                b.move_to(range.end);
+                b.set_selection_anchor(range.start);
+                b.transform_selection(|_| with);
+                b.clear_selection();
+            }
+            Entry::AddWord(word) => {
+                if let Some(s) = self.speller.as_mut() {
+                    match s.add(&word) {
+                        Ok(()) => self.set_message(format!("Added {word} to your words")),
+                        Err(e) => self.set_error(format!("Added for now; can't save it: {e}")),
+                    }
+                }
+            }
+            Entry::IgnoreWord(word) => {
+                if let Some(s) = self.speller.as_mut() {
+                    s.ignore(&word);
+                }
+            }
+            Entry::Theme(t) => {
+                self.theme = t;
+                let name = t.label();
+                let key = name.to_lowercase();
+                self.message = Some(format!(
+                    "{name} for this session. Set theme = \"{key}\" in settings to keep it"
+                ));
+            }
             Entry::Find(query) => {
-                self.buffer.clear_selection();
-                let origin = self.buffer.cursor();
+                self.doc.buffer.clear_selection();
+                let origin = self.doc.buffer.cursor();
                 self.incremental(&query, origin);
                 self.mode = Mode::Prompt(Prompt::Search { query, origin });
             }
@@ -1333,14 +1631,23 @@ impl App {
     }
 
     fn go_to_line(&mut self, n: usize) {
-        let last = self.buffer.line_count();
-        let start = self.buffer.line_start(n.min(last) - 1);
-        self.buffer.move_to(start);
+        let last = self.doc.buffer.line_count();
+        let start = self.doc.buffer.line_start(n.min(last) - 1);
+        self.doc.buffer.move_to(start);
     }
 
     fn palette_key(&mut self, key: Key, mut state: PaletteState) {
         match key {
+            // A comma cites this work and leaves the box open for the next.
+            Key::Char(',') if state.is_citations() => {
+                if let Some(Entry::Citation { key, .. }) = state.selected_entry() {
+                    let text = format!("{key},");
+                    self.doc.buffer.insert_str(&text, GroupKind::Paste);
+                    state.set_query(String::new());
+                }
+            }
             Key::Esc => {
+                self.theme = state.theme_before().unwrap_or(self.theme);
                 self.mode = Mode::Insert;
                 return;
             }
@@ -1357,6 +1664,7 @@ impl App {
             Key::Down => state.down(),
             _ => {}
         }
+        self.theme = state.theme_shown().unwrap_or(self.theme);
         self.mode = Mode::Palette(state);
     }
 
@@ -1373,7 +1681,7 @@ impl App {
             Command::Cut => self.cut(),
             Command::Copy => self.copy(),
             Command::Paste => self.paste(),
-            Command::SelectAll => self.buffer.select_all(),
+            Command::SelectAll => self.doc.buffer.select_all(),
             Command::Find => self.open_search(),
             Command::Replace => self.open_replace(),
             Command::GotoLine => {
@@ -1381,13 +1689,30 @@ impl App {
                     text: String::new(),
                 })
             }
-            Command::ToggleLineNumbers => self.show_line_numbers = !self.show_line_numbers,
+            Command::ToggleLineNumbers => self.doc.line_numbers = !self.doc.line_numbers,
             Command::ToggleIndent => self.toggle_indent(),
             Command::ToggleWrap => {
-                self.soft_wrap = !self.soft_wrap;
-                self.scroll_row = 0;
-                self.scroll_left = 0;
+                self.doc.soft_wrap = !self.doc.soft_wrap;
+                self.doc.scroll_row = 0;
+                self.doc.scroll_left = 0;
             }
+            Command::ChooseTheme => self.mode = Mode::Palette(PaletteState::themes(self.theme)),
+            Command::FileTree => self.open_tree(),
+            Command::InsertCitation => self.insert_citation(),
+            Command::BuildPdf => self.build_pdf(),
+            Command::StopBuild => self.stop_build(),
+            Command::BuildProblems => self.show_build_problems(),
+            Command::OpenPdf => self.open_pdf(),
+            Command::FixSpelling => self.fix_spelling(),
+            Command::NextMisspelling => self.next_misspelling(),
+            Command::ToggleSpelling => {
+                self.doc.spelling = !self.doc.spelling;
+                self.load_speller();
+            }
+            Command::OpenFiles => self.open_files_list(),
+            Command::NextFile => self.next_file(1),
+            Command::PreviousFile => self.next_file(self.open_count() - 1),
+            Command::CloseFile => self.close_file(),
             Command::History => self.open_history(),
             Command::Reader => self.open_reader(),
             Command::Settings => self.open_settings(),
@@ -1425,8 +1750,8 @@ impl App {
         if r.is_empty() {
             return;
         }
-        let removed = self.buffer.slice_string(r.clone());
-        self.buffer.apply_with_cursor(
+        let removed = self.doc.buffer.slice_string(r.clone());
+        self.doc.buffer.apply_with_cursor(
             Edit {
                 at: r.start,
                 removed,
@@ -1439,58 +1764,59 @@ impl App {
 
     /// `w`: delete to the start of the next word.
     fn op_word(&mut self) {
-        let at = self.buffer.cursor();
-        let end = ops::word_end(self.buffer.rope(), at);
+        let at = self.doc.buffer.cursor();
+        let end = ops::word_end(self.doc.buffer.rope(), at);
         self.delete_range(at..end, at);
     }
 
     /// `d`: delete the current line; the cursor keeps its column on the line
     /// that takes its place, clamped to that line's last character.
     fn op_line(&mut self) {
-        let at = self.buffer.cursor();
-        let (_, col) = self.buffer.line_col();
-        let r = ops::line_range(self.buffer.rope(), at);
+        let at = self.doc.buffer.cursor();
+        let (_, col) = self.doc.buffer.line_col();
+        let r = ops::line_range(self.doc.buffer.rope(), at);
         if r.is_empty() {
             return;
         }
         let start = r.start;
         self.delete_range(r, start);
         let line = self
+            .doc
             .buffer
             .rope()
-            .char_to_line(start.min(self.buffer.len_chars()));
-        let text = self.buffer.line_text(line);
+            .char_to_line(start.min(self.doc.buffer.len_chars()));
+        let text = self.doc.buffer.line_text(line);
         let off = crate::buffer::graphemes_with_char_offsets(&text)
             .take(col)
             .last()
             .map_or(0, |(o, _)| o);
-        let target = self.buffer.line_start(line) + off;
-        self.buffer.move_to(target);
+        let target = self.doc.buffer.line_start(line) + off;
+        self.doc.buffer.move_to(target);
     }
 
     /// `k`: delete to end of line, or join with the next line at the end.
     fn op_kill(&mut self) {
-        let at = self.buffer.cursor();
-        let r = ops::kill_range(self.buffer.rope(), at);
+        let at = self.doc.buffer.cursor();
+        let r = ops::kill_range(self.doc.buffer.rope(), at);
         self.delete_range(r, at);
     }
 
     /// `%`: jump to the matching bracket.
     fn op_bracket(&mut self) {
-        match ops::match_bracket(self.buffer.rope(), self.buffer.cursor()) {
-            Some(t) => self.buffer.move_to(t),
+        match ops::match_bracket(self.doc.buffer.rope(), self.doc.buffer.cursor()) {
+            Some(t) => self.doc.buffer.move_to(t),
             None => self.set_error("No matching bracket"),
         }
     }
 
     fn undo(&mut self) {
-        if !self.buffer.undo() {
+        if !self.doc.buffer.undo() {
             self.set_message("Nothing to undo");
         }
     }
 
     fn redo(&mut self) {
-        if !self.buffer.redo() {
+        if !self.doc.buffer.redo() {
             self.set_message("Nothing to redo");
         }
     }
@@ -1500,15 +1826,16 @@ impl App {
         match &mut self.mode {
             Mode::Insert | Mode::Overlay { .. } => {
                 self.mode = Mode::Insert;
-                let text = text.replace('\n', self.buffer.eol());
-                self.buffer.insert_str(&text, GroupKind::Paste);
+                let text = text.replace('\n', self.doc.buffer.eol());
+                self.doc.buffer.insert_str(&text, GroupKind::Paste);
             }
             Mode::Palette(state) => {
                 let q = format!("{}{}", state.query, text.replace('\n', " "));
                 state.set_query(q);
+                self.theme = state.theme_shown().unwrap_or(self.theme);
             }
             Mode::Prompt(Prompt::Search { query, origin }) => {
-                query.push_str(&text.replace('\n', self.buffer.eol()));
+                query.push_str(&text.replace('\n', self.doc.buffer.eol()));
                 let (query, origin) = (query.clone(), *origin);
                 self.incremental(&query, origin);
             }
@@ -1521,6 +1848,7 @@ impl App {
             }
             Mode::Prompt(_)
             | Mode::Help { .. }
+            | Mode::Tree(_)
             | Mode::Recover(_)
             | Mode::History { .. }
             | Mode::Review(_)
@@ -1533,17 +1861,29 @@ impl App {
     /// Called when the poll timeout elapses with no input.
     /// fsyncs a dirty swap at most once per second.
     pub fn tick(&mut self, now: Instant) -> Result<()> {
+        self.check_build();
         let due = self
             .last_fsync
             .is_none_or(|t| now.saturating_duration_since(t) >= Duration::from_secs(1));
         if due {
-            if let Some(w) = self.swap.as_mut() {
-                if let Err(e) = w.fsync_if_pending() {
-                    self.swap_failed = true;
-                    self.set_error(format!("Swap fsync failed: {e}"));
-                }
+            if let Some(e) = self.doc.sync() {
+                self.set_error(e);
             }
-            self.with_history(|h| h.fsync_if_pending());
+            let paused = self
+                .last_key
+                .is_none_or(|t| now.saturating_duration_since(t) >= RECOUNT_PAUSE);
+            let counted = self.doc.writing && self.doc.prose == Some(Prose::Latex);
+            if self.doc.recount && paused && counted {
+                self.count_latex();
+                self.needs_redraw = true;
+            }
+            for i in 0..self.parked.len() {
+                if let Some(e) = self.parked[i].sync() {
+                    let name = self.parked[i].name();
+                    self.set_error(format!("{name}: {e}"));
+                }
+                self.parked[i].check_disk();
+            }
             self.check_disk();
             self.last_fsync = Some(now);
         }
@@ -1557,7 +1897,7 @@ impl App {
 
     /// Saves to the buffer's file, or asks for a name if it has none.
     fn start_save(&mut self, then: After) {
-        match self.buffer.path().map(|p| p.to_path_buf()) {
+        match self.doc.buffer.path().map(|p| p.to_path_buf()) {
             Some(path) => self.save_after(path, None, then),
             None => self.open_save_as(then),
         }
@@ -1566,6 +1906,7 @@ impl App {
     /// Opens the Save As prompt, starting from the current file name.
     fn open_save_as(&mut self, then: After) {
         let text = self
+            .doc
             .buffer
             .path()
             .map(|p| p.display().to_string())
@@ -1610,6 +1951,7 @@ impl App {
     /// Opens the file prompt, starting in the current file's directory.
     fn open_prompt(&mut self) {
         let text = self
+            .doc
             .buffer
             .path()
             .and_then(|p| p.parent())
@@ -1645,30 +1987,37 @@ impl App {
         }
         let path = fileio::absolute(&fileio::expand_tilde(text)).map_err(|e| e.to_string())?;
         let target = fileio::resolve_target(&path).map_err(|e| e.to_string())?;
-        if Some(&target) != self.swap_target.as_ref() {
+        if self.place_of(&target).is_none() {
             session::check(&path)?;
         }
         self.mode = Mode::Insert;
-        if self.buffer.is_dirty() {
-            self.mode = Mode::Prompt(Prompt::ConfirmLeave {
-                then: After::Open(path),
-            });
-        } else {
-            self.switch_to(&path);
-        }
+        self.open_file(&path, &target);
         Ok(())
     }
 
-    /// Leaves the current buffer for `path`. Anything unsaved in it is gone.
-    fn switch_to(&mut self, path: &std::path::Path) {
-        let same =
-            fileio::resolve_target(path).ok() == self.swap_target && self.swap_target.is_some();
-        if same {
-            // Its swap holds what was just discarded.
-            if let Some(old) = self.swap.take() {
-                let _ = old.remove();
-            }
+    /// Shows the file at `path`, opening it if it isn't open. A file is never
+    /// open twice: Kyte doesn't guard against itself, so a second copy would
+    /// take over the first one's swap.
+    fn open_file(&mut self, path: &std::path::Path, target: &std::path::Path) {
+        match self.place_of(target) {
+            Some(place) if place == self.at => self.set_message("Already open"),
+            Some(place) => self.show_file(place),
+            None => self.add_doc(path),
         }
+    }
+
+    /// Where the file with this canonical path is among the open files.
+    fn place_of(&self, target: &std::path::Path) -> Option<usize> {
+        let held = |d: &Doc| d.swap_target.as_deref() == Some(target);
+        if held(&self.doc) {
+            return Some(self.at);
+        }
+        let i = self.parked.iter().position(held)?;
+        Some(if i < self.at { i } else { i + 1 })
+    }
+
+    /// Opens `path` as a new file, next to the one on screen, which stays open.
+    fn add_doc(&mut self, path: &std::path::Path) {
         let opened = match session::open(path, false) {
             Ok(o) => o,
             Err(e) => {
@@ -1676,7 +2025,7 @@ impl App {
                 return;
             }
         };
-        let (buffer, swap, recover, warning) = match opened {
+        let (mut buffer, swap, recover, warning) = match opened {
             Opened::Ready {
                 buffer,
                 swap,
@@ -1688,31 +2037,649 @@ impl App {
                 return;
             }
         };
-        if let Some(old) = self.swap.take() {
-            let _ = old.remove();
-        }
-        self.swap_target = buffer.path().and_then(|p| fileio::resolve_target(p).ok());
-        self.disk = Some(DiskState::of_rope(buffer.rope()));
-        self.disk_text = Some(buffer.rope().clone());
-        self.disk_stamp = None;
-        self.outside_change = false;
-        let mut buffer = buffer;
+        self.flush_edits();
         buffer.default_indent_to(self.default_indent);
-        let closing = self.buffer.rope().clone();
-        self.with_history(|h| h.close(&closing));
-        self.buffer = buffer;
-        self.swap = swap;
-        self.swap_failed = false;
+        let doc = Doc::new(buffer, swap).with_view(self.default_view);
+        let mut old = std::mem::replace(&mut self.doc, doc);
+        if old.is_blank() {
+            old.close();
+        } else {
+            self.parked.insert(self.at, old);
+            self.at += 1;
+        }
+        self.visual_col = None;
         self.start_history();
-        self.scroll_top = 0;
-        self.scroll_left = 0;
-        self.scroll_row = 0;
+        self.load_speller();
         self.mode = recover.map_or(Mode::Insert, Mode::Recover);
         if let Some(w) = warning {
             self.set_error(w);
         } else if self.mode == Mode::Insert {
             let name = path.file_name().unwrap_or_default().to_string_lossy();
             self.set_message(format!("Opened {name}"));
+        }
+    }
+
+    /// Whether a PDF is being built.
+    pub fn building(&self) -> bool {
+        self.build.is_some()
+    }
+
+    /// The LaTeX file this one builds as: itself, or the root it belongs to.
+    fn build_root(&self) -> Option<std::path::PathBuf> {
+        let path = self.doc.buffer.path()?;
+        (self.doc.prose == Some(Prose::Latex))
+            .then(|| build::root_of(path, &self.doc.buffer.to_string()))
+    }
+
+    /// Ctrl-B: saves the file, then builds.
+    fn build_pdf(&mut self) {
+        if self.building() {
+            self.set_message("Already building; Stop build is in the palette");
+        } else if self.doc.prose != Some(Prose::Latex) {
+            self.set_message("Build PDF works on LaTeX files");
+        } else if self.doc.buffer.is_dirty() {
+            self.start_save(After::Build);
+        } else {
+            self.start_build();
+        }
+    }
+
+    fn start_build(&mut self) {
+        let Some(root) = self.build_root() else {
+            return;
+        };
+        let name = root.file_name().unwrap_or_default().to_string_lossy();
+        let name = name.into_owned();
+        let dir = root.parent().unwrap_or(std::path::Path::new("."));
+        let path = std::env::var("PATH").unwrap_or_default();
+        let Some(command) = build::command_for(self.build_command.as_deref(), &name, &path) else {
+            self.set_error("latexmk isn't installed; install it or set build_command");
+            return;
+        };
+        self.build_problems.clear();
+        match Build::start(&command, dir, &name) {
+            Ok(b) => self.build = Some(b),
+            Err(e) => self.set_error(format!("Can't start the build: {e}")),
+        }
+    }
+
+    fn stop_build(&mut self) {
+        match self.build.take() {
+            Some(mut b) => {
+                b.stop();
+                self.set_message("Build stopped");
+            }
+            None => self.set_message("No build is running"),
+        }
+    }
+
+    /// Picks up a build that has ended.
+    fn check_build(&mut self) {
+        let Some(outcome) = self.build.as_mut().and_then(Build::finished) else {
+            return;
+        };
+        if let Some(b) = self.build.take() {
+            self.report_build(&b, outcome);
+        }
+        self.needs_redraw = true;
+    }
+
+    fn report_build(&mut self, b: &Build, outcome: Outcome) {
+        let pdf = std::path::Path::new(&b.name).with_extension("pdf");
+        let pdf = pdf.display();
+        let seconds = outcome.took.as_secs_f32();
+        let warnings = outcome.warnings.len();
+        let failed = !outcome.ok;
+        let errors = outcome.errors.len();
+        self.build_problems = outcome.errors.into_iter().chain(outcome.warnings).collect();
+        self.build_dir = b.dir.clone();
+        if failed && errors == 0 {
+            self.set_error(format!("Build failed: {}", outcome.last_line));
+        } else if failed {
+            self.set_error(format!(
+                "Build failed with {errors} error{}",
+                plural(errors)
+            ));
+            if self.mode == Mode::Insert {
+                self.show_build_problems();
+            }
+        } else if warnings > 0 {
+            self.set_message(format!(
+                "Built {pdf} with {warnings} warning{}; Show build problems lists them",
+                plural(warnings)
+            ));
+        } else {
+            self.set_message(format!("Built {pdf} in {seconds:.1} s"));
+        }
+    }
+
+    /// Opens the box of what the last build reported.
+    fn show_build_problems(&mut self) {
+        if self.build_problems.is_empty() {
+            self.set_message("No build problems");
+            return;
+        }
+        let n = self.build_problems.len();
+        let title = format!("{n} build problem{}", plural(n));
+        let rows = self.build_problems.iter().cloned().map(Entry::Problem);
+        self.mode = Mode::Palette(PaletteState::problems(title, rows.collect()));
+    }
+
+    /// Goes to where a build problem is, opening the file if it has to. Its
+    /// path starts from the folder that was built, wherever the screen is now.
+    fn go_to_problem(&mut self, problem: &Problem) {
+        let path = self.build_dir.join(&problem.file);
+        if !path.is_file() {
+            self.set_message(format!("{} is gone", path.display()));
+            return;
+        }
+        match self.submit_open(&path.display().to_string()) {
+            Ok(()) if self.mode == Mode::Insert => {
+                if problem.line > 0 {
+                    self.go_to_line(problem.line);
+                }
+                self.message = None;
+            }
+            Ok(()) => {}
+            Err(e) => self.set_error(e),
+        }
+    }
+
+    /// Hands the paper's PDF to a viewer.
+    fn open_pdf(&mut self) {
+        let Some(pdf) = self.build_root().map(|r| r.with_extension("pdf")) else {
+            self.set_message("Open PDF works on LaTeX files");
+            return;
+        };
+        if !pdf.exists() {
+            self.set_message("No PDF yet; Ctrl-B builds it");
+            return;
+        }
+        if let Err(e) = build::open_pdf(self.pdf_command.as_deref(), &pdf) {
+            self.set_error(format!("Can't open the PDF: {e}"));
+        }
+    }
+
+    /// Whether the cursor is inside the braces of a citation command.
+    fn in_citation(&self) -> bool {
+        let b = &self.doc.buffer;
+        if self.doc.prose != Some(Prose::Latex) {
+            return false;
+        }
+        let line = b.cursor_line();
+        let upto = b.line_start(line)..b.cursor();
+        bib::in_citation(&b.slice_string(upto))
+    }
+
+    /// The text of the bibliography at `path`, from the open copy if there is
+    /// one, so a reference added a moment ago counts before it's saved. This
+    /// runs on a keypress, so it reads only a regular file of a sensible size:
+    /// a path can be a pipe or a device, and reading those never ends.
+    fn bibliography_text(&self, path: &std::path::Path) -> Option<String> {
+        let target = fileio::resolve_target(path).ok();
+        let open = std::iter::once(&self.doc)
+            .chain(&self.parked)
+            .find(|d| d.swap_target.is_some() && d.swap_target == target);
+        if let Some(d) = open {
+            return Some(d.buffer.to_string());
+        }
+        let meta = std::fs::metadata(path).ok()?;
+        if !meta.is_file() || meta.len() > MAX_BIBLIOGRAPHY_BYTES {
+            return None;
+        }
+        let bytes = std::fs::read(path).ok()?;
+        Some(String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    /// The works this LaTeX file can cite: from the bibliographies it names,
+    /// or failing that every `.bib` beside it.
+    /// Also says how many bibliographies couldn't be read.
+    fn references(&self) -> (Vec<bib::Reference>, usize) {
+        let Some(dir) = self.doc.buffer.path().and_then(|p| p.parent()) else {
+            return (Vec::new(), 0);
+        };
+        let named = bib::named_files(&self.doc.buffer.to_string(), dir);
+        let mut files: Vec<_> = named.into_iter().filter(|p| p.exists()).collect();
+        if files.is_empty() {
+            files = std::fs::read_dir(dir)
+                .map(|d| d.flatten().map(|e| e.path()).collect())
+                .unwrap_or_default();
+            files.retain(|p| p.extension().is_some_and(|e| e == "bib"));
+            files.sort();
+        }
+        let mut seen = std::collections::HashSet::new();
+        let texts: Vec<String> = files
+            .iter()
+            .filter_map(|p| self.bibliography_text(p))
+            .collect();
+        let left_out = files.len() - texts.len();
+        let refs = texts.iter().flat_map(|t| bib::parse(t));
+        let refs = refs.filter(|r| seen.insert(r.key.clone())).collect();
+        (refs, left_out)
+    }
+
+    /// Opens the box of works to cite. It stays quiet when typing `\cite{` set
+    /// it off, because a person who has no `.bib` file isn't asking for one.
+    fn open_citations(&mut self, asked: bool) {
+        let (refs, left_out) = self.references();
+        if left_out > 0 {
+            self.set_message(format!(
+                "Left out {left_out} bibliography file{}: not a plain file, or too large",
+                plural(left_out)
+            ));
+        } else if refs.is_empty() && asked {
+            self.set_message("No references: add a .bib file beside this one");
+        }
+        if refs.is_empty() {
+            return;
+        }
+        let rows = refs.iter().map(|r| Entry::Citation {
+            key: r.key.clone(),
+            line: r.line(),
+        });
+        self.mode = Mode::Palette(PaletteState::citations(rows.collect()));
+    }
+
+    /// Inserts a citation at the cursor, starting the command if need be.
+    fn insert_citation(&mut self) {
+        if !self.in_citation() && !self.references().0.is_empty() {
+            self.doc.buffer.insert_str("\\cite{", GroupKind::Paste);
+        }
+        self.open_citations(true);
+    }
+
+    /// Puts in the last key of a citation and closes its braces.
+    fn finish_citation(&mut self, key: &str) {
+        let b = &mut self.doc.buffer;
+        let closed = b.rope().get_char(b.cursor()) == Some('}');
+        let text = if closed {
+            key.to_string()
+        } else {
+            format!("{key}}}")
+        };
+        b.insert_str(&text, GroupKind::Paste);
+        if closed {
+            let past = b.cursor() + 1;
+            b.move_to(past);
+        }
+    }
+
+    /// Loads the checker once something needs it.
+    pub fn load_speller(&mut self) {
+        if self.doc.spelling && self.speller.is_none() {
+            let words = crate::config::path().with_file_name("words.txt");
+            self.speller = Speller::new(words);
+        }
+    }
+
+    /// Whether misspellings show in the file on screen.
+    pub fn checks_spelling(&self) -> bool {
+        self.doc.spelling && self.speller.is_some() && self.version_view.is_none()
+    }
+
+    /// The misspelled words of `line`, in characters, outside `skip`, which is
+    /// in bytes.
+    pub fn misspelled(
+        &self,
+        line: &str,
+        skip: &[std::ops::Range<usize>],
+    ) -> Vec<std::ops::Range<usize>> {
+        let Some(speller) = self.speller.as_ref() else {
+            return Vec::new();
+        };
+        let chars = |byte: usize| line[..byte].chars().count();
+        spell::words(line)
+            .into_iter()
+            .filter(|w| !skip.iter().any(|s| s.start < w.end && w.start < s.end))
+            .filter(|w| speller.is_wrong(&line[w.clone()]))
+            .map(|w| chars(w.start)..chars(w.end))
+            .collect()
+    }
+
+    /// Where the first misspelling in `lines` starts, past `after` if given.
+    fn find_misspelling(
+        &self,
+        lines: std::ops::Range<usize>,
+        after: Option<usize>,
+    ) -> Option<usize> {
+        let b = &self.doc.buffer;
+        let batch = if self.doc.prose == Some(Prose::Latex) {
+            SPELL_BATCH
+        } else {
+            lines.len().max(1)
+        };
+        let mut from = lines.start;
+        while from < lines.end {
+            let to = (from + batch).min(lines.end);
+            let not_prose = self.not_prose(from..to);
+            for line in from..to {
+                let skip = not_prose.get(line - from).map_or(&[][..], |s| &s[..]);
+                let start = b.line_start(line);
+                let wrong = self.misspelled(&b.line_text(line), skip);
+                let hit = wrong
+                    .into_iter()
+                    .map(|r| start + r.start)
+                    .find(|&at| after.is_none_or(|a| at > a));
+                if hit.is_some() {
+                    return hit;
+                }
+            }
+            from = to;
+        }
+        None
+    }
+
+    /// Where `lines` hold something other than prose, per line, in bytes.
+    #[cfg(feature = "highlight")]
+    fn not_prose(&self, lines: std::ops::Range<usize>) -> Vec<Vec<std::ops::Range<usize>>> {
+        use crate::highlight::{highlight, HighlightKind, Lang};
+        let b = &self.doc.buffer;
+        let mut out = vec![Vec::new(); lines.len()];
+        let head = b.head();
+        let Some(lang) = b.path().and_then(|p| Lang::detect(p, &head)) else {
+            return out;
+        };
+        let rope = b.rope();
+        for (r, kind) in highlight(lang, &b.to_string(), lines.clone()) {
+            if kind == HighlightKind::Keyword || r.is_empty() {
+                continue;
+            }
+            for l in rope.byte_to_line(r.start)..=rope.byte_to_line(r.end - 1) {
+                if lines.contains(&l) {
+                    let start = rope.line_to_byte(l);
+                    let end = rope.line_to_byte(l + 1);
+                    out[l - lines.start].push(r.start.max(start) - start..r.end.min(end) - start);
+                }
+            }
+        }
+        out
+    }
+
+    #[cfg(not(feature = "highlight"))]
+    fn not_prose(&self, lines: std::ops::Range<usize>) -> Vec<Vec<std::ops::Range<usize>>> {
+        vec![Vec::new(); lines.len()]
+    }
+
+    /// The misspelled word under the cursor, or just behind it, in characters
+    /// of the file.
+    fn misspelled_at_cursor(&self) -> Option<std::ops::Range<usize>> {
+        let b = &self.doc.buffer;
+        let line = b.cursor_line();
+        let start = b.line_start(line);
+        let at = b.cursor() - start;
+        let not_prose = self.not_prose(line..line + 1);
+        let skip = not_prose.first().map_or(&[][..], |s| &s[..]);
+        self.misspelled(&b.line_text(line), skip)
+            .into_iter()
+            .find(|r| r.start <= at && at <= r.end)
+            .map(|r| start + r.start..start + r.end)
+    }
+
+    /// Opens the box of what to do about the word at the cursor.
+    fn fix_spelling(&mut self) {
+        let range = self.misspelled_at_cursor();
+        let (Some(range), Some(speller)) = (range, self.speller.as_ref()) else {
+            self.set_message("No misspelled word here");
+            return;
+        };
+        let word = self.doc.buffer.slice_string(range.clone());
+        let mut rows: Vec<Entry> = speller
+            .suggest(&word)
+            .into_iter()
+            .take(6)
+            .map(|with| Entry::Spelling {
+                with,
+                range: range.clone(),
+            })
+            .collect();
+        rows.push(Entry::AddWord(word.clone()));
+        rows.push(Entry::IgnoreWord(word.clone()));
+        self.mode = Mode::Palette(PaletteState::spelling(word, rows));
+    }
+
+    /// Moves to the next misspelling, wrapping to the top of the file.
+    fn next_misspelling(&mut self) {
+        if !self.checks_spelling() {
+            self.set_message("Spell check is off for this file");
+            return;
+        }
+        let b = &self.doc.buffer;
+        let (line, at, count) = (b.cursor_line(), b.cursor(), b.line_count());
+        let next = self
+            .find_misspelling(line..count, Some(at))
+            .or_else(|| self.find_misspelling(0..line + 1, None));
+        match next {
+            Some(to) => self.doc.buffer.move_to(to),
+            None => self.set_message("No misspellings"),
+        }
+    }
+
+    /// The words in the file on screen, for writing small enough to count on
+    /// every key.
+    pub fn word_count(&self) -> Option<usize> {
+        let buf = self.view_buffer();
+        let prose = self.doc.prose.filter(|_| self.doc.writing)?;
+        if prose == Prose::Latex {
+            return self.doc.latex_words;
+        }
+        (buf.rope().len_bytes() <= MAX_COUNTED_BYTES)
+            .then(|| syntax::word_count(prose, &buf.to_string()))
+    }
+
+    /// Counts a LaTeX file's words.
+    fn count_latex(&mut self) {
+        let b = &self.doc.buffer;
+        self.doc.recount = false;
+        self.doc.latex_words = (b.rope().len_bytes() <= MAX_COUNTED_BYTES)
+            .then(|| syntax::word_count(Prose::Latex, &b.to_string()));
+    }
+
+    /// The words in the selection, in writing.
+    pub fn selected_words(&self) -> Option<usize> {
+        self.doc.prose.filter(|_| self.doc.writing)?;
+        let r = self.doc.buffer.selection()?;
+        Some(syntax::plain_words(&self.doc.buffer.slice_string(r)))
+    }
+
+    /// How many files are open.
+    pub fn open_count(&self) -> usize {
+        self.parked.len() + 1
+    }
+
+    /// Puts the file at `place` on screen. The one there stays open.
+    fn show_file(&mut self, place: usize) {
+        if place == self.at || place >= self.open_count() {
+            return;
+        }
+        self.flush_edits();
+        let (from, back) = if place < self.at {
+            (place, self.at - 1)
+        } else {
+            (place - 1, self.at)
+        };
+        let next = self.parked.remove(from);
+        let old = std::mem::replace(&mut self.doc, next);
+        self.parked.insert(back, old);
+        self.at = place;
+        self.visual_col = None;
+    }
+
+    /// Moves `step` files on, wrapping around.
+    fn next_file(&mut self, step: usize) {
+        if self.open_count() == 1 {
+            self.set_message("Only one file is open");
+        } else {
+            self.show_file((self.at + step) % self.open_count());
+        }
+    }
+
+    /// Opens the file tree on the directory Kyte started in.
+    fn open_tree(&mut self) {
+        match std::env::current_dir() {
+            Ok(root) => {
+                let tree = FileTree::new(root, self.doc.buffer.path());
+                self.mode = Mode::Tree(tree);
+            }
+            Err(e) => self.set_error(format!("Can't read this directory: {e}")),
+        }
+    }
+
+    fn tree_key(&mut self, key: Key, mut tree: FileTree) {
+        match key {
+            Key::Esc => {
+                self.mode = Mode::Insert;
+                return;
+            }
+            Key::Enter => match tree.selected_row() {
+                Some(r) if r.is_dir && r.open => tree.fold(),
+                Some(r) if r.is_dir => {
+                    if let Err(e) = tree.unfold() {
+                        self.set_error(e);
+                    }
+                }
+                Some(r) => {
+                    let name = r.path.to_str().map(str::to_string);
+                    self.mode = Mode::Insert;
+                    let opened = name
+                        .ok_or("Kyte can't open a file whose name isn't UTF-8".to_string())
+                        .and_then(|name| self.submit_open(&name));
+                    if let Err(e) = opened {
+                        self.set_error(e);
+                    }
+                    return;
+                }
+                None => {}
+            },
+            Key::Up => tree.up(1),
+            Key::Down => tree.down(1),
+            Key::PageUp => tree.page_up(),
+            Key::PageDown => tree.page_down(),
+            Key::Home => tree.up(usize::MAX),
+            Key::End => tree.down(usize::MAX),
+            Key::Left => tree.fold(),
+            Key::Right => {
+                if let Err(e) = tree.unfold() {
+                    self.set_error(e);
+                }
+            }
+            Key::Char('.') => tree.toggle_hidden(),
+            Key::Char(c) => tree.jump(c),
+            _ => {}
+        }
+        self.mode = Mode::Tree(tree);
+    }
+
+    /// What the file tree says about a file: whether it's open, and unsaved.
+    pub fn open_note(&self, path: &std::path::Path) -> &'static str {
+        let mut docs = std::iter::once(&self.doc).chain(&self.parked);
+        match docs.find(|d| d.buffer.path() == Some(path)) {
+            Some(d) if d.buffer.is_dirty() => "unsaved",
+            Some(_) => "open",
+            None => "",
+        }
+    }
+
+    /// Opens the list of open files.
+    fn open_files_list(&mut self) {
+        let row = |at, d: &Doc| {
+            let name = d.buffer.path().map_or("Untitled".to_string(), |p| {
+                let cwd = std::env::current_dir().unwrap_or_default();
+                p.strip_prefix(cwd).unwrap_or(p).display().to_string()
+            });
+            let note = if d.buffer.is_dirty() {
+                "unsaved"
+            } else if d.outside_change {
+                "changed"
+            } else {
+                ""
+            };
+            Entry::OpenFile { at, name, note }
+        };
+        let (before, after) = self.parked.split_at(self.at);
+        let docs = before.iter().chain([&self.doc]).chain(after);
+        let rows = docs.enumerate().map(|(i, d)| row(i, d)).collect();
+        self.mode = Mode::Palette(PaletteState::open_files(rows, self.at));
+    }
+
+    /// Ctrl-W: closes the file on screen, asking first if it's unsaved.
+    fn close_file(&mut self) {
+        if self.doc.buffer.is_dirty() {
+            self.mode = Mode::Prompt(Prompt::ConfirmLeave { then: After::Close });
+        } else {
+            self.close_file_now();
+        }
+    }
+
+    /// Closes the file on screen. Closing the last one quits.
+    fn close_file_now(&mut self) {
+        if self.parked.is_empty() {
+            self.quit = true;
+            return;
+        }
+        self.at = self.at.min(self.parked.len() - 1);
+        let mut old = std::mem::replace(&mut self.doc, self.parked.remove(self.at));
+        old.close();
+        self.visual_col = None;
+    }
+
+    /// Queues files from the command line, opened once the first is settled.
+    pub fn queue_files(&mut self, files: Vec<std::path::PathBuf>) {
+        self.queued = files.into();
+    }
+
+    /// Opens queued files, stopping for any that has a question to answer.
+    /// The first file named is the one on screen at the end.
+    pub fn open_queued(&mut self) {
+        if self.queued.is_empty() || self.mode != Mode::Insert {
+            return;
+        }
+        let before = self.message.take();
+        let before_is_error = self.message_is_error;
+        let mut trouble = None;
+        while self.mode == Mode::Insert {
+            self.message_is_error = false;
+            let Some(file) = self.queued.pop_front() else {
+                self.show_file(0);
+                break;
+            };
+            match fileio::absolute(&file).and_then(|p| Ok((fileio::resolve_target(&p)?, p))) {
+                Ok((target, path)) => self.open_file(&path, &target),
+                Err(e) => self.set_error(format!("Can't open {}: {e}", file.display())),
+            }
+            if self.message_is_error {
+                trouble = trouble.or(self.message.take());
+            }
+            self.message = None;
+        }
+        self.message_is_error = trouble.is_some() || before_is_error;
+        self.message = trouble.or(before);
+    }
+
+    /// The status bar's word on the other files, when there are any.
+    pub fn files_summary(&self) -> Option<String> {
+        if self.parked.is_empty() {
+            return None;
+        }
+        let unsaved = self.parked.iter().filter(|d| d.buffer.is_dirty()).count();
+        let place = format!("file {} of {}", self.at + 1, self.open_count());
+        Some(if unsaved > 0 {
+            format!("{place}, {unsaved} more unsaved")
+        } else {
+            place
+        })
+    }
+
+    /// How many other open files have no working swap.
+    pub fn unprotected_others(&self) -> usize {
+        self.parked.iter().filter(|d| d.unprotected()).count()
+    }
+
+    /// The title of the unsaved changes question.
+    pub fn unsaved_title(&self) -> String {
+        if self.parked.is_empty() {
+            "Unsaved changes".to_string()
+        } else {
+            format!("Unsaved changes in {}", self.doc.name())
         }
     }
 
@@ -1731,8 +2698,8 @@ impl App {
     }
 
     fn open_reader(&mut self) {
-        self.buffer.clear_selection();
-        let (focus, crumbs) = reader::section_at(&self.buffer);
+        self.doc.buffer.clear_selection();
+        let (focus, crumbs) = reader::section_at(&self.doc.buffer);
         self.bring_into_view(&focus);
         self.reader = Some(Reader {
             focus,
@@ -1745,10 +2712,10 @@ impl App {
     /// Scrolls to show `lines`, unless they're already on screen. Moving the
     /// page while someone reads it loses their place.
     fn bring_into_view(&mut self, lines: &std::ops::Range<usize>) {
-        let bottom = self.scroll_top + self.text_height();
-        if lines.start < self.scroll_top || lines.end > bottom {
-            self.scroll_top = lines.start.saturating_sub(READER_LINES_ABOVE);
-            self.scroll_row = 0;
+        let bottom = self.doc.scroll_top + self.text_height();
+        if lines.start < self.doc.scroll_top || lines.end > bottom {
+            self.doc.scroll_top = lines.start.saturating_sub(READER_LINES_ABOVE);
+            self.doc.scroll_row = 0;
         }
     }
 
@@ -1768,14 +2735,14 @@ impl App {
             Key::PageUp => self.motion(Motion::PageUp),
             Key::PageDown => self.motion(Motion::PageDown),
             Key::Char('n') | Key::Char('p') => {
-                match reader::step(&self.buffer, key == Key::Char('n')) {
-                    Some(at) => self.buffer.move_to(at),
+                match reader::step(&self.doc.buffer, key == Key::Char('n')) {
+                    Some(at) => self.doc.buffer.move_to(at),
                     None => self.set_message("No more sections"),
                 }
             }
             _ => {}
         }
-        let (focus, crumbs) = reader::section_at(&self.buffer);
+        let (focus, crumbs) = reader::section_at(&self.doc.buffer);
         if self.reader.as_ref().is_none_or(|r| r.focus != focus) {
             self.bring_into_view(&focus);
         }
@@ -1788,7 +2755,7 @@ impl App {
 
     /// Whether the file on disk has changes that haven't been reviewed.
     pub fn has_outside_change(&self) -> bool {
-        self.outside_change
+        self.doc.outside_change
     }
 
     /// Whether something changed with no key pressed.
@@ -1802,27 +2769,14 @@ impl App {
         if matches!(self.mode, Mode::Recover(_) | Mode::Review(_)) {
             return;
         }
-        let Some(path) = self.buffer.path().map(|p| p.to_path_buf()) else {
-            return;
-        };
-        let Ok(meta) = std::fs::metadata(&path) else {
-            return;
-        };
-        let stamp = meta.modified().ok().map(|t| (meta.len(), t));
-        if stamp == self.disk_stamp {
-            return;
-        }
-        self.disk_stamp = stamp;
-        let changed = matches!(fileio::disk_state(&path), Ok(Some(s)) if Some(s) != self.disk);
-        if changed != self.outside_change {
-            self.outside_change = changed;
+        if self.doc.check_disk() {
             self.needs_redraw = true;
         }
     }
 
     /// Starts reviewing what changed on disk.
     fn open_review(&mut self) {
-        let Some(path) = self.buffer.path().map(|p| p.to_path_buf()) else {
+        let Some(path) = self.doc.buffer.path().map(|p| p.to_path_buf()) else {
             return;
         };
         let theirs = match std::fs::read_to_string(&path) {
@@ -1832,14 +2786,18 @@ impl App {
                 return;
             }
         };
-        let ours = self.buffer.to_string();
+        let ours = self.doc.buffer.to_string();
         let base = self
+            .doc
             .disk_text
             .as_ref()
             .map_or(ours.clone(), |r| r.to_string());
         let changes = review::changes(&base, &ours, &theirs);
         // The version goes in the history before any choice can lose it.
-        let (outside, current) = (ropey::Rope::from_str(&theirs), self.buffer.rope().clone());
+        let (outside, current) = (
+            ropey::Rope::from_str(&theirs),
+            self.doc.buffer.rope().clone(),
+        );
         self.with_history(|h| h.note_outside(&outside, &current));
         let run = ReviewRun {
             changes: std::sync::Arc::new(changes),
@@ -1873,15 +2831,15 @@ impl App {
         let lines = self.change_lines(&run, run.at);
         let incoming = Self::theirs_text(&run, run.at);
         let added = run.changes[run.at].theirs.len();
-        let mut rope = self.buffer.rope().clone();
+        let mut rope = self.doc.buffer.rope().clone();
         let at = rope.line_to_char(lines.end.min(rope.len_lines()));
         let needs_break = at > 0 && rope.char(at - 1) != '\n' && !incoming.is_empty();
         if needs_break {
-            rope.insert(at, self.buffer.eol());
+            rope.insert(at, self.doc.buffer.eol());
         }
         let at = rope.line_to_char(lines.end.min(rope.len_lines()));
         rope.insert(at, &incoming);
-        let mut view = self.buffer.view_of(rope);
+        let mut view = self.doc.buffer.view_of(rope);
         let first = lines.start.min(view.line_count() - 1);
         view.move_to(view.line_start(first));
         self.review_marks = Some((lines.clone(), lines.end..lines.end + added));
@@ -1893,12 +2851,12 @@ impl App {
     /// The edit that takes change `i`.
     fn change_edit(&self, run: &ReviewRun, i: usize) -> Edit {
         let lines = self.change_lines(run, i);
-        let rope = self.buffer.rope();
+        let rope = self.doc.buffer.rope();
         let start = rope.line_to_char(lines.start);
         let end = rope.line_to_char(lines.end.min(rope.len_lines()));
         Edit {
             at: start,
-            removed: self.buffer.slice_string(start..end),
+            removed: self.doc.buffer.slice_string(start..end),
             inserted: Self::theirs_text(run, i),
         }
     }
@@ -1909,7 +2867,8 @@ impl App {
             Key::Char('y') => {
                 let edit = self.change_edit(&run, i);
                 let end = edit.at + edit.inserted.chars().count();
-                self.buffer
+                self.doc
+                    .buffer
                     .apply_with_cursor(edit, GroupKind::Operator, end);
                 let c = &run.changes[i];
                 run.shift += c.theirs.len() as isize - c.ours.len() as isize;
@@ -1924,7 +2883,7 @@ impl App {
                 run.accepted += edits.len();
                 // Last first, so earlier positions stay right.
                 edits.reverse();
-                self.buffer.apply_group(edits, at);
+                self.doc.buffer.apply_group(edits, at);
                 self.finish_review(&run);
                 return;
             }
@@ -1955,11 +2914,18 @@ impl App {
     /// Every change has an answer, so the file on disk is now the known one.
     fn finish_review(&mut self, run: &ReviewRun) {
         self.close_review();
-        self.disk = Some(DiskState::of_bytes(run.theirs.as_bytes()));
-        self.disk_text = Some(ropey::Rope::from_str(&run.theirs));
-        self.outside_change = false;
-        if self.buffer.to_string() == *run.theirs {
-            self.buffer.mark_clean();
+        self.doc.disk = Some(DiskState::of_bytes(run.theirs.as_bytes()));
+        self.doc.disk_text = Some(ropey::Rope::from_str(&run.theirs));
+        self.doc.outside_change = false;
+        if self.doc.buffer.to_string() == *run.theirs {
+            self.doc.buffer.mark_clean();
+        } else {
+            // What's kept here is no longer what's on disk, so it's the only copy.
+            self.doc.buffer.set_dirty();
+            if let Some(Err(e)) = self.doc.swap.as_mut().map(SwapWriter::keep_base) {
+                self.doc.swap_failed = true;
+                self.set_error(format!("Swap write failed: {e}"));
+            }
         }
         if !run.changes.is_empty() {
             let (took, all) = (run.accepted, run.changes.len());
@@ -1969,7 +2935,7 @@ impl App {
 
     /// Opens the timeline at the newest version.
     fn open_history(&mut self) {
-        let Some(h) = self.history.as_ref() else {
+        let Some(h) = self.doc.history.as_ref() else {
             let why = if !self.history_on {
                 "File history is off this session"
             } else {
@@ -1992,7 +2958,7 @@ impl App {
 
     /// Shows version `at`, with what it changed selected.
     fn show_version(&mut self, timeline: SharedTimeline, at: usize) {
-        let mut view = self.buffer.view_of(timeline.text_at(at));
+        let mut view = self.doc.buffer.view_of(timeline.text_at(at));
         if let Change::Edit { at: pos, ins, .. } = &timeline.version(at).change {
             let end = pos + ins.chars().count();
             view.move_to(end);
@@ -2021,7 +2987,7 @@ impl App {
                 let text = timeline.text_at(at).to_string();
                 let when = history::ago_from_now(timeline.version(at).time_ms);
                 self.close_history();
-                if self.buffer.replace_all(&text) {
+                if self.doc.buffer.replace_all(&text) {
                     self.set_message(format!(
                         "Restored the version from {when}; Ctrl-Z undoes it"
                     ));
@@ -2040,20 +3006,20 @@ impl App {
     }
 
     fn delete_history(&mut self) {
-        let text = self.buffer.rope().clone();
+        let text = self.doc.buffer.rope().clone();
         self.with_history(|h| h.delete(&text));
-        if self.history.is_some() {
+        if self.doc.history.is_some() {
             self.set_message("Deleted this file's history");
         }
     }
 
     /// Switches this file between tabs and spaces for new indent.
     fn toggle_indent(&mut self) {
-        let next = match self.buffer.indent() {
+        let next = match self.doc.buffer.indent() {
             Indent::Tabs => Indent::Spaces(4),
             Indent::Spaces(_) => Indent::Tabs,
         };
-        self.buffer.set_indent(next);
+        self.doc.buffer.set_indent(next);
         self.set_message(match next {
             Indent::Tabs => "Indenting with tabs".to_string(),
             Indent::Spaces(n) => format!("Indenting with {n} spaces"),
@@ -2064,8 +3030,9 @@ impl App {
     fn after_save(&mut self, then: After) {
         match then {
             After::Stay => {}
-            After::Quit => self.quit = true,
-            After::Open(path) => self.switch_to(&path),
+            After::Quit => self.quit_next(),
+            After::Close => self.close_file_now(),
+            After::Build => self.start_build(),
         }
     }
 
@@ -2080,13 +3047,23 @@ impl App {
             return Err("Not a regular file".to_string());
         }
         let target = fileio::resolve_target(&path).map_err(|e| e.to_string())?;
-        if Some(&target) == self.swap_target.as_ref() {
+        if Some(&target) == self.doc.swap_target.as_ref() {
             self.mode = Mode::Insert;
             self.save_after(path, None, then);
             return Ok(());
         }
-        if let Ok(SwapStatus::LiveLock { pid }) = swap::inspect(&target, b"") {
-            return Err(format!("Open in another kyte (PID {pid})"));
+        if self.place_of(&target).is_some() {
+            return Err("That file is open here; close it first".to_string());
+        }
+        let current = std::fs::read(&target).unwrap_or_default();
+        match swap::inspect(&target, &current) {
+            Ok(SwapStatus::LiveLock { pid }) => {
+                return Err(format!("Open in another kyte (PID {pid})"));
+            }
+            Ok(SwapStatus::Recoverable(_) | SwapStatus::Stale) => {
+                return Err("That file has edits from a crash; open it first".to_string());
+            }
+            _ => {}
         }
         self.mode = Mode::Insert;
         if meta.is_some() {
@@ -2105,7 +3082,8 @@ impl App {
     fn next_risk(&self, path: &std::path::Path, passed: Option<SaveRisk>) -> Option<SaveRisk> {
         if passed.is_none() {
             // An unreadable file is left for the write itself to report.
-            let changed = matches!(fileio::disk_state(path), Ok(Some(s)) if Some(s) != self.disk);
+            let changed =
+                matches!(fileio::disk_state(path), Ok(Some(s)) if Some(s) != self.doc.disk);
             if changed {
                 return Some(SaveRisk::ChangedOnDisk);
             }
@@ -2123,32 +3101,41 @@ impl App {
     }
 
     fn write_file(&mut self, path: &std::path::Path, then: After) {
-        let text = self.buffer.to_string();
+        // A symlink can move after a file is opened, so check again here: a
+        // save takes over the swap of the file it lands on.
+        let target = fileio::resolve_target(path).ok();
+        if target.is_some_and(|t| self.place_of(&t).is_some_and(|p| p != self.at)) {
+            self.set_error("That file is open here; close it first");
+            return;
+        }
+        let text = self.doc.buffer.to_string();
         let overwritten = self.outside_version(path);
         match fileio::save_atomic(path, &text) {
             Ok(()) => {
-                self.disk = Some(DiskState::of_bytes(text.as_bytes()));
-                self.disk_text = Some(self.buffer.rope().clone());
-                self.disk_stamp = None;
-                self.outside_change = false;
+                self.doc.disk = Some(DiskState::of_bytes(text.as_bytes()));
+                self.doc.disk_text = Some(self.doc.buffer.rope().clone());
+                self.doc.disk_stamp = None;
+                self.doc.outside_change = false;
                 self.needs_redraw = true;
-                if self.buffer.path() != Some(path) {
-                    self.buffer.set_path(path.to_path_buf());
-                    self.swap_target = fileio::resolve_target(path).ok();
+                if self.doc.buffer.path() != Some(path) {
+                    self.doc.buffer.set_path(path.to_path_buf());
+                    self.doc.swap_target = fileio::resolve_target(path).ok();
+                    self.doc.set_view(self.default_view);
+                    self.load_speller();
                 }
-                self.buffer.mark_clean();
+                self.doc.buffer.mark_clean();
                 self.note_save(path, overwritten);
-                let n = self.buffer.saved_line_count();
+                let n = self.doc.buffer.saved_line_count();
                 self.set_message(format!("Saved {n} line{}", if n == 1 { "" } else { "s" }));
                 // The saved file is the new base: replace the swap with an empty one.
-                if let Some(old) = self.swap.take() {
+                if let Some(old) = self.doc.swap.take() {
                     let _ = old.remove();
                 }
-                if let Some(target) = self.swap_target.clone() {
-                    match SwapWriter::create(&target, self.buffer.rope()) {
+                if let Some(target) = self.doc.swap_target.clone() {
+                    match SwapWriter::create(&target, self.doc.buffer.rope()) {
                         Ok(w) => {
-                            self.swap = Some(w);
-                            self.swap_failed = false;
+                            self.doc.swap = Some(w);
+                            self.doc.swap_failed = false;
                         }
                         Err(e) => self.set_error(format!("Saved {n} lines, but no swap: {e}")),
                     }
@@ -2162,23 +3149,23 @@ impl App {
     /// The file's content, if it isn't what Kyte last read or wrote. A save is
     /// about to replace it, so the history should keep it.
     fn outside_version(&self, path: &std::path::Path) -> Option<String> {
-        if self.buffer.path() != Some(path) || self.history.is_none() {
+        if self.doc.buffer.path() != Some(path) || self.doc.history.is_none() {
             return None;
         }
         let state = fileio::disk_state(path).ok()??;
-        (Some(state) != self.disk)
+        (Some(state) != self.doc.disk)
             .then(|| std::fs::read_to_string(path).ok())
             .flatten()
     }
 
     /// Records a finished save in the history, for the file it went to.
     fn note_save(&mut self, path: &std::path::Path, overwritten: Option<String>) {
-        let moved = self.history.as_ref().map(|h| h.target());
+        let moved = self.doc.history.as_ref().map(|h| h.target());
         if moved != fileio::resolve_target(path).ok().as_deref() {
-            self.swap_target = fileio::resolve_target(path).ok();
+            self.doc.swap_target = fileio::resolve_target(path).ok();
             self.start_history();
         }
-        let text = self.buffer.rope().clone();
+        let text = self.doc.buffer.rope().clone();
         self.with_history(|h| {
             if let Some(old) = overwritten {
                 h.snapshot(&ropey::Rope::from_str(&old), SnapshotKind::Outside)?;
@@ -2189,16 +3176,34 @@ impl App {
 
     /// Ctrl-Q: quit now when clean, otherwise ask.
     pub fn request_quit(&mut self) {
-        if self.buffer.is_dirty() {
-            self.mode = Mode::Prompt(Prompt::ConfirmLeave { then: After::Quit });
+        self.doc.discard = false;
+        self.parked.iter_mut().for_each(|d| d.discard = false);
+        self.quit_next();
+    }
+
+    /// Asks about the next unsaved file, or quits once none is left.
+    fn quit_next(&mut self) {
+        if !self.doc.needs_answer() {
+            match self.parked.iter().position(Doc::needs_answer) {
+                Some(i) => self.show_file(if i < self.at { i } else { i + 1 }),
+                None => {
+                    self.quit = true;
+                    return;
+                }
+            }
+        }
+        self.mode = Mode::Prompt(Prompt::ConfirmLeave { then: After::Quit });
+    }
+
+    /// Quits discarding changes ("Quit without saving"). Asks first if that
+    /// would lose changes in files not on screen.
+    pub fn discard_and_quit(&mut self) {
+        let count = self.parked.iter().filter(|d| d.buffer.is_dirty()).count();
+        if count > 0 {
+            self.mode = Mode::Prompt(Prompt::ConfirmDiscardOthers { count });
         } else {
             self.quit = true;
         }
-    }
-
-    /// Quits discarding changes ("Quit without saving").
-    pub fn discard_and_quit(&mut self) {
-        self.quit = true;
     }
 
     /// Label for the status bar mode field.
@@ -2207,6 +3212,7 @@ impl App {
             Mode::Insert => "INSERT",
             Mode::Overlay { .. } => "ESC",
             Mode::Palette(_) => "PALETTE",
+            Mode::Tree(_) => "FILES",
             Mode::Prompt(Prompt::Search { .. }) => "SEARCH",
             Mode::Prompt(Prompt::GotoLine { .. }) => "GOTO",
             Mode::Prompt(Prompt::ReplaceFind { .. })
@@ -2220,6 +3226,7 @@ impl App {
             Mode::Reader => "READER",
             Mode::Review(_) => "REVIEW",
             Mode::Prompt(Prompt::ConfirmDeleteHistory) => "DELETE?",
+            Mode::Prompt(Prompt::ConfirmDiscardOthers { .. }) => "DISCARD?",
             Mode::Help { .. } => "HELP",
             Mode::Recover(_) => "RECOVER",
         }
@@ -2267,7 +3274,7 @@ mod tests {
         a.handle_key(Key::Char('y'), t).unwrap();
         assert_eq!(a.message, None, "the error isn't repeated on every key");
         assert!(a.recovery_off(), "the flag outlives the message");
-        assert_eq!(a.buffer.to_string(), "xy", "typing keeps working");
+        assert_eq!(a.doc.buffer.to_string(), "xy", "typing keeps working");
     }
 
     #[test]
@@ -2284,10 +3291,10 @@ mod tests {
             for c in seq.chars() {
                 a.handle_key(Key::Char(c), ms(t, 30)).unwrap();
             }
-            assert_eq!(a.buffer.to_string(), "abc", "{seq}");
+            assert_eq!(a.doc.buffer.to_string(), "abc", "{seq}");
             assert_eq!(a.mode, Mode::Insert);
             a.handle_key(Key::Char('z'), ms(t, 40)).unwrap();
-            assert_eq!(a.buffer.to_string(), "zabc", "{seq}: typing resumes");
+            assert_eq!(a.doc.buffer.to_string(), "zabc", "{seq}: typing resumes");
         }
     }
 
@@ -2298,7 +3305,7 @@ mod tests {
         a.handle_key(Key::Esc, t).unwrap();
         a.handle_key(Key::Char('['), ms(t, 400)).unwrap();
         a.handle_key(Key::Char('A'), ms(t, 410)).unwrap();
-        assert_eq!(a.buffer.to_string(), "Aabc");
+        assert_eq!(a.doc.buffer.to_string(), "Aabc");
     }
 
     #[test]
@@ -2308,7 +3315,7 @@ mod tests {
         a.handle_key(Key::Esc, t).unwrap();
         a.handle_key(Key::Char('['), ms(t, 10)).unwrap();
         a.handle_key(Key::Char('A'), ms(t, 500)).unwrap();
-        assert_eq!(a.buffer.to_string(), "Aabc");
+        assert_eq!(a.doc.buffer.to_string(), "Aabc");
     }
 
     #[test]
@@ -2317,7 +3324,7 @@ mod tests {
         let mut a = search_app();
         a.handle_key(Key::Ctrl('f'), t).unwrap();
         a.handle_paste("baz".to_string()).unwrap();
-        assert_eq!(a.buffer.cursor(), 8, "pasting searches like typing");
+        assert_eq!(a.doc.buffer.cursor(), 8, "pasting searches like typing");
         a.handle_key(Key::Esc, t).unwrap();
         a.run_command(Command::GotoLine);
         a.handle_paste("1\nignored".to_string()).unwrap();
@@ -2334,13 +3341,13 @@ mod tests {
         let t = Instant::now();
         let mut a = app("x\n");
         a.handle_key(Key::Tab, t).unwrap();
-        assert_eq!(a.buffer.to_string(), "\tx\n");
+        assert_eq!(a.doc.buffer.to_string(), "\tx\n");
         a.handle_key(Key::BackTab, t).unwrap();
-        assert_eq!(a.buffer.to_string(), "x\n");
+        assert_eq!(a.doc.buffer.to_string(), "x\n");
         a.run_command(Command::ToggleIndent);
         assert_eq!(a.message.as_deref(), Some("Indenting with 4 spaces"));
         a.handle_key(Key::Tab, t).unwrap();
-        assert_eq!(a.buffer.to_string(), "    x\n");
+        assert_eq!(a.doc.buffer.to_string(), "    x\n");
         a.run_command(Command::ToggleIndent);
         assert_eq!(a.message.as_deref(), Some("Indenting with tabs"));
     }
@@ -2350,26 +3357,26 @@ mod tests {
         let t = Instant::now();
         let mut a = app("foo bar baz");
         a.handle_key(Key::WordRight, t).unwrap();
-        assert_eq!(a.buffer.cursor(), 4);
+        assert_eq!(a.doc.buffer.cursor(), 4);
         a.handle_key(Key::WordRight, t).unwrap();
-        assert_eq!(a.buffer.cursor(), 8);
+        assert_eq!(a.doc.buffer.cursor(), 8);
         a.handle_key(Key::WordLeft, t).unwrap();
-        assert_eq!(a.buffer.cursor(), 4);
+        assert_eq!(a.doc.buffer.cursor(), 4);
         a.handle_key(Key::WordDelete, t).unwrap();
-        assert_eq!(a.buffer.to_string(), "foo baz");
+        assert_eq!(a.doc.buffer.to_string(), "foo baz");
         a.handle_key(Key::WordBackspace, t).unwrap();
-        assert_eq!(a.buffer.to_string(), "baz");
-        assert_eq!(a.buffer.cursor(), 0);
+        assert_eq!(a.doc.buffer.to_string(), "baz");
+        assert_eq!(a.doc.buffer.cursor(), 0);
         a.handle_key(Key::Ctrl('z'), t).unwrap();
-        assert_eq!(a.buffer.to_string(), "foo baz", "one undo step");
-        assert_eq!(a.buffer.cursor(), 4);
+        assert_eq!(a.doc.buffer.to_string(), "foo baz", "one undo step");
+        assert_eq!(a.doc.buffer.cursor(), 4);
     }
 
     #[test]
     fn word_backspace_at_the_start_does_nothing() {
         let mut a = app("abc");
         a.handle_key(Key::WordBackspace, Instant::now()).unwrap();
-        assert!(!a.buffer.is_dirty());
+        assert!(!a.doc.buffer.is_dirty());
     }
 
     #[test]
@@ -2387,7 +3394,7 @@ mod tests {
         a.handle_key(Key::Esc, t).unwrap();
         a.handle_key(Key::Esc, ms(t, 299)).unwrap();
         assert!(matches!(a.mode, Mode::Palette(_)));
-        assert_eq!(a.buffer.to_string(), "x");
+        assert_eq!(a.doc.buffer.to_string(), "x");
     }
 
     #[test]
@@ -2397,7 +3404,7 @@ mod tests {
         a.handle_key(Key::Esc, t).unwrap();
         a.handle_key(Key::Esc, ms(t, 500)).unwrap();
         assert_eq!(a.mode, Mode::Insert);
-        assert!(!a.buffer.is_dirty());
+        assert!(!a.doc.buffer.is_dirty());
     }
 
     #[test]
@@ -2430,15 +3437,15 @@ mod tests {
         a.handle_key(Key::Esc, t).unwrap();
         a.handle_key(Key::Char('z'), t).unwrap();
         assert_eq!(a.mode, Mode::Insert);
-        assert_eq!(a.buffer.to_string(), "abc");
-        assert!(!a.buffer.is_dirty());
+        assert_eq!(a.doc.buffer.to_string(), "abc");
+        assert!(!a.doc.buffer.is_dirty());
     }
 
     #[test]
     fn alt_key_in_insert_is_esc_then_key() {
         let mut a = app("one\ntwo\n");
         a.handle_key(Key::Alt('d'), Instant::now()).unwrap();
-        assert_eq!(a.buffer.to_string(), "two\n");
+        assert_eq!(a.doc.buffer.to_string(), "two\n");
         assert_eq!(a.mode, Mode::Insert);
     }
 
@@ -2448,54 +3455,54 @@ mod tests {
         let mut a = app("foo bar baz");
         a.handle_key(Key::Esc, t).unwrap();
         a.handle_key(Key::Char('w'), t).unwrap();
-        assert_eq!(a.buffer.to_string(), "bar baz");
+        assert_eq!(a.doc.buffer.to_string(), "bar baz");
         assert_eq!(a.mode, Mode::Insert);
         a.handle_key(Key::Ctrl('z'), t).unwrap();
-        assert_eq!(a.buffer.to_string(), "foo bar baz");
+        assert_eq!(a.doc.buffer.to_string(), "foo bar baz");
     }
 
     #[test]
     fn d_cursor_lands_on_following_line_clamped() {
         let t = Instant::now();
         let mut a = app("a\nbb\nc");
-        a.buffer.move_to(3); // b|b
+        a.doc.buffer.move_to(3); // b|b
         a.handle_key(Key::Esc, t).unwrap();
         a.handle_key(Key::Char('d'), t).unwrap();
-        assert_eq!(a.buffer.to_string(), "a\nc");
-        assert_eq!(a.buffer.cursor(), 2);
+        assert_eq!(a.doc.buffer.to_string(), "a\nc");
+        assert_eq!(a.doc.buffer.cursor(), 2);
         let mut b = app("a\nlong\nxyz");
-        b.buffer.move_to(4); // lo|ng
+        b.doc.buffer.move_to(4); // lo|ng
         b.handle_key(Key::Esc, t).unwrap();
         b.handle_key(Key::Char('d'), t).unwrap();
-        assert_eq!(b.buffer.to_string(), "a\nxyz");
-        assert_eq!(b.buffer.line_col(), (2, 3));
+        assert_eq!(b.doc.buffer.to_string(), "a\nxyz");
+        assert_eq!(b.doc.buffer.line_col(), (2, 3));
     }
 
     #[test]
     fn d_on_last_line_moves_to_previous_line() {
         let t = Instant::now();
         let mut a = app("a\nb\nc");
-        a.buffer.move_to(4);
+        a.doc.buffer.move_to(4);
         a.handle_key(Key::Esc, t).unwrap();
         a.handle_key(Key::Char('d'), t).unwrap();
-        assert_eq!(a.buffer.to_string(), "a\nb");
-        assert_eq!(a.buffer.line_col(), (2, 1));
+        assert_eq!(a.doc.buffer.to_string(), "a\nb");
+        assert_eq!(a.doc.buffer.line_col(), (2, 1));
     }
 
     #[test]
     fn k_and_percent_through_overlay() {
         let t = Instant::now();
         let mut a = app("ab(cd)\nef");
-        a.buffer.move_to(2);
+        a.doc.buffer.move_to(2);
         a.handle_key(Key::Esc, t).unwrap();
         a.handle_key(Key::Char('%'), t).unwrap();
-        assert_eq!(a.buffer.cursor(), 5);
+        assert_eq!(a.doc.buffer.cursor(), 5);
         a.handle_key(Key::Esc, t).unwrap();
         a.handle_key(Key::Char('k'), t).unwrap();
-        assert_eq!(a.buffer.to_string(), "ab(cd\nef");
+        assert_eq!(a.doc.buffer.to_string(), "ab(cd\nef");
         a.handle_key(Key::Esc, t).unwrap();
         a.handle_key(Key::Char('k'), t).unwrap();
-        assert_eq!(a.buffer.to_string(), "ab(cdef");
+        assert_eq!(a.doc.buffer.to_string(), "ab(cdef");
     }
 
     #[test]
@@ -2505,7 +3512,7 @@ mod tests {
         a.handle_key(Key::Esc, t).unwrap();
         a.handle_key(Key::Char('%'), t).unwrap();
         assert_eq!(a.message.as_deref(), Some("No matching bracket"));
-        assert_eq!(a.buffer.cursor(), 0);
+        assert_eq!(a.doc.buffer.cursor(), 0);
     }
 
     #[test]
@@ -2517,10 +3524,10 @@ mod tests {
         }
         a.handle_key(Key::Esc, t).unwrap();
         a.handle_key(Key::Char('u'), t).unwrap();
-        assert_eq!(a.buffer.to_string(), "");
+        assert_eq!(a.doc.buffer.to_string(), "");
         a.handle_key(Key::Esc, t).unwrap();
         a.handle_key(Key::Char('r'), t).unwrap();
-        assert_eq!(a.buffer.to_string(), "abc");
+        assert_eq!(a.doc.buffer.to_string(), "abc");
     }
 
     #[test]
@@ -2563,7 +3570,7 @@ mod tests {
         a.handle_key(Key::Esc, t).unwrap();
         assert_eq!(a.mode, Mode::Insert);
         assert!(!a.quit);
-        assert_eq!(a.buffer.to_string(), "x");
+        assert_eq!(a.doc.buffer.to_string(), "x");
     }
 
     #[test]
@@ -2592,28 +3599,28 @@ mod tests {
         let mut a = search_app();
         a.handle_key(Key::Ctrl('f'), t).unwrap();
         typ(&mut a, "ba");
-        assert_eq!(a.buffer.cursor(), 4);
+        assert_eq!(a.doc.buffer.cursor(), 4);
         a.handle_key(Key::Enter, t).unwrap();
-        assert_eq!(a.buffer.cursor(), 8);
+        assert_eq!(a.doc.buffer.cursor(), 8);
         a.handle_key(Key::Enter, t).unwrap();
-        assert_eq!(a.buffer.cursor(), 4);
+        assert_eq!(a.doc.buffer.cursor(), 4);
         a.handle_key(Key::Esc, t).unwrap();
         assert_eq!(a.mode, Mode::Insert);
-        assert_eq!(a.buffer.cursor(), 4);
+        assert_eq!(a.doc.buffer.cursor(), 4);
     }
 
     #[test]
     fn search_no_match_restores_origin() {
         let t = Instant::now();
         let mut a = search_app();
-        a.buffer.move_to(2);
+        a.doc.buffer.move_to(2);
         a.handle_key(Key::Esc, t).unwrap();
         a.handle_key(Key::Char('/'), t).unwrap();
         assert!(matches!(a.mode, Mode::Prompt(Prompt::Search { .. })));
         typ(&mut a, "zz");
-        assert_eq!(a.buffer.cursor(), 2);
+        assert_eq!(a.doc.buffer.cursor(), 2);
         a.handle_key(Key::Esc, t).unwrap();
-        assert_eq!(a.buffer.cursor(), 2);
+        assert_eq!(a.doc.buffer.cursor(), 2);
     }
 
     #[test]
@@ -2623,23 +3630,23 @@ mod tests {
         a.handle_key(Key::Ctrl('f'), t).unwrap();
         typ(&mut a, "ba");
         a.handle_key(Key::Ctrl('f'), t).unwrap();
-        assert_eq!(a.buffer.cursor(), 8);
+        assert_eq!(a.doc.buffer.cursor(), 8);
         a.handle_key(Key::Up, t).unwrap();
-        assert_eq!(a.buffer.cursor(), 4);
+        assert_eq!(a.doc.buffer.cursor(), 4);
         a.handle_key(Key::Up, t).unwrap();
-        assert_eq!(a.buffer.cursor(), 8, "wraps to the end");
+        assert_eq!(a.doc.buffer.cursor(), 8, "wraps to the end");
     }
 
     #[test]
     fn search_starts_from_a_selected_word() {
         let t = Instant::now();
         let mut a = search_app();
-        a.buffer.move_to(7);
-        a.buffer.set_selection_anchor(4);
+        a.doc.buffer.move_to(7);
+        a.doc.buffer.set_selection_anchor(4);
         a.handle_key(Key::Ctrl('f'), t).unwrap();
         assert_eq!(a.search_query(), Some("bar"));
-        assert_eq!(a.buffer.selection(), None);
-        assert_eq!(a.buffer.cursor(), 4);
+        assert_eq!(a.doc.buffer.selection(), None);
+        assert_eq!(a.doc.buffer.cursor(), 4);
     }
 
     /// Runs Ctrl-R with `query` and `with`, stopping at the first question.
@@ -2657,12 +3664,12 @@ mod tests {
         let mut a = app("cat cat cat");
         start_replace(&mut a, "cat", "dog");
         assert_eq!(a.mode_label(), "REPLACE");
-        assert_eq!(a.buffer.cursor(), 0);
+        assert_eq!(a.doc.buffer.cursor(), 0);
         typ(&mut a, "y");
-        assert_eq!(a.buffer.to_string(), "dog cat cat");
+        assert_eq!(a.doc.buffer.to_string(), "dog cat cat");
         typ(&mut a, "n");
         typ(&mut a, "y");
-        assert_eq!(a.buffer.to_string(), "dog cat dog");
+        assert_eq!(a.doc.buffer.to_string(), "dog cat dog");
         assert_eq!(a.mode, Mode::Insert);
         assert_eq!(a.message.as_deref(), Some("Replaced 2 matches"));
     }
@@ -2671,14 +3678,14 @@ mod tests {
     fn replace_all_is_one_undo_step_and_wraps_around() {
         let t = Instant::now();
         let mut a = app("a x b x c x");
-        a.buffer.move_to(6);
+        a.doc.buffer.move_to(6);
         start_replace(&mut a, "x", "yy");
-        assert_eq!(a.buffer.cursor(), 6);
+        assert_eq!(a.doc.buffer.cursor(), 6);
         typ(&mut a, "a");
-        assert_eq!(a.buffer.to_string(), "a yy b yy c yy");
+        assert_eq!(a.doc.buffer.to_string(), "a yy b yy c yy");
         assert_eq!(a.message.as_deref(), Some("Replaced 3 matches"));
         a.handle_key(Key::Ctrl('z'), t).unwrap();
-        assert_eq!(a.buffer.to_string(), "a x b x c x");
+        assert_eq!(a.doc.buffer.to_string(), "a x b x c x");
     }
 
     #[test]
@@ -2686,19 +3693,19 @@ mod tests {
         let mut a = app("aa aa");
         start_replace(&mut a, "a", "aa");
         typ(&mut a, "yyyy");
-        assert_eq!(a.buffer.to_string(), "aaaa aaaa");
+        assert_eq!(a.doc.buffer.to_string(), "aaaa aaaa");
         assert_eq!(a.mode, Mode::Insert);
     }
 
     #[test]
     fn replace_wraps_and_stops_where_it_started_after_growing_the_text() {
         let mut a = app("x-x-x");
-        a.buffer.move_to(2);
+        a.doc.buffer.move_to(2);
         start_replace(&mut a, "x", "long");
         typ(&mut a, "y"); // middle
         typ(&mut a, "y"); // last
         typ(&mut a, "y"); // wraps to the first
-        assert_eq!(a.buffer.to_string(), "long-long-long");
+        assert_eq!(a.doc.buffer.to_string(), "long-long-long");
         assert_eq!(a.message.as_deref(), Some("Replaced 3 matches"));
     }
 
@@ -2707,10 +3714,10 @@ mod tests {
         let mut a = app("ab ab ab");
         start_replace(&mut a, "ab ", "");
         typ(&mut a, "y");
-        assert_eq!(a.buffer.to_string(), "ab ab");
+        assert_eq!(a.doc.buffer.to_string(), "ab ab");
         typ(&mut a, "q");
         assert_eq!(a.mode, Mode::Insert);
-        assert_eq!(a.buffer.to_string(), "ab ab");
+        assert_eq!(a.doc.buffer.to_string(), "ab ab");
         assert_eq!(a.message.as_deref(), Some("Replaced 1 match"));
     }
 
@@ -2720,7 +3727,7 @@ mod tests {
         start_replace(&mut a, "zzz", "y");
         assert_eq!(a.mode, Mode::Insert);
         assert_eq!(a.message.as_deref(), Some("No matches replaced"));
-        assert!(!a.buffer.is_dirty());
+        assert!(!a.doc.buffer.is_dirty());
     }
 
     #[test]
@@ -2728,7 +3735,7 @@ mod tests {
         let mut a = app("Foo foo FOO");
         start_replace(&mut a, "foo", "bar");
         typ(&mut a, "a");
-        assert_eq!(a.buffer.to_string(), "bar bar bar");
+        assert_eq!(a.doc.buffer.to_string(), "bar bar bar");
     }
 
     #[test]
@@ -2746,11 +3753,11 @@ mod tests {
         let mut a = search_app();
         a.handle_key(Key::Ctrl('f'), t).unwrap();
         a.handle_key(Key::Enter, t).unwrap();
-        assert_eq!(a.buffer.cursor(), 0);
+        assert_eq!(a.doc.buffer.cursor(), 0);
         assert!(matches!(a.mode, Mode::Prompt(Prompt::Search { .. })));
         a.handle_key(Key::Esc, t).unwrap();
-        assert_eq!(a.buffer.cursor(), 0);
-        assert!(!a.buffer.is_dirty());
+        assert_eq!(a.doc.buffer.cursor(), 0);
+        assert!(!a.doc.buffer.is_dirty());
     }
 
     #[test]
@@ -2775,12 +3782,12 @@ mod tests {
         assert!(matches!(&a.mode, Mode::Palette(s) if s.is_universal()));
         typ(&mut a, ":3");
         a.handle_key(Key::Enter, t).unwrap();
-        assert_eq!(a.buffer.line_col(), (3, 1));
+        assert_eq!(a.doc.buffer.line_col(), (3, 1));
         assert_eq!(a.mode, Mode::Insert);
         a.handle_key(Key::Ctrl('k'), t).unwrap();
         typ(&mut a, "/two");
         a.handle_key(Key::Enter, t).unwrap();
-        assert_eq!(a.buffer.line_col(), (2, 1), "wraps to find it");
+        assert_eq!(a.doc.buffer.line_col(), (2, 1), "wraps to find it");
         assert_eq!(a.search_query(), Some("two"));
         a.handle_key(Key::Esc, t).unwrap();
         assert_eq!(a.mode, Mode::Insert);
@@ -2793,7 +3800,7 @@ mod tests {
         a.handle_key(Key::Ctrl('k'), t).unwrap();
         typ(&mut a, "toggle line");
         a.handle_key(Key::Enter, t).unwrap();
-        assert!(!a.show_line_numbers);
+        assert!(!a.doc.line_numbers);
         a.handle_key(Key::Ctrl('k'), t).unwrap();
         a.handle_key(Key::Esc, t).unwrap();
         assert_eq!(a.mode, Mode::Insert);
@@ -2809,12 +3816,12 @@ mod tests {
         assert!(matches!(a.mode, Mode::Prompt(Prompt::GotoLine { .. })));
         typ(&mut a, "3");
         a.handle_key(Key::Enter, t).unwrap();
-        assert_eq!(a.buffer.line_col(), (3, 1));
+        assert_eq!(a.doc.buffer.line_col(), (3, 1));
         assert_eq!(a.mode, Mode::Insert);
         a.run_command(Command::GotoLine);
         typ(&mut a, "999");
         a.handle_key(Key::Enter, t).unwrap();
-        assert_eq!(a.buffer.line_col(), (5, 1));
+        assert_eq!(a.doc.buffer.line_col(), (5, 1));
         a.run_command(Command::GotoLine);
         typ(&mut a, "abc");
         a.handle_key(Key::Enter, t).unwrap();
@@ -2822,7 +3829,7 @@ mod tests {
         assert!(a.message_is_error);
         a.handle_key(Key::Esc, t).unwrap();
         assert_eq!(a.mode, Mode::Insert);
-        assert_eq!(a.buffer.line_col(), (5, 1));
+        assert_eq!(a.doc.buffer.line_col(), (5, 1));
     }
 
     #[test]
@@ -2830,9 +3837,9 @@ mod tests {
         let t = Instant::now();
         let mut a = app("x");
         a.run_command(Command::ToggleLineNumbers);
-        assert!(!a.show_line_numbers);
+        assert!(!a.doc.line_numbers);
         a.run_command(Command::ToggleLineNumbers);
-        assert!(a.show_line_numbers);
+        assert!(a.doc.line_numbers);
         a.run_command(Command::ShowKeyHelp);
         assert_eq!(a.mode, Mode::Help { top: 0 });
         a.handle_key(Key::Char('z'), t).unwrap();
@@ -2843,7 +3850,7 @@ mod tests {
         typ(&mut a, "und");
         a.handle_key(Key::Esc, t).unwrap();
         assert_eq!(a.mode, Mode::Insert);
-        assert_eq!(a.buffer.to_string(), "x");
+        assert_eq!(a.doc.buffer.to_string(), "x");
     }
 
     #[test]
@@ -2865,14 +3872,14 @@ mod tests {
         let t = Instant::now();
         let mut a = app("hello world");
         select_right(&mut a, 3);
-        assert_eq!(a.buffer.selection(), Some(0..3));
+        assert_eq!(a.doc.buffer.selection(), Some(0..3));
         a.handle_key(Key::Select(Motion::End), t).unwrap();
-        assert_eq!(a.buffer.selection(), Some(0..11));
+        assert_eq!(a.doc.buffer.selection(), Some(0..11));
         a.handle_key(Key::Select(Motion::Home), t).unwrap();
-        assert_eq!(a.buffer.selection(), None, "back at the anchor");
+        assert_eq!(a.doc.buffer.selection(), None, "back at the anchor");
         select_right(&mut a, 2);
         a.handle_key(Key::Right, t).unwrap();
-        assert_eq!(a.buffer.selection(), None);
+        assert_eq!(a.doc.buffer.selection(), None);
     }
 
     #[test]
@@ -2880,11 +3887,11 @@ mod tests {
         let t = Instant::now();
         let mut a = app("foo bar\nbaz\n");
         a.handle_key(Key::Select(Motion::WordRight), t).unwrap();
-        assert_eq!(a.buffer.selection(), Some(0..4));
+        assert_eq!(a.doc.buffer.selection(), Some(0..4));
         a.handle_key(Key::Select(Motion::Down), t).unwrap();
-        assert_eq!(a.buffer.selection(), Some(0..11));
+        assert_eq!(a.doc.buffer.selection(), Some(0..11));
         a.handle_key(Key::Select(Motion::FileEnd), t).unwrap();
-        assert_eq!(a.buffer.selection(), Some(0..12));
+        assert_eq!(a.doc.buffer.selection(), Some(0..12));
     }
 
     #[test]
@@ -2894,10 +3901,10 @@ mod tests {
         select_right(&mut a, 2);
         a.handle_key(Key::Esc, t).unwrap();
         assert!(matches!(a.mode, Mode::Overlay { .. }));
-        assert_eq!(a.buffer.selection(), Some(0..2), "still selected");
+        assert_eq!(a.doc.buffer.selection(), Some(0..2), "still selected");
         assert!(a.layer_rows().contains(&("x", "cut")));
         a.handle_key(Key::Esc, t).unwrap();
-        assert_eq!(a.buffer.selection(), None);
+        assert_eq!(a.doc.buffer.selection(), None);
         assert_eq!(a.mode, Mode::Insert, "not the palette");
     }
 
@@ -2905,7 +3912,10 @@ mod tests {
         App::new(
             Buffer::from_str(text, Some(path.into())),
             None,
-            &Options::default(),
+            &Options {
+                writing: false,
+                ..Options::default()
+            },
         )
     }
 
@@ -2920,20 +3930,20 @@ mod tests {
         let mut a = app("hello world");
         select_right(&mut a, 5);
         esc_then(&mut a, 'U');
-        assert_eq!(a.buffer.to_string(), "HELLO world");
+        assert_eq!(a.doc.buffer.to_string(), "HELLO world");
         assert_eq!(
-            a.buffer.selection(),
+            a.doc.buffer.selection(),
             Some(0..5),
             "ready for the next action"
         );
         esc_then(&mut a, 'L');
-        assert_eq!(a.buffer.to_string(), "hello world");
+        assert_eq!(a.doc.buffer.to_string(), "hello world");
         esc_then(&mut a, 'x');
-        assert_eq!(a.buffer.to_string(), " world");
+        assert_eq!(a.doc.buffer.to_string(), " world");
         let mut b = app("b\na\n");
-        b.buffer.select_all();
+        b.doc.buffer.select_all();
         esc_then(&mut b, 'S');
-        assert_eq!(b.buffer.to_string(), "a\nb\n");
+        assert_eq!(b.doc.buffer.to_string(), "a\nb\n");
     }
 
     #[test]
@@ -2943,7 +3953,7 @@ mod tests {
         esc_then(&mut a, '/');
         assert_eq!(a.search_query(), Some("cat"));
         a.handle_key(Key::Esc, Instant::now()).unwrap();
-        a.buffer.move_to(0);
+        a.doc.buffer.move_to(0);
         select_right(&mut a, 3);
         esc_then(&mut a, 'R');
         assert_eq!(a.search_query(), Some("cat"));
@@ -2954,8 +3964,8 @@ mod tests {
         let mut a = app("hello");
         select_right(&mut a, 2);
         esc_then(&mut a, 'z');
-        assert_eq!(a.buffer.selection(), Some(0..2));
-        assert_eq!(a.buffer.to_string(), "hello");
+        assert_eq!(a.doc.buffer.selection(), Some(0..2));
+        assert_eq!(a.doc.buffer.to_string(), "hello");
         assert_eq!(a.mode, Mode::Insert);
     }
 
@@ -2968,10 +3978,10 @@ mod tests {
         assert!(!r.contains(&"#"), "no comment syntax for .txt");
         assert_eq!(r.last(), Some(&"Esc Esc"));
         let mut off = code_app("/x/notes.txt", "(a) b");
-        off.buffer.move_to(4);
+        off.doc.buffer.move_to(4);
         assert!(!rows(&off).contains(&"i"), "not on a bracket");
         let mut unmatched = code_app("/x/notes.txt", "(a");
-        unmatched.buffer.move_to(0);
+        unmatched.doc.buffer.move_to(0);
         assert!(!rows(&unmatched).contains(&"i"), "no partner");
         let toml = code_app("/x/a.toml", "a = 1\n");
         assert!(rows(&toml).contains(&"#"));
@@ -2980,24 +3990,24 @@ mod tests {
     #[test]
     fn inside_brackets_selects_between_them_from_either_end() {
         let mut a = code_app("/x/a.txt", "f(abc)");
-        a.buffer.move_to(1);
+        a.doc.buffer.move_to(1);
         esc_then(&mut a, 'i');
-        assert_eq!(a.buffer.selection(), Some(2..5));
-        a.buffer.move_to(5);
+        assert_eq!(a.doc.buffer.selection(), Some(2..5));
+        a.doc.buffer.move_to(5);
         esc_then(&mut a, 'i');
-        assert_eq!(a.buffer.selection(), Some(2..5));
+        assert_eq!(a.doc.buffer.selection(), Some(2..5));
     }
 
     #[test]
     fn comment_key_toggles_the_line() {
         let mut a = code_app("/x/a.py", "x = 1\n");
         esc_then(&mut a, '#');
-        assert_eq!(a.buffer.to_string(), "# x = 1\n");
+        assert_eq!(a.doc.buffer.to_string(), "# x = 1\n");
         esc_then(&mut a, '#');
-        assert_eq!(a.buffer.to_string(), "x = 1\n");
+        assert_eq!(a.doc.buffer.to_string(), "x = 1\n");
         let mut plain = code_app("/x/a.txt", "x\n");
         esc_then(&mut plain, '#');
-        assert!(!plain.buffer.is_dirty());
+        assert!(!plain.doc.buffer.is_dirty());
     }
 
     #[cfg(feature = "highlight")]
@@ -3006,21 +4016,21 @@ mod tests {
         let text = "fn one() {\n    let a = 1;\n}\n\nfn two() {}\n";
         let mut a = code_app("/x/a.rs", text);
         assert!(a.layer_rows().contains(&("f", "select function")));
-        a.buffer.move_to(16);
+        a.doc.buffer.move_to(16);
         esc_then(&mut a, 'f');
-        assert_eq!(a.buffer.selection(), Some(0..27));
+        assert_eq!(a.doc.buffer.selection(), Some(0..27));
         // then act on it, the way a user would: Esc f, Esc x
         esc_then(&mut a, 'x');
-        assert_eq!(a.buffer.to_string(), "\n\nfn two() {}\n");
+        assert_eq!(a.doc.buffer.to_string(), "\n\nfn two() {}\n");
         a.handle_key(Key::Ctrl('z'), Instant::now()).unwrap();
-        a.buffer.move_to(0);
+        a.doc.buffer.move_to(0);
         esc_then(&mut a, 'n');
-        assert_eq!(a.buffer.cursor(), 29);
+        assert_eq!(a.doc.buffer.cursor(), 29);
         esc_then(&mut a, 'p');
-        assert_eq!(a.buffer.cursor(), 0);
+        assert_eq!(a.doc.buffer.cursor(), 0);
         esc_then(&mut a, 'p');
         assert_eq!(a.message.as_deref(), Some("No more functions"));
-        a.buffer.move_to(28);
+        a.doc.buffer.move_to(28);
         esc_then(&mut a, 'f');
         assert_eq!(a.message.as_deref(), Some("Not inside a function"));
     }
@@ -3029,22 +4039,22 @@ mod tests {
     #[test]
     fn expand_grows_the_selection_one_level_at_a_time() {
         let mut a = code_app("/x/a.rs", "fn f() { g(1 + 2); }\n");
-        a.buffer.move_to(11);
+        a.doc.buffer.move_to(11);
         esc_then(&mut a, 'e');
-        assert_eq!(a.buffer.selection(), Some(11..12));
+        assert_eq!(a.doc.buffer.selection(), Some(11..12));
         esc_then(&mut a, 'e');
-        assert_eq!(a.buffer.selection(), Some(11..16));
+        assert_eq!(a.doc.buffer.selection(), Some(11..16));
         esc_then(&mut a, 'e');
-        assert_eq!(a.buffer.selection(), Some(10..17));
+        assert_eq!(a.doc.buffer.selection(), Some(10..17));
     }
 
     #[cfg(feature = "highlight")]
     #[test]
     fn code_keys_keep_char_positions_with_non_ascii_text() {
         let mut a = code_app("/x/a.rs", "// 世界\nfn f() {}\n");
-        a.buffer.move_to(7);
+        a.doc.buffer.move_to(7);
         esc_then(&mut a, 'f');
-        assert_eq!(a.buffer.selection(), Some(6..15));
+        assert_eq!(a.doc.buffer.selection(), Some(6..15));
     }
 
     #[test]
@@ -3058,7 +4068,7 @@ mod tests {
             a.handle_key(key, t).unwrap();
         }
         a.handle_paste("pasted".to_string()).unwrap();
-        assert!(!a.buffer.is_dirty());
+        assert!(!a.doc.buffer.is_dirty());
         a.handle_key(Key::Esc, t).unwrap();
         assert_eq!(a.mode, Mode::Insert);
         assert_eq!(a.reader, None);
@@ -3109,9 +4119,9 @@ mod tests {
     fn reader_clears_a_selection_it_replaces() {
         let t = Instant::now();
         let mut a = code_app("/x/a.txt", "one\n");
-        a.buffer.select_all();
+        a.doc.buffer.select_all();
         a.run_command(Command::Reader);
-        assert_eq!(a.buffer.selection(), None);
+        assert_eq!(a.doc.buffer.selection(), None);
         a.handle_key(Key::Esc, t).unwrap();
         assert_eq!(a.mode, Mode::Insert);
     }
@@ -3142,31 +4152,31 @@ mod tests {
     fn up_and_down_move_by_wrapped_row_and_hold_the_column() {
         let t = Instant::now();
         let mut a = wrapped(&format!("{}\nshort\n", "a".repeat(25)));
-        a.buffer.move_to(3);
+        a.doc.buffer.move_to(3);
         a.handle_key(Key::Down, t).unwrap();
-        assert_eq!(a.buffer.cursor(), 13, "same line, one row down");
+        assert_eq!(a.doc.buffer.cursor(), 13, "same line, one row down");
         a.handle_key(Key::Down, t).unwrap();
-        assert_eq!(a.buffer.cursor(), 23);
+        assert_eq!(a.doc.buffer.cursor(), 23);
         a.handle_key(Key::Down, t).unwrap();
-        assert_eq!(a.buffer.line_col(), (2, 4), "onto the next line");
+        assert_eq!(a.doc.buffer.line_col(), (2, 4), "onto the next line");
         a.handle_key(Key::Up, t).unwrap();
-        assert_eq!(a.buffer.cursor(), 23);
+        assert_eq!(a.doc.buffer.cursor(), 23);
         a.handle_key(Key::Up, t).unwrap();
         a.handle_key(Key::Up, t).unwrap();
-        assert_eq!(a.buffer.cursor(), 3);
+        assert_eq!(a.doc.buffer.cursor(), 3);
         a.handle_key(Key::Up, t).unwrap();
-        assert_eq!(a.buffer.cursor(), 3, "the top stays put");
+        assert_eq!(a.doc.buffer.cursor(), 3, "the top stays put");
     }
 
     #[test]
     fn the_column_survives_a_short_row() {
         let t = Instant::now();
         let mut a = wrapped("abcdefgh\nxy\nabcdefgh\n");
-        a.buffer.move_to(6);
+        a.doc.buffer.move_to(6);
         a.handle_key(Key::Down, t).unwrap();
-        assert_eq!(a.buffer.line_col(), (2, 3));
+        assert_eq!(a.doc.buffer.line_col(), (2, 3));
         a.handle_key(Key::Down, t).unwrap();
-        assert_eq!(a.buffer.line_col(), (3, 7));
+        assert_eq!(a.doc.buffer.line_col(), (3, 7));
     }
 
     #[test]
@@ -3187,16 +4197,76 @@ mod tests {
         let t = Instant::now();
         let mut a = wrapped(&"a".repeat(25));
         a.handle_key(Key::Select(Motion::Down), t).unwrap();
-        assert_eq!(a.buffer.selection(), Some(0..10));
+        assert_eq!(a.doc.buffer.selection(), Some(0..10));
+    }
+
+    fn theme_picker(a: &mut App) {
+        a.run_command(Command::ChooseTheme);
+        assert!(matches!(&a.mode, Mode::Palette(s) if s.theme_before().is_some()));
+    }
+
+    #[test]
+    fn the_theme_picker_shows_each_theme_and_esc_puts_it_back() {
+        let t = Instant::now();
+        let mut a = app("x");
+        theme_picker(&mut a);
+        a.handle_key(Key::Down, t).unwrap();
+        assert_eq!(a.theme, ThemeName::Harbor);
+        a.handle_key(Key::Down, t).unwrap();
+        assert_eq!(a.theme, ThemeName::Dusk);
+        a.handle_key(Key::Up, t).unwrap();
+        assert_eq!(a.theme, ThemeName::Harbor);
+        a.handle_key(Key::Esc, t).unwrap();
+        assert_eq!(a.theme, ThemeName::Signal);
+        assert_eq!(a.mode, Mode::Insert);
+    }
+
+    #[test]
+    fn enter_keeps_the_theme_and_says_how_to_make_it_last() {
+        let t = Instant::now();
+        let mut a = app("x");
+        theme_picker(&mut a);
+        typ(&mut a, "ember");
+        assert_eq!(a.theme, ThemeName::Ember);
+        a.handle_key(Key::Enter, t).unwrap();
+        assert_eq!(a.theme, ThemeName::Ember);
+        assert_eq!(a.mode, Mode::Insert);
+        let said = a.message.clone().unwrap();
+        assert!(said.contains("theme = \"ember\""), "{said}");
+    }
+
+    #[test]
+    fn a_filter_with_no_match_keeps_the_last_theme_shown() {
+        let t = Instant::now();
+        let mut a = app("x");
+        theme_picker(&mut a);
+        typ(&mut a, "moss");
+        typ(&mut a, "zz");
+        assert_eq!(a.theme, ThemeName::Moss);
+        a.handle_key(Key::Enter, t).unwrap();
+        assert!(matches!(a.mode, Mode::Palette(_)), "nothing to pick");
+        a.handle_key(Key::Esc, t).unwrap();
+        assert_eq!(a.theme, ThemeName::Signal);
+    }
+
+    #[test]
+    fn pasting_into_the_theme_picker_shows_the_match() {
+        let t = Instant::now();
+        let mut a = app("x");
+        theme_picker(&mut a);
+        a.handle_paste("day".to_string()).unwrap();
+        assert_eq!(a.theme, ThemeName::Daybreak);
+        a.handle_key(Key::Esc, t).unwrap();
+        assert_eq!(a.theme, ThemeName::Signal);
     }
 
     #[test]
     fn toggling_wrap_resets_the_view() {
         let mut a = wrapped(&"a".repeat(200));
         a.run_command(Command::ToggleWrap);
-        assert!(!a.soft_wrap);
+        assert!(!a.doc.soft_wrap);
         a.run_command(Command::ToggleWrap);
-        assert!(a.soft_wrap);
+        assert!(a.doc.soft_wrap);
         assert_eq!(a.scroll_row(), 0);
     }
 
@@ -3209,7 +4279,7 @@ mod tests {
         };
         let path = std::path::PathBuf::from("/x/a.txt");
         let mut a = App::new(Buffer::from_str("base", Some(path.clone())), None, &opts);
-        assert_eq!(a.buffer.indent(), Indent::Spaces(2));
+        assert_eq!(a.doc.buffer.indent(), Indent::Spaces(2));
         a.mode = Mode::Recover(RecoverInfo {
             target: path,
             swap_path: "/no/such/swap".into(),
@@ -3218,8 +4288,8 @@ mod tests {
             file_changed: false,
         });
         a.handle_key(Key::Char('r'), t).unwrap();
-        assert_eq!(a.buffer.to_string(), "no indent here");
-        assert_eq!(a.buffer.indent(), Indent::Spaces(2));
+        assert_eq!(a.doc.buffer.to_string(), "no indent here");
+        assert_eq!(a.doc.buffer.indent(), Indent::Spaces(2));
     }
 
     #[test]
@@ -3227,8 +4297,8 @@ mod tests {
         let mut a = code_app("/x/a.txt", "abc");
         esc_then(&mut a, 'f');
         esc_then(&mut a, 'n');
-        assert_eq!(a.buffer.selection(), None);
-        assert_eq!(a.buffer.cursor(), 0);
+        assert_eq!(a.doc.buffer.selection(), None);
+        assert_eq!(a.doc.buffer.cursor(), 0);
         assert_eq!(a.message, None);
     }
 
@@ -3238,7 +4308,7 @@ mod tests {
         let mut a = app("one\ntwo\n");
         select_right(&mut a, 2);
         a.handle_key(Key::Alt('x'), t).unwrap();
-        assert_eq!(a.buffer.to_string(), "e\ntwo\n");
+        assert_eq!(a.doc.buffer.to_string(), "e\ntwo\n");
         assert_eq!(a.mode, Mode::Insert);
     }
 
@@ -3246,14 +4316,14 @@ mod tests {
     fn word_keys_delete_a_selection_when_there_is_one() {
         let t = Instant::now();
         let mut a = app("foo bar baz");
-        a.buffer.move_to(4);
+        a.doc.buffer.move_to(4);
         select_right(&mut a, 3);
         a.handle_key(Key::WordBackspace, t).unwrap();
-        assert_eq!(a.buffer.to_string(), "foo  baz");
+        assert_eq!(a.doc.buffer.to_string(), "foo  baz");
         let mut b = app("foo bar baz");
         select_right(&mut b, 1);
         b.handle_key(Key::WordDelete, t).unwrap();
-        assert_eq!(b.buffer.to_string(), "oo bar baz");
+        assert_eq!(b.doc.buffer.to_string(), "oo bar baz");
     }
 
     #[test]
@@ -3268,41 +4338,45 @@ mod tests {
             Some("\x1b]52;c;aGVsbG8=\x07")
         );
         assert_eq!(a.take_terminal_output(), None, "sent once");
-        assert_eq!(a.buffer.selection(), Some(0..5), "copy keeps the selection");
+        assert_eq!(
+            a.doc.buffer.selection(),
+            Some(0..5),
+            "copy keeps the selection"
+        );
         a.handle_key(Key::CtrlEnd, t).unwrap();
         a.handle_key(Key::Ctrl('v'), t).unwrap();
-        assert_eq!(a.buffer.to_string(), "hello worldhello");
+        assert_eq!(a.doc.buffer.to_string(), "hello worldhello");
         a.handle_key(Key::Ctrl('z'), t).unwrap();
-        assert_eq!(a.buffer.to_string(), "hello world");
+        assert_eq!(a.doc.buffer.to_string(), "hello world");
     }
 
     #[test]
     fn cut_a_selection_is_one_undo_step() {
         let t = Instant::now();
         let mut a = app("hello world");
-        a.buffer.move_to(5);
+        a.doc.buffer.move_to(5);
         select_right(&mut a, 6);
         a.handle_key(Key::Ctrl('x'), t).unwrap();
-        assert_eq!(a.buffer.to_string(), "hello");
+        assert_eq!(a.doc.buffer.to_string(), "hello");
         a.handle_key(Key::Ctrl('z'), t).unwrap();
-        assert_eq!(a.buffer.to_string(), "hello world");
+        assert_eq!(a.doc.buffer.to_string(), "hello world");
         a.handle_key(Key::CtrlHome, t).unwrap();
         a.handle_key(Key::Ctrl('v'), t).unwrap();
-        assert_eq!(a.buffer.to_string(), " worldhello world");
+        assert_eq!(a.doc.buffer.to_string(), " worldhello world");
     }
 
     #[test]
     fn with_no_selection_cut_and_copy_take_the_line() {
         let t = Instant::now();
         let mut a = app("one\ntwo\nthree");
-        a.buffer.move_to(5);
+        a.doc.buffer.move_to(5);
         a.handle_key(Key::Ctrl('x'), t).unwrap();
-        assert_eq!(a.buffer.to_string(), "one\nthree");
+        assert_eq!(a.doc.buffer.to_string(), "one\nthree");
         assert_eq!(a.message.as_deref(), Some("Copied 1 line"));
-        a.buffer.move_to(1);
+        a.doc.buffer.move_to(1);
         a.handle_key(Key::Ctrl('v'), t).unwrap();
         assert_eq!(
-            a.buffer.to_string(),
+            a.doc.buffer.to_string(),
             "two\none\nthree",
             "a whole line pastes above, wherever the cursor is in the line"
         );
@@ -3316,7 +4390,7 @@ mod tests {
         a.handle_key(Key::Ctrl('c'), t).unwrap();
         a.handle_key(Key::Home, t).unwrap();
         a.handle_key(Key::Ctrl('v'), t).unwrap();
-        assert_eq!(a.buffer.to_string(), "one\ntwo\ntwo");
+        assert_eq!(a.doc.buffer.to_string(), "one\ntwo\ntwo");
     }
 
     #[test]
@@ -3328,7 +4402,7 @@ mod tests {
         a.handle_key(Key::End, t).unwrap();
         a.handle_key(Key::Select(Motion::WordLeft), t).unwrap();
         a.handle_key(Key::Ctrl('v'), t).unwrap();
-        assert_eq!(a.buffer.to_string(), "abc abc");
+        assert_eq!(a.doc.buffer.to_string(), "abc abc");
     }
 
     #[test]
@@ -3341,7 +4415,7 @@ mod tests {
         assert_eq!(a.message.as_deref(), Some("Nothing to cut"));
         a.handle_key(Key::Ctrl('v'), t).unwrap();
         assert!(a.message.as_deref().unwrap().contains("Clipboard is empty"));
-        assert!(!a.buffer.is_dirty());
+        assert!(!a.doc.buffer.is_dirty());
     }
 
     #[test]
@@ -3353,7 +4427,7 @@ mod tests {
         let mut dos = app("x\r\ny\r\n");
         dos.clipboard = a.clipboard.clone();
         dos.handle_key(Key::Ctrl('v'), t).unwrap();
-        assert_eq!(dos.buffer.to_string(), "a\r\nb\r\nx\r\ny\r\n");
+        assert_eq!(dos.doc.buffer.to_string(), "a\r\nb\r\nx\r\ny\r\n");
     }
 
     #[test]

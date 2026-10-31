@@ -3,7 +3,9 @@
 //! The binary in `main.rs` parses options and calls [`run`].
 
 pub mod app;
+pub mod bib;
 pub mod buffer;
+pub mod build;
 pub mod cli;
 pub mod clipboard;
 pub mod command;
@@ -20,9 +22,11 @@ pub mod reader;
 pub mod review;
 pub mod search;
 pub mod session;
+pub mod spell;
 pub mod swap;
 pub mod syntax;
 pub mod term;
+pub mod tree;
 pub mod ui;
 pub mod wrap;
 
@@ -44,6 +48,7 @@ use swap::SwapWriter;
 
 /// How long the event loop waits for input before calling `App::tick`.
 const POLL: Duration = Duration::from_millis(1000);
+const BUILD_POLL: Duration = Duration::from_millis(100);
 
 /// Runs the editor with parsed options and returns the process exit code.
 pub fn run(opts: Options) -> anyhow::Result<ExitCode> {
@@ -69,6 +74,8 @@ pub fn run(opts: Options) -> anyhow::Result<ExitCode> {
         app.message = opts.config_warning.clone();
         app.message_is_error = app.message.is_some();
     }
+    app.queue_files(opts.more_files.clone());
+    app.load_speller();
     let result = event_loop(&mut app, opts.no_kitty);
     if result.is_ok() {
         app.finish();
@@ -187,18 +194,23 @@ fn event_loop(app: &mut App, no_kitty: bool) -> anyhow::Result<()> {
     term::install_signal_handler()?;
     let _guard = term::TerminalGuard::enter(no_kitty)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(std::io::stdout()))?;
+    let truecolor = ui::theme::takes_24_bit(std::env::var("COLORTERM").ok().as_deref());
     let mut redraw = true;
     loop {
+        app.open_queued();
         if redraw {
             let size = terminal.size()?;
             app.layout(size.width, size.height);
-            terminal.draw(|f| ui::render(app, f))?;
+            let theme = app.theme.styles(truecolor);
+            terminal.draw(|f| ui::render(app, f, &theme))?;
             redraw = false;
         }
         if app.quit {
             break;
         }
-        if event::poll(POLL)? {
+        // A build's end should show soon after it happens.
+        let wait = if app.building() { BUILD_POLL } else { POLL };
+        if event::poll(wait)? {
             let ev = event::read()?;
             if let Some(input) = input::map_event(ev) {
                 app.handle_input(input, Instant::now())?;

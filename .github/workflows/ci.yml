@@ -1,0 +1,36 @@
+name: ci
+
+on:
+  push:
+    branches: [main, dev, "*-patch", "*-hotfix"]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98.1"
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: fmt
+        run: cargo fmt --check
+      - name: clippy
+        run: |
+          cargo clippy --all-targets -- -D warnings
+          cargo clippy --all-targets --no-default-features -- -D warnings
+      - name: test
+        run: |
+          cargo test
+          cargo test --no-default-features
+      - name: scripts
+        run: sh -n install.sh && sh -n packaging/dist.sh
+      - name: the installer carries the release key
+        run: |
+          sed -n "/<<'KYTE_RELEASE_KEY'/,/^KYTE_RELEASE_KEY/p" install.sh | sed '1d;$d' |
+            diff - release/kyte-release.pub.pem
