@@ -28,6 +28,10 @@ static LATEX_SCANNER: unsafe extern "C" fn() -> *mut std::ffi::c_void =
 const BIBTEX: tree_sitter_language::LanguageFn =
     unsafe { tree_sitter_language::LanguageFn::from_raw(tree_sitter_bibtex) };
 
+/// How far around the lines asked for a LaTeX file is parsed.
+const LATEX_BEFORE: usize = 4 * 1024;
+const LATEX_AFTER: usize = 1024;
+
 /// Documents larger than this are not highlighted (every redraw re-parses).
 pub const MAX_BYTES: usize = 512 * 1024;
 
@@ -376,6 +380,27 @@ fn config(lang: Lang) -> Option<&'static HighlightConfiguration> {
         .as_ref()
 }
 
+/// What to parse to color bytes `lo..hi` of a LaTeX file. Its grammar takes
+/// about 1.4 ms per KB, some fourteen times the others, so parsing a whole
+/// paper would lag on every key. Its structure is local, so a stretch around
+/// the lines is enough, starting from a blank line where there is one.
+fn window(text: &str, lo: usize, hi: usize) -> Range<usize> {
+    let line_start = |at: usize| text[..at].rfind('\n').map_or(0, |i| i + 1);
+    let boundary = |mut at: usize| {
+        while !text.is_char_boundary(at) {
+            at += 1;
+        }
+        at
+    };
+    let reach = boundary(lo.saturating_sub(LATEX_BEFORE));
+    let start = text[reach..lo]
+        .find("\n\n")
+        .map_or_else(|| line_start(reach), |i| reach + i + 2);
+    let stop = boundary((hi + LATEX_AFTER).min(text.len()));
+    let end = text[stop..].find('\n').map_or(text.len(), |i| stop + i + 1);
+    start..end
+}
+
 /// Highlighted byte ranges of `text` that overlap lines `lines` (0-based,
 /// end exclusive). Ranges never overlap each other; innermost captures win.
 pub fn highlight(
@@ -384,7 +409,7 @@ pub fn highlight(
     lines: Range<usize>,
 ) -> Vec<(Range<usize>, HighlightKind)> {
     let mut out = Vec::new();
-    if text.len() > MAX_BYTES {
+    if text.len() > MAX_BYTES && lang != Lang::Latex {
         return out;
     }
     let Some(cfg) = config(lang) else {
@@ -400,8 +425,15 @@ pub fn highlight(
     } else {
         lo
     };
+    let base = if lang == Lang::Latex {
+        window(text, lo, hi)
+    } else {
+        0..text.len()
+    };
+    let offset = base.start;
+    let part = &text[base];
     let mut hl = Highlighter::new();
-    let Ok(events) = hl.highlight(cfg, text.as_bytes(), None, None, |_| None) else {
+    let Ok(events) = hl.highlight(cfg, part.as_bytes(), None, None, |_| None) else {
         return out;
     };
     let mut stack: Vec<HighlightKind> = Vec::new();
@@ -412,6 +444,7 @@ pub fn highlight(
                 stack.pop();
             }
             Ok(HighlightEvent::Source { start, end }) => {
+                let (start, end) = (start + offset, end + offset);
                 if end <= lo {
                     continue;
                 }
@@ -551,6 +584,35 @@ mod tests {
         ] {
             assert_eq!(Lang::from_path(Path::new(name)), Some(lang), "{name}");
         }
+    }
+
+    #[test]
+    fn a_long_latex_file_is_colored_from_the_text_around_the_lines() {
+        let para = "\\section{One}\nWe cite \\cite{knuth} and $x + y$ here.\n\n";
+        let src = format!(
+            "\\begin{{document}}\n{}\\end{{document}}\n",
+            para.repeat(5000)
+        );
+        let (line, count) = (6000, src.lines().count());
+        assert!(src.len() > 100_000 && line + 3 < count);
+        let spans = highlight(Lang::Latex, &src, line..line + 3);
+        let k = kinds_of(&src, &spans);
+        assert!(k
+            .iter()
+            .any(|(t, x)| t.contains("cite") && *x == HighlightKind::Function));
+        let ends = |at: usize| src[..at].matches('\n').count();
+        for (r, _) in &spans {
+            assert!(ends(r.start) <= line + 3 && ends(r.end) >= line, "{r:?}");
+        }
+        assert_eq!(window("short", 0, 5), 0..5);
+        assert!(
+            src.len() < MAX_BYTES,
+            "and past the limit, LaTeX still colors:"
+        );
+        let long = para.repeat(30_000);
+        assert!(long.len() > MAX_BYTES);
+        assert!(!highlight(Lang::Latex, &long, 900..903).is_empty());
+        assert!(highlight(Lang::Markdown, &"# a\n".repeat(200_000), 0..3).is_empty());
     }
 
     #[test]

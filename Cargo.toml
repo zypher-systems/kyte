@@ -23,6 +23,8 @@ crc32fast = "1"
 anyhow = "1"
 rustix = { version = "1", features = ["fs"] }
 signal-hook = "0.3"
+# Spell checking, on by default.
+spellbook = { version = "0.4", optional = true }
 # Syntax highlighting, on by default (`--no-default-features` leaves it out).
 tree-sitter = { version = "0.27", optional = true }
 tree-sitter-highlight = { version = "0.27", optional = true }
@@ -60,7 +62,8 @@ tree-sitter-latex = { version = "0.1", optional = true }
 tree-sitter-language = { version = "0.1", optional = true }
 
 [features]
-default = ["highlight"]
+default = ["highlight", "spell"]
+spell = ["dep:spellbook"]
 highlight = [
     "dep:tree-sitter",
     "dep:tree-sitter-highlight",

@@ -31,6 +31,8 @@ pub struct Options {
     pub soft_wrap: bool,
     /// Markdown, text and LaTeX get the writing setup.
     pub writing: bool,
+    /// Writing gets its spelling checked.
+    pub spell_check: bool,
     pub theme: ThemeName,
     pub history_limit_mb: u64,
     /// What was wrong with the settings file, for the first screen.
@@ -53,6 +55,7 @@ impl Default for Options {
             line_numbers: true,
             soft_wrap: false,
             writing: true,
+            spell_check: true,
             theme: ThemeName::Signal,
             history_limit_mb: 100,
             config_warning: None,

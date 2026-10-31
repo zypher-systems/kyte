@@ -126,12 +126,16 @@ pub fn render(app: &App, area: Rect, cells: &mut Cells, theme: &Theme) -> Option
     #[cfg(feature = "highlight")]
     let first_line = rows.first().map_or(0, |r| r.line);
     #[cfg(feature = "highlight")]
-    let spans = line_spans(
+    let (spans, not_prose) = line_spans(
         app,
         first_line,
         rows.last().map_or(0, |r| r.line + 1 - first_line),
         theme,
     );
+    #[cfg(not(feature = "highlight"))]
+    let not_prose: Vec<Vec<std::ops::Range<usize>>> = Vec::new();
+    #[cfg(not(feature = "highlight"))]
+    let first_line = rows.first().map_or(0, |r| r.line);
     let mut cursor = None;
     let mut full = (usize::MAX, String::new());
     for (i, row) in rows.iter().enumerate() {
@@ -176,6 +180,13 @@ pub fn render(app: &App, area: Rect, cells: &mut Cells, theme: &Theme) -> Option
         let area_row = Rect::new(x, y, text_w as u16, 1);
         if on_cursor_line {
             cells.set_style(area_row, theme.current_line);
+        }
+        if app.checks_spelling() {
+            let skip = not_prose.get(line - first_line).map_or(&[][..], |s| &s[..]);
+            let wrong = app.misspelled(text, skip);
+            paint_ranges(&wrong, row, piece, area_row, app, cells, |_| {
+                theme.misspelled
+            });
         }
         paint_matches(app, text, row, piece, area_row, cells, theme);
         paint_selection(app, row, piece, area_row, cells, theme);
@@ -230,12 +241,31 @@ fn paint_matches(
     };
     let buf = app.view_buffer();
     let matches = crate::search::line_matches(line, query);
-    if matches.is_empty() {
+    let cursor = buf.cursor().wrapping_sub(buf.line_start(row.line));
+    paint_ranges(&matches, row, piece, area, app, cells, |m| {
+        if m.start == cursor {
+            theme.search_current
+        } else {
+            theme.search_match
+        }
+    });
+}
+
+/// Styles `ranges` of a line, in characters, sorted and not overlapping.
+fn paint_ranges(
+    ranges: &[std::ops::Range<usize>],
+    row: &ScreenRow,
+    piece: &str,
+    area: Rect,
+    app: &App,
+    cells: &mut Cells,
+    style_of: impl Fn(&std::ops::Range<usize>) -> Style,
+) {
+    if ranges.is_empty() {
         return;
     }
     let (_, left) = app.scroll();
     let right = left + area.width as usize;
-    let cursor = buf.cursor().wrapping_sub(buf.line_start(row.line));
     let start = row.segment.chars.start;
     let mut walk = graphemes_with_char_offsets(piece);
     let mut col = walk.skip_plain(left);
@@ -246,22 +276,17 @@ fn paint_matches(
         }
         let w = grapheme_width(g, col);
         let at = start + off;
-        while matches.get(next).is_some_and(|m| m.end <= at) {
+        while ranges.get(next).is_some_and(|m| m.end <= at) {
             next += 1;
         }
-        let Some(m) = matches.get(next) else {
+        let Some(m) = ranges.get(next) else {
             break;
         };
         if m.contains(&at) && col + w > left {
-            let style = if m.start == cursor {
-                theme.search_current
-            } else {
-                theme.search_match
-            };
             let from = col.max(left);
             let to = (col + w).min(right);
             let cell = Rect::new(area.x + (from - left) as u16, area.y, (to - from) as u16, 1);
-            cells.set_style(cell, style);
+            cells.set_style(cell, style_of(m));
         }
         col += w;
         if col < left {
@@ -317,24 +342,30 @@ pub fn render_line(
     cells.set_stringn(x, y, vis, width, theme.text);
 }
 
-/// Highlight styles for each visible row, as byte ranges within the line.
+/// Highlight styles for each visible row, as byte ranges within the line, and
+/// where those rows hold something other than prose, such as code or math.
 #[cfg(feature = "highlight")]
+#[allow(clippy::type_complexity)]
 fn line_spans(
     app: &App,
     top: usize,
     rows: usize,
     theme: &Theme,
-) -> Vec<Vec<(std::ops::Range<usize>, ratatui::style::Style)>> {
-    use crate::highlight::{highlight, Lang};
+) -> (
+    Vec<Vec<(std::ops::Range<usize>, ratatui::style::Style)>>,
+    Vec<Vec<std::ops::Range<usize>>>,
+) {
+    use crate::highlight::{highlight, HighlightKind, Lang};
     let mut per = vec![Vec::new(); rows];
+    let mut not_prose = vec![Vec::new(); rows];
     let buf = app.view_buffer();
     let head = buf.head();
     let Some(lang) = buf.path().and_then(|p| Lang::detect(p, &head)) else {
-        return per;
+        return (per, not_prose);
     };
     let end = (top + rows).min(buf.line_count());
     if top >= end {
-        return per;
+        return (per, not_prose);
     }
     let text = buf.to_string();
     let rope = buf.rope();
@@ -352,10 +383,14 @@ fn line_spans(
             let (a, b) = (r.start.max(ls) - ls, r.end.min(le) - ls);
             if a < b {
                 per[l - top].push((a..b, style));
+                // Headings color as keywords, and they're prose.
+                if kind != HighlightKind::Keyword {
+                    not_prose[l - top].push(a..b);
+                }
             }
         }
     }
-    per
+    (per, not_prose)
 }
 
 /// `render_line` with per-byte-range styles (feature `highlight`).

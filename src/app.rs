@@ -17,6 +17,7 @@ use crate::reader::{self, Reader};
 use crate::review::{self, Change as ReviewChange};
 use crate::search;
 use crate::session::{self, Opened};
+use crate::spell::{self, Speller};
 use crate::swap::{self, RecoverInfo, SwapStatus, SwapWriter};
 use crate::syntax::{self, Prose};
 use crate::tree::FileTree;
@@ -194,6 +195,7 @@ struct View {
     line_numbers: bool,
     soft_wrap: bool,
     writing: bool,
+    spell_check: bool,
 }
 
 /// One open file and everything tied to it.
@@ -205,6 +207,12 @@ pub struct Doc {
     discard: bool,
     /// What kind of writing this is, if it isn't code.
     pub prose: Option<Prose>,
+    /// This file's spelling is being checked.
+    spelling: bool,
+    /// LaTeX's words, counted when typing pauses, because that needs a parse.
+    latex_words: Option<usize>,
+    /// The text has changed since `latex_words` was counted.
+    recount: bool,
     pub line_numbers: bool,
     /// Long lines wrap at the edge of the screen.
     pub soft_wrap: bool,
@@ -240,6 +248,9 @@ impl Doc {
             keep_swap: false,
             discard: false,
             prose: None,
+            spelling: false,
+            latex_words: None,
+            recount: false,
             line_numbers: true,
             soft_wrap: false,
             swap,
@@ -270,6 +281,7 @@ impl Doc {
             .path()
             .and_then(|p| syntax::prose(p, &head))
             .filter(|_| view.writing);
+        self.spelling = view.spell_check && self.prose.is_some();
         self.soft_wrap = view.soft_wrap || self.prose.is_some();
         // LaTeX reports errors by line, so it keeps its numbers.
         self.line_numbers =
@@ -396,6 +408,9 @@ pub struct App {
     last_fsync: Option<Instant>,
     /// The settings a file starts with.
     default_view: View,
+    /// Loaded the first time a file needs it.
+    speller: Option<Speller>,
+    last_key: Option<Instant>,
     /// The column Up and Down hold to while moving by wrapped rows.
     visual_col: Option<usize>,
     view: (u16, u16),
@@ -403,6 +418,8 @@ pub struct App {
 
 /// Counting words reads the whole file on every key, so past this it stops.
 const MAX_COUNTED_BYTES: usize = 2 * 1024 * 1024;
+/// How long typing stops before a LaTeX file's words are counted again.
+const RECOUNT_PAUSE: Duration = Duration::from_millis(500);
 
 /// Shown on the message line only while the overlay is open (section 5.4).
 /// The Esc layer's core keys, shown on top of whatever the context adds.
@@ -430,9 +447,12 @@ impl App {
             line_numbers: opts.line_numbers,
             soft_wrap: opts.soft_wrap,
             writing: opts.writing,
+            spell_check: opts.spell_check,
         };
         App {
             doc: Doc::new(buffer, swap).with_view(default_view),
+            speller: None,
+            last_key: None,
             parked: Vec::new(),
             at: 0,
             queued: Default::default(),
@@ -603,6 +623,9 @@ impl App {
     /// Records the terminal size and scrolls so the cursor stays visible.
     /// Call before every render.
     pub fn layout(&mut self, width: u16, height: u16) {
+        if self.doc.prose == Some(Prose::Latex) && self.doc.latex_words.is_none() {
+            self.count_latex();
+        }
         self.view = (width, height);
         let h = (height as usize).saturating_sub(2).max(1);
         if self.doc.soft_wrap {
@@ -692,6 +715,7 @@ impl App {
         if edits.is_empty() {
             return;
         }
+        self.doc.recount = true;
         self.with_history(|h| h.append(&edits));
         if self.doc.swap_failed {
             return;
@@ -728,6 +752,7 @@ impl App {
     }
 
     fn key_inner(&mut self, key: Key, now: Instant) {
+        self.last_key = Some(now);
         self.message = None;
         self.message_is_error = false;
         self.completions.clear();
@@ -1117,6 +1142,12 @@ impl App {
             return rows;
         }
         rows.extend_from_slice(LEGEND);
+        if self.checks_spelling() {
+            if self.misspelled_at_cursor().is_some() {
+                rows.push(("z", "fix spelling"));
+            }
+            rows.push(("m", "next misspelling"));
+        }
         if self.open_count() > 1 {
             rows.extend([
                 ("b", "open files"),
@@ -1160,6 +1191,8 @@ impl App {
             'h' => self.open_history(),
             'v' => self.open_reader(),
             't' => self.open_tree(),
+            'z' => self.fix_spelling(),
+            'm' => self.next_misspelling(),
             'b' => self.open_files_list(),
             '.' => self.next_file(1),
             ',' => self.next_file(self.open_count() - 1),
@@ -1509,6 +1542,26 @@ impl App {
             }
             Entry::Line(n) => self.go_to_line(n),
             Entry::OpenFile { at, .. } => self.show_file(at),
+            Entry::Spelling { with, range } => {
+                let b = &mut self.doc.buffer;
+                b.move_to(range.end);
+                b.set_selection_anchor(range.start);
+                b.transform_selection(|_| with);
+                b.clear_selection();
+            }
+            Entry::AddWord(word) => {
+                if let Some(s) = self.speller.as_mut() {
+                    match s.add(&word) {
+                        Ok(()) => self.set_message(format!("Added {word} to your words")),
+                        Err(e) => self.set_error(format!("Added for now; can't save it: {e}")),
+                    }
+                }
+            }
+            Entry::IgnoreWord(word) => {
+                if let Some(s) = self.speller.as_mut() {
+                    s.ignore(&word);
+                }
+            }
             Entry::Theme(t) => {
                 self.theme = t;
                 let name = t.label();
@@ -1586,6 +1639,12 @@ impl App {
             }
             Command::ChooseTheme => self.mode = Mode::Palette(PaletteState::themes(self.theme)),
             Command::FileTree => self.open_tree(),
+            Command::FixSpelling => self.fix_spelling(),
+            Command::NextMisspelling => self.next_misspelling(),
+            Command::ToggleSpelling => {
+                self.doc.spelling = !self.doc.spelling;
+                self.load_speller();
+            }
             Command::OpenFiles => self.open_files_list(),
             Command::NextFile => self.next_file(1),
             Command::PreviousFile => self.next_file(self.open_count() - 1),
@@ -1744,6 +1803,13 @@ impl App {
         if due {
             if let Some(e) = self.doc.sync() {
                 self.set_error(e);
+            }
+            let paused = self
+                .last_key
+                .is_none_or(|t| now.saturating_duration_since(t) >= RECOUNT_PAUSE);
+            if self.doc.recount && paused && self.doc.prose == Some(Prose::Latex) {
+                self.count_latex();
+                self.needs_redraw = true;
             }
             for i in 0..self.parked.len() {
                 if let Some(e) = self.parked[i].sync() {
@@ -1917,6 +1983,7 @@ impl App {
         }
         self.visual_col = None;
         self.start_history();
+        self.load_speller();
         self.mode = recover.map_or(Mode::Insert, Mode::Recover);
         if let Some(w) = warning {
             self.set_error(w);
@@ -1926,13 +1993,163 @@ impl App {
         }
     }
 
+    /// Loads the checker once something needs it.
+    pub fn load_speller(&mut self) {
+        if self.doc.spelling && self.speller.is_none() {
+            let words = crate::config::path().with_file_name("words.txt");
+            self.speller = Speller::new(words);
+        }
+    }
+
+    /// Whether misspellings show in the file on screen.
+    pub fn checks_spelling(&self) -> bool {
+        self.doc.spelling && self.speller.is_some() && self.version_view.is_none()
+    }
+
+    /// The misspelled words of `line`, in characters, outside `skip`, which is
+    /// in bytes.
+    pub fn misspelled(
+        &self,
+        line: &str,
+        skip: &[std::ops::Range<usize>],
+    ) -> Vec<std::ops::Range<usize>> {
+        let Some(speller) = self.speller.as_ref() else {
+            return Vec::new();
+        };
+        let chars = |byte: usize| line[..byte].chars().count();
+        spell::words(line)
+            .into_iter()
+            .filter(|w| !skip.iter().any(|s| s.start < w.end && w.start < s.end))
+            .filter(|w| speller.is_wrong(&line[w.clone()]))
+            .map(|w| chars(w.start)..chars(w.end))
+            .collect()
+    }
+
+    /// Every misspelling from line `from` on, as `(line, characters)`.
+    fn misspellings_from(&self, from: usize) -> Vec<(usize, std::ops::Range<usize>)> {
+        let b = &self.doc.buffer;
+        let not_prose = self.not_prose(from..b.line_count());
+        let mut out = Vec::new();
+        for line in from..b.line_count() {
+            let skip = not_prose.get(line - from).map_or(&[][..], |s| &s[..]);
+            let wrong = self.misspelled(&b.line_text(line), skip);
+            out.extend(wrong.into_iter().map(|r| (line, r)));
+        }
+        out
+    }
+
+    /// Where `lines` hold something other than prose, per line, in bytes.
+    #[cfg(feature = "highlight")]
+    fn not_prose(&self, lines: std::ops::Range<usize>) -> Vec<Vec<std::ops::Range<usize>>> {
+        use crate::highlight::{highlight, HighlightKind, Lang};
+        let b = &self.doc.buffer;
+        let mut out = vec![Vec::new(); lines.len()];
+        let head = b.head();
+        let Some(lang) = b.path().and_then(|p| Lang::detect(p, &head)) else {
+            return out;
+        };
+        let rope = b.rope();
+        for (r, kind) in highlight(lang, &b.to_string(), lines.clone()) {
+            if kind == HighlightKind::Keyword || r.is_empty() {
+                continue;
+            }
+            for l in rope.byte_to_line(r.start)..=rope.byte_to_line(r.end - 1) {
+                if lines.contains(&l) {
+                    let start = rope.line_to_byte(l);
+                    let end = rope.line_to_byte(l + 1);
+                    out[l - lines.start].push(r.start.max(start) - start..r.end.min(end) - start);
+                }
+            }
+        }
+        out
+    }
+
+    #[cfg(not(feature = "highlight"))]
+    fn not_prose(&self, lines: std::ops::Range<usize>) -> Vec<Vec<std::ops::Range<usize>>> {
+        vec![Vec::new(); lines.len()]
+    }
+
+    /// The misspelled word under the cursor, or just behind it, in characters
+    /// of the file.
+    fn misspelled_at_cursor(&self) -> Option<std::ops::Range<usize>> {
+        let b = &self.doc.buffer;
+        let line = b.cursor_line();
+        let start = b.line_start(line);
+        let at = b.cursor() - start;
+        let not_prose = self.not_prose(line..line + 1);
+        let skip = not_prose.first().map_or(&[][..], |s| &s[..]);
+        self.misspelled(&b.line_text(line), skip)
+            .into_iter()
+            .find(|r| r.start <= at && at <= r.end)
+            .map(|r| start + r.start..start + r.end)
+    }
+
+    /// Opens the box of what to do about the word at the cursor.
+    fn fix_spelling(&mut self) {
+        let range = self.misspelled_at_cursor();
+        let (Some(range), Some(speller)) = (range, self.speller.as_ref()) else {
+            self.set_message("No misspelled word here");
+            return;
+        };
+        let word = self.doc.buffer.slice_string(range.clone());
+        let mut rows: Vec<Entry> = speller
+            .suggest(&word)
+            .into_iter()
+            .take(6)
+            .map(|with| Entry::Spelling {
+                with,
+                range: range.clone(),
+            })
+            .collect();
+        rows.push(Entry::AddWord(word.clone()));
+        rows.push(Entry::IgnoreWord(word.clone()));
+        self.mode = Mode::Palette(PaletteState::spelling(word, rows));
+    }
+
+    /// Moves to the next misspelling, wrapping to the top of the file.
+    fn next_misspelling(&mut self) {
+        if !self.checks_spelling() {
+            self.set_message("Spell check is off for this file");
+            return;
+        }
+        let b = &self.doc.buffer;
+        let (line, at) = (b.cursor_line(), b.cursor());
+        let start_of =
+            |b: &Buffer, (l, r): (usize, std::ops::Range<usize>)| b.line_start(l) + r.start;
+        let after = self.misspellings_from(line);
+        let b = &self.doc.buffer;
+        let next = after
+            .into_iter()
+            .map(|m| start_of(b, m))
+            .find(|&s| s > at)
+            .or_else(|| {
+                let all = self.misspellings_from(0);
+                all.into_iter().map(|m| start_of(b, m)).next()
+            });
+        match next {
+            Some(to) => self.doc.buffer.move_to(to),
+            None => self.set_message("No misspellings"),
+        }
+    }
+
     /// The words in the file on screen, for writing small enough to count on
     /// every key.
     pub fn word_count(&self) -> Option<usize> {
         let buf = self.view_buffer();
         let prose = self.doc.prose?;
+        if prose == Prose::Latex {
+            return self.doc.latex_words;
+        }
         (buf.rope().len_bytes() <= MAX_COUNTED_BYTES)
             .then(|| syntax::word_count(prose, &buf.to_string()))
+    }
+
+    /// Counts a LaTeX file's words.
+    fn count_latex(&mut self) {
+        let b = &self.doc.buffer;
+        self.doc.recount = false;
+        self.doc.latex_words = (b.rope().len_bytes() <= MAX_COUNTED_BYTES)
+            .then(|| syntax::word_count(Prose::Latex, &b.to_string()));
     }
 
     /// The words in the selection, in writing.
@@ -2581,6 +2798,7 @@ impl App {
                     self.doc.buffer.set_path(path.to_path_buf());
                     self.doc.swap_target = fileio::resolve_target(path).ok();
                     self.doc.set_view(self.default_view);
+                    self.load_speller();
                 }
                 self.doc.buffer.mark_clean();
                 self.note_save(path, overwritten);

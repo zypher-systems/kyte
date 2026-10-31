@@ -30,6 +30,22 @@ These replace the matching parts of `ARCHITECTURE`. `docs/ROADMAP.md` holds the 
   - Keeping your side of a review left a buffer that differed from disk marked clean, so closing it asked nothing. It's now marked unsaved.
   - With no edits, that buffer was also missing from the swap, which keeps no copy of its base until the first edit. Fuzzing the fix found this. `keep_base` now writes the copy and an empty edit, so a crash offers the text, and recovery says the file moved on.
 
+## Writing
+
+- Writing is one setup rather than separate modes for novels or papers, because they want the same things: wrapped lines, a word count and spell check. The setup follows the file's kind, so nothing has to be switched on.
+- Wrap and line numbers moved onto each open file, so a `.md` beside a `.rs` shows each the way it should. Toggles change one file.
+- Text and Markdown lose their line numbers. LaTeX keeps them, because `pdflatex` reports errors by line.
+- A `.txt` counts as writing unless it has a `#!` line, and `CMakeLists.txt` is code. `.sty` and `.cls` are code too.
+- A LaTeX word count needs to know what's prose, so it walks the parse tree: only `text` nodes in the document body, stepping around citations nested in them. It runs when typing pauses. Text and Markdown just split on spaces, at 0.4 ms for 500 KB, so they stay live.
+- LaTeX's grammar takes about 1.4 ms per KB, some fourteen times the others, because of its huge token list. Parsing the whole file made a 10,000-word paper cost 145 ms a key. `highlight` now parses only a window around the lines it's asked for: 4 KB before, from a blank line where there is one, and 1 KB after. That's about 4 ms a key at any length, so LaTeX also has no size limit. The price is that a block longer than the window can color wrongly when you're inside it.
+- Spell check uses `spellbook` with a compiled-in SCOWL en_US dictionary. Loading takes about 4 ms and a word about 50 ns, so visible lines are simply checked on every draw, and there's no background thread. The dictionary adds about 0.6 MB, and a system dictionary would have left SSH sessions and servers with nothing.
+- What isn't prose comes from the highlighter: anything colored is skipped, except keywords, which is how headings color. That one rule covers LaTeX math, commands, citations and comments, and code in Markdown, with no second parser. A build without highlighting checks everything except `\\commands`.
+- Words with a digit, or written in capitals or mixed case, are skipped. In technical writing they're nearly always names, and flagging each one teaches people to ignore the underline.
+- Misspellings use the error color and an underline. An underline color would be better, but `SGR 58` makes a terminal that doesn't know it blink instead.
+- `words.txt` is plain text beside the settings, so it can be edited, copied and kept in a dotfiles repo. Adding a word still works for the session if the file can't be written.
+- `tests/fixtures/settings.toml` keeps the writing setup off for the end-to-end tests, which are about editing and mostly use `.txt` files. The writing tests turn it back on.
+- BibTeX files aren't spell checked. They're mostly names and titles, in a format that isn't prose.
+
 ## File tree
 
 - The tree is a box in the middle of the screen, not a sidebar. It's something you pick from, so it follows the rule for menus, and it leaves the text its full width.
@@ -99,7 +115,7 @@ These replace the matching parts of `ARCHITECTURE`. `docs/ROADMAP.md` holds the 
   - Perl: it doesn't resolve against tree-sitter 0.27.
   - Scala, Haskell, Dart and Elixir: they work, but each adds megabytes for languages seldom edited in a Linux terminal. They can go in later.
 - The binary grows from about 15 MB to about 26 MB. C#, Ruby, SQL and PHP are most of that.
-- Swift followed, along with LaTeX and BibTeX, because research papers are something Kyte should be good for. They took the binary to about 33 MB.
+- Swift followed, along with LaTeX and BibTeX, because research papers are something Kyte should be good for. They took the binary to about 34 MB.
 - LaTeX: `tree-sitter-latex` 0.1.0 publishes its parser without `scanner.c`, so it doesn't link. The upstream scanner is 141 lines with the same twelve tokens, so `vendor/` keeps that one file and `build.rs` compiles it, rather than keeping a 37 MB grammar. The crate has no query, so `queries/latex.scm` is Kyte's own. A `section` node holds the whole section, so only the title is colored. Prose stays plain, which is what you read most.
 - BibTeX: the crate needs tree-sitter 0.22, which can't sit beside 0.27 in one build, but its 56 KB parser uses a format 0.27 still reads. `vendor/` keeps the parser, and the crate isn't a dependency.
 - GNU ld resolves symbols in order and failed on the scanner, though rust-lld didn't. `highlight.rs` names the scanner to fix the order, and both linkers were checked.

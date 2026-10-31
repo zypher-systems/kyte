@@ -60,6 +60,15 @@ pub enum Entry {
     Find(String),
     /// A row of the theme picker.
     Theme(ThemeName),
+    /// A spelling to put in place of the characters at `range`.
+    Spelling {
+        with: String,
+        range: std::ops::Range<usize>,
+    },
+    /// Keep this word for good.
+    AddWord(String),
+    /// Leave this word alone until Kyte closes.
+    IgnoreWord(String),
     /// A file open in this Kyte, by its place among the open files.
     OpenFile {
         at: usize,
@@ -77,6 +86,9 @@ impl Entry {
             Entry::Find(q) => format!("Find {q}"),
             Entry::Theme(t) => t.label().to_string(),
             Entry::OpenFile { name, .. } => name.clone(),
+            Entry::Spelling { with, .. } => with.clone(),
+            Entry::AddWord(word) => format!("Add {word} to my words"),
+            Entry::IgnoreWord(word) => format!("Ignore {word} for now"),
         }
     }
 
@@ -84,7 +96,11 @@ impl Entry {
         match self {
             Entry::Command(c) => c.hint(),
             Entry::File(_) => "file",
-            Entry::Line(_) | Entry::Find(_) => "",
+            Entry::Line(_)
+            | Entry::Find(_)
+            | Entry::Spelling { .. }
+            | Entry::AddWord(_)
+            | Entry::IgnoreWord(_) => "",
             Entry::Theme(t) if t.is_light() => "light",
             Entry::Theme(_) => "dark",
             Entry::OpenFile { note, .. } => note,
@@ -151,6 +167,11 @@ enum Source {
     },
     /// The open files.
     OpenFiles(Arc<Vec<Entry>>),
+    /// What to do about a misspelled word.
+    Spelling {
+        word: String,
+        rows: Arc<Vec<Entry>>,
+    },
 }
 
 impl Default for PaletteState {
@@ -200,6 +221,27 @@ impl PaletteState {
         state
     }
 
+    /// What to do about the misspelled `word`.
+    pub fn spelling(word: String, rows: Vec<Entry>) -> PaletteState {
+        let mut state = PaletteState {
+            source: Source::Spelling {
+                word,
+                rows: Arc::new(rows),
+            },
+            ..PaletteState::default()
+        };
+        state.set_query(String::new());
+        state
+    }
+
+    /// The word this box is fixing.
+    pub fn spelling_word(&self) -> Option<&str> {
+        match &self.source {
+            Source::Spelling { word, .. } => Some(word),
+            _ => None,
+        }
+    }
+
     pub fn is_open_files(&self) -> bool {
         matches!(self.source, Source::OpenFiles(_))
     }
@@ -246,6 +288,11 @@ impl PaletteState {
                 scored.sort_by_key(|(s, _)| std::cmp::Reverse(*s));
                 scored.into_iter().map(|(_, f)| f.clone()).collect()
             }
+            Source::Spelling { rows, .. } => rows
+                .iter()
+                .filter(|r| score(&self.query, &r.label()).is_some())
+                .cloned()
+                .collect(),
         };
         self.selected = 0;
     }
@@ -296,7 +343,7 @@ mod tests {
     #[test]
     fn empty_query_keeps_registry_order() {
         assert_eq!(filter(""), REGISTRY.to_vec());
-        assert_eq!(PaletteState::default().results.len(), 28);
+        assert_eq!(PaletteState::default().results.len(), 31);
     }
 
     #[test]
@@ -464,13 +511,13 @@ mod tests {
         for _ in 0..40 {
             s.down();
         }
-        assert_eq!(s.selected, 27);
+        assert_eq!(s.selected, 30);
         assert_eq!(s.selected_command(), Some(Command::ShowKeyHelp));
-        assert_eq!(s.scroll_offset(), 20);
+        assert_eq!(s.scroll_offset(), 23);
         s.push('s');
         assert_eq!(s.selected, 0);
         assert_eq!(s.selected_command(), Some(Command::Save));
         s.pop();
-        assert_eq!(s.results.len(), 28);
+        assert_eq!(s.results.len(), 31);
     }
 }

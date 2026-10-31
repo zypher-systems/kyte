@@ -34,7 +34,7 @@ The Makefile targets are thin wrappers:
 | `make demo` | `scripts/demo.sh` (see [Demo](#demo)) |
 | `make docker-test` | `cargo test` inside the Docker dev image (see [Docker](#docker)) |
 
-Kyte highlights Rust, Python, Bash, Fish, JavaScript, TypeScript, TSX, C, C++, C#, Go, Java, PHP, Ruby, Lua, Swift, Zig, SQL, Nix, JSON, HTML, CSS, XML, TOML, YAML, INI, Markdown, LaTeX, BibTeX, Makefiles, Dockerfiles, CMake and diffs, picked by file name or extension, or the `#!` line of a script, using tree-sitter. Building needs a C compiler for the grammars. To leave highlighting and the code actions out, which shrinks the binary from about 33 MB to about 1.3 MB:
+Kyte highlights Rust, Python, Bash, Fish, JavaScript, TypeScript, TSX, C, C++, C#, Go, Java, PHP, Ruby, Lua, Swift, Zig, SQL, Nix, JSON, HTML, CSS, XML, TOML, YAML, INI, Markdown, LaTeX, BibTeX, Makefiles, Dockerfiles, CMake and diffs, picked by file name or extension, or the `#!` line of a script, using tree-sitter. Building needs a C compiler for the grammars. To leave highlighting, the code actions and spell check out, which shrinks the binary from about 34 MB to about 1.3 MB:
 
 ```
 cargo build --release --no-default-features
@@ -129,6 +129,7 @@ The menu changes with where you are, and only lists what works there:
 | Where | Extra keys |
 | --- | --- |
 | On a bracket with a partner | `i` select inside |
+| In writing | `m` next misspelling, and `z` fix spelling on a misspelled word |
 | With more than one file open | `b` open files, `.` next file, `,` previous file |
 | In a file with a line comment syntax | `#` comment or uncomment the line |
 | In any language Kyte highlights | `e` select the syntax under the cursor |
@@ -156,7 +157,7 @@ Under tmux, set `tmux set -g escape-time 10`. tmux's default of 500 ms delays ev
 
 Esc Esc (or Ctrl-P) opens a fuzzy-filtered list. Type to filter, Up and Down to select, Enter to run, Esc to close without running anything.
 
-Commands: Save, Save as, Open file, Quit, Quit without saving, Undo, Redo, Cut, Copy, Paste, Select all, Find, Replace, Go to line, Toggle line numbers, Toggle tabs and spaces, Toggle soft wrap, Choose theme, File tree, Open files, Next file, Previous file, Close file, Show key help.
+Commands: Save, Save as, Open file, Quit, Quit without saving, Undo, Redo, Cut, Copy, Paste, Select all, Find, Replace, Go to line, Toggle line numbers, Toggle tabs and spaces, Toggle soft wrap, Choose theme, File tree, Fix spelling, Next misspelling, Toggle spell check, Open files, Next file, Previous file, Close file, Show key help.
 
 Kyte works out whether a file indents with tabs or spaces, and how many, from its first 10,000 lines. A file with no indent uses tabs. The status bar shows `Spaces N` for space-indented files. **Toggle tabs and spaces** changes what new indent uses until the file is closed; it doesn't rewrite existing lines.
 
@@ -239,6 +240,14 @@ Search ignores case until your text has a capital letter, then it matches exactl
 
 Ctrl-R asks what to replace and what to replace it with. Kyte then starts at the cursor, goes to the end of the file, wraps to the top, and stops where it started. At each match, `y` replaces it, `n` skips it, `a` replaces all the rest as one undo step, and Esc or `q` stops. Replace matches case the same way search does.
 
+## Writing
+
+Markdown, text and LaTeX files open for writing. Long lines wrap, the status bar shows a word count, and misspelled words are underlined. Markdown and text drop their line numbers. LaTeX keeps them, because its error messages cite lines. **Toggle line numbers**, **Toggle soft wrap** and **Toggle spell check** change one file at a time, and `writing = false` turns the whole setup off. Selecting text shows how many words are selected.
+
+The word count in LaTeX covers what a reader reads: the document body, without commands, math, comments, citations or labels. It catches up when you stop typing for a moment. In other files it's live. Files over 2 MiB don't show one.
+
+Spell check uses a built-in American English dictionary, so it needs nothing installed. Esc `m` moves to the next misspelling. On a misspelled word, Esc `z` opens a box of suggestions. It can also add the word to your words, or ignore it until Kyte closes. Your words are kept in `words.txt` beside the settings file, one per line, so you can edit them. Kyte leaves alone what isn't prose, such as LaTeX commands, math and citation keys, code in Markdown, and web addresses. It also skips words with a digit or written in capitals or mixed case, such as `LSTM` and `arXiv`.
+
 ## Soft wrap
 
 With soft wrap on, a long line continues on the next screen row, breaking after a space where it can. It changes only how the line is shown: the file is the same, and the line keeps one number. Up and Down move by screen row, and Home and End still go to the start and end of the whole line. Ordinary text is unaffected, but very long lines cost more, because each keystroke re-measures them: about 25 ms per key at 1 MB on one line, and 110 ms at 5 MB.
@@ -254,6 +263,8 @@ With soft wrap on, a long line continues on the next screen row, breaking after 
 | `indent_width` | `4` | How many spaces, when `indent` is `"spaces"` |
 | `line_numbers` | `true` | Show line numbers |
 | `soft_wrap` | `false` | Wrap long lines at the edge of the screen. **Toggle soft wrap** in the palette changes it for the session |
+| `writing` | `true` | Open Markdown, text and LaTeX files for writing |
+| `spell_check` | `true` | Underline misspelled words in writing |
 | `theme` | `"signal"` | Colors: `"signal"`, `"harbor"`, `"dusk"`, `"ember"`, `"moss"` or `"daybreak"`. **Choose theme** in the palette changes it for the session |
 | `esc_ms` | `300` | Milliseconds to press Esc again for the palette |
 | `history` | `true` | Keep a history of every edit to each file |
@@ -337,7 +348,8 @@ These Docker files have not been run yet, because the build machine had no Docke
 - Kyte keeps each line's ending as it is. New lines use the ending most of the file uses, and the status bar shows `CRLF` for those files. It doesn't convert a file from one to the other. A `\r` that isn't part of a line ending shows as a control picture.
 - Linux only (the swap lock checks `/proc`).
 - After a crash, Kyte offers to recover each file when that file is opened again. It doesn't list them for you.
-- Files over 512 KiB aren't syntax highlighted, because each keystroke re-parses the file. Typing takes under about 25 ms per key at 100 KB, and 60 to 115 ms near the limit, depending on the language.
+- Spell check is American English only for now.
+- Files over 512 KiB aren't syntax highlighted, because each keystroke re-parses the file. LaTeX is the exception: Kyte parses only the text around the screen, so its size doesn't matter, though a verbatim block or a math block longer than a few KB can color wrongly when you're inside it. Typing takes under about 25 ms per key at 100 KB, and 60 to 115 ms near the limit, depending on the language.
 - Search takes under about 30 ms per key on a 38 MB ASCII file. On a file that size with non-ASCII text, ignoring case takes about 240 ms per key.
 - A very long single line costs more per keystroke, depending on what's in it. At the end of a 5 MB line on the build machine, plain ASCII takes about 8 ms, a line full of tabs about 45 ms, and CJK text about 170 ms.
 - Not in this version: mouse, splits, LSP, plugins, CRLF conversion, non-UTF-8 files, RPM/COPR packaging, and use as the default `$EDITOR`.

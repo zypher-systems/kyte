@@ -22,6 +22,9 @@ pub enum Command {
     ToggleWrap,
     ChooseTheme,
     FileTree,
+    FixSpelling,
+    NextMisspelling,
+    ToggleSpelling,
     OpenFiles,
     NextFile,
     PreviousFile,
@@ -54,6 +57,9 @@ pub const REGISTRY: &[Command] = &[
     Command::ToggleWrap,
     Command::ChooseTheme,
     Command::FileTree,
+    Command::FixSpelling,
+    Command::NextMisspelling,
+    Command::ToggleSpelling,
     Command::OpenFiles,
     Command::NextFile,
     Command::PreviousFile,
@@ -87,6 +93,9 @@ impl Command {
             Command::ToggleWrap => "Toggle soft wrap",
             Command::ChooseTheme => "Choose theme",
             Command::FileTree => "File tree",
+            Command::FixSpelling => "Fix spelling",
+            Command::NextMisspelling => "Next misspelling",
+            Command::ToggleSpelling => "Toggle spell check",
             Command::OpenFiles => "Open files",
             Command::NextFile => "Next file",
             Command::PreviousFile => "Previous file",
@@ -121,6 +130,9 @@ impl Command {
             Command::ToggleWrap => "",
             Command::ChooseTheme => "",
             Command::FileTree => "Ctrl-T",
+            Command::FixSpelling => "Esc z",
+            Command::NextMisspelling => "Esc m",
+            Command::ToggleSpelling => "",
             Command::OpenFiles => "Esc b",
             Command::NextFile => "Esc .",
             Command::PreviousFile => "Esc ,",
@@ -169,6 +181,7 @@ pub const KEY_HELP: &[(&str, &str)] = &[
     ("  u  r  s", "undo, redo, save"),
     ("  h  v  t", "file history, reader mode, file tree"),
     ("  b  .  ,", "open files, next, previous"),
+    ("  z  m", "in writing: fix spelling, next misspelling"),
     ("  (more by context)", "the menu shows what fits"),
     ("  Esc (quickly)", "command palette"),
 ];
@@ -189,7 +202,7 @@ mod tests {
 
     #[test]
     fn every_command_has_a_label() {
-        assert_eq!(REGISTRY.len(), 28);
+        assert_eq!(REGISTRY.len(), 31);
         let labels: Vec<&str> = REGISTRY.iter().map(|c| c.label()).collect();
         assert_eq!(
             labels,
@@ -213,6 +226,9 @@ mod tests {
                 "Toggle soft wrap",
                 "Choose theme",
                 "File tree",
+                "Fix spelling",
+                "Next misspelling",
+                "Toggle spell check",
                 "Open files",
                 "Next file",
                 "Previous file",

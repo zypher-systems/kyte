@@ -20,6 +20,7 @@ pub mod reader;
 pub mod review;
 pub mod search;
 pub mod session;
+pub mod spell;
 pub mod swap;
 pub mod syntax;
 pub mod term;
@@ -71,6 +72,7 @@ pub fn run(opts: Options) -> anyhow::Result<ExitCode> {
         app.message_is_error = app.message.is_some();
     }
     app.queue_files(opts.more_files.clone());
+    app.load_speller();
     let result = event_loop(&mut app, opts.no_kitty);
     if result.is_ok() {
         app.finish();

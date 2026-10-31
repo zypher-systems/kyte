@@ -33,6 +33,9 @@ pub const TEMPLATE: &str = r#"# Kyte settings. Remove the # from a line to use i
 # and, except in LaTeX, no line numbers.
 # writing = true
 
+# Underline misspelled words in writing.
+# spell_check = true
+
 # Colors: "signal", "harbor", "dusk", "ember", "moss" or "daybreak".
 # theme = "signal"
 
@@ -97,6 +100,7 @@ fn apply(opts: &mut Options, key: &str, value: &str) -> Option<Result<(), ()>> {
         "line_numbers" => opts.line_numbers = boolean(value)?,
         "soft_wrap" => opts.soft_wrap = boolean(value)?,
         "writing" => opts.writing = boolean(value)?,
+        "spell_check" => opts.spell_check = boolean(value)?,
         "theme" => opts.theme = ThemeName::parse(value)?,
         "esc_ms" => opts.esc_ms = number(value, 10_000)?,
         "history" => opts.no_history = !boolean(value)?,

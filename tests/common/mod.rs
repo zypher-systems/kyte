@@ -336,6 +336,16 @@ impl Pty {
             .map(|c| c.bgcolor())
     }
 
+    /// Whether the cell at (row, col) is underlined.
+    pub fn underlined(&self, row: u16, col: u16) -> bool {
+        self.parser
+            .lock()
+            .unwrap()
+            .screen()
+            .cell(row, col)
+            .is_some_and(|c| c.underline())
+    }
+
     /// Foreground color of the cell at (row, col).
     pub fn fg(&self, row: u16, col: u16) -> Option<vt100::Color> {
         self.parser

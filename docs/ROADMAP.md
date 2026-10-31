@@ -74,7 +74,8 @@ Kyte's pitch is an editor you can't lose work in and don't have to learn.
 - [x] Several files open at once
 - [x] A file tree
 - [x] Highlighting for more languages
-- [ ] A Writing setup for Markdown and text files: word count and spell check
+- [x] Swift, LaTeX and BibTeX highlighting
+- [x] A Writing setup for Markdown, text and LaTeX: wrap, word count and spell check
 - [ ] Multiple cursors and mouse support
 - [ ] Code intelligence (LSP)
 - [ ] Re-record the demo, which still shows the footer legend (needs `agg`)
@@ -83,6 +84,8 @@ Keep using Kyte for real work along the way, on actual terminals with the kitty 
 
 ## Later
 
+- For research papers: citation keys from `.bib` files as you type `\\cite{`, and building the PDF from inside Kyte
+- More spell check languages
 - A high-contrast theme
 - Splits
 - Incremental parsing, and languages embedded in others

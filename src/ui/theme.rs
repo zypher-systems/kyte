@@ -33,6 +33,8 @@ pub struct Theme {
     pub popup_hint: Style,
     /// The cells a box casts its shadow on.
     pub shadow: Style,
+    /// A misspelled word, laid over its text.
+    pub misspelled: Style,
     pub syntax: Syntax,
 }
 
@@ -115,6 +117,7 @@ fn build(c: Colors) -> Theme {
         popup_title: on(c.accent, c.popup).add_modifier(bold),
         popup_hint: on(c.dim, c.popup),
         shadow: on(c.faint, c.shadow),
+        misspelled: Style::new().fg(c.error).add_modifier(Modifier::UNDERLINED),
         syntax: Syntax {
             keyword: Style::new().fg(c.keyword).add_modifier(bold),
             string: Style::new().fg(c.string),
@@ -607,6 +610,7 @@ mod tests {
     fn chrome_is_readable() {
         all(|c| {
             assert_readable("line numbers", &[c.faint], &[c.bg]);
+            assert_readable("misspellings", &[c.error], &[c.bg, c.line]);
             assert_readable("text", &[c.fg], &[c.popup, c.status]);
             assert_readable("hints", &[c.dim], &[c.popup, c.message]);
             assert_readable("box", &[c.accent, c.warm], &[c.popup]);

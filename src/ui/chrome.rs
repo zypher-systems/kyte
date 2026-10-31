@@ -459,6 +459,8 @@ pub fn palette(app: &App, text_area: Rect, cells: &mut Cells, theme: &Theme) -> 
     } else {
         "Command palette"
     };
+    let fixing = state.spelling_word().map(|w| format!("Fix {w}"));
+    let title = fixing.as_deref().unwrap_or(title);
     let inner = modal_box(area, text_area, cells, title, theme);
     let input = format!("> {}", state.query);
     let iw = inner.width as usize;

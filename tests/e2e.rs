@@ -1083,7 +1083,7 @@ fn ac16_empty_query_does_nothing() {
 
 // ---------------------------------------------------------------- AC-17
 
-const COMMANDS: [&str; 28] = [
+const COMMANDS: [&str; 31] = [
     "Save",
     "Save as",
     "Open file",
@@ -1103,6 +1103,9 @@ const COMMANDS: [&str; 28] = [
     "Toggle soft wrap",
     "Choose theme",
     "File tree",
+    "Fix spelling",
+    "Next misspelling",
+    "Toggle spell check",
     "Open files",
     "Next file",
     "Previous file",
@@ -1147,7 +1150,7 @@ fn ac17_palette_lists_every_command() {
         .collect();
     assert!(first_result(&p).contains("▸ Save"), "{}", p.dump());
     // 8 rows are visible at once; scrolling down reveals the rest
-    for _ in 0..27 {
+    for _ in 0..30 {
         p.send_keys(&["Down"]);
         std::thread::sleep(Duration::from_millis(5));
         for c in COMMANDS {
@@ -4032,5 +4035,224 @@ fn selecting_text_counts_its_words() {
     }
     wait_status(&p, "2 words selected");
     p.send_keys(&["C-q"]);
+    assert_eq!(p.wait_exit(TIMEOUT), 0);
+}
+
+// ---------------------------------------------------------------- spelling
+
+/// Whether `word` shows underlined. Screen columns are found from its text.
+#[cfg(feature = "spell")]
+fn word_underlined(p: &Pty, word: &str) -> bool {
+    let screen = p.screen();
+    screen.lines().enumerate().any(|(row, line)| {
+        line.find(word).is_some_and(|at| {
+            let col = line[..at].chars().count() as u16;
+            p.underlined(row as u16, col)
+        })
+    })
+}
+
+#[cfg(feature = "spell")]
+fn wait_underlined(p: &Pty, word: &str) {
+    let deadline = Instant::now() + TIMEOUT;
+    while !word_underlined(p, word) {
+        assert!(
+            Instant::now() < deadline,
+            "{word} isn't underlined\n{}",
+            p.dump()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[cfg(feature = "spell")]
+#[test]
+fn a_misspelled_word_is_underlined_and_can_be_fixed_then_undone() {
+    let env = Env::new();
+    let f = env.write("notes.md", "This is teh word.\n");
+    let mut p = open_writing(&env, &f, "");
+    p.wait_for("This is teh word", TIMEOUT);
+    wait_underlined(&p, "teh");
+    assert!(!word_underlined(&p, "This"), "{}", p.dump());
+    open_overlay(&mut p);
+    p.wait_for("next misspelling", TIMEOUT);
+    assert!(
+        !p.screen().contains("fix spelling"),
+        "not on a misspelling yet"
+    );
+    p.send_str("m");
+    wait_status(&p, "Col 9");
+    open_overlay(&mut p);
+    p.wait_for("fix spelling", TIMEOUT);
+    p.send_str("z");
+    p.wait_for("Fix teh", TIMEOUT);
+    p.wait_for("▸ the", TIMEOUT);
+    p.wait_for("Add teh to my words", TIMEOUT);
+    p.send_keys(&["Enter"]);
+    p.wait_for("This is the word", TIMEOUT);
+    p.send_keys(&["C-z"]);
+    p.wait_for("This is teh word", TIMEOUT);
+    p.send_keys(&["C-q"]);
+    p.wait_for("Unsaved changes", TIMEOUT);
+    p.send_str("n");
+    assert_eq!(p.wait_exit(TIMEOUT), 0);
+}
+
+#[cfg(feature = "spell")]
+#[test]
+fn a_word_you_add_stays_added_in_the_next_session() {
+    let env = Env::new();
+    let f = env.write("notes.md", "A kytely word.\n");
+    let mut p = open_writing(&env, &f, "");
+    wait_underlined(&p, "kytely");
+    esc_then(&mut p, "m");
+    open_overlay(&mut p);
+    p.send_str("z");
+    p.wait_for("Fix kytely", TIMEOUT);
+    p.send_str("add");
+    p.wait_for("▸ Add kytely to my words", TIMEOUT);
+    p.send_keys(&["Enter"]);
+    p.wait_for("Added kytely to your words", TIMEOUT);
+    assert_eq!(
+        fs::read_to_string(env.path("words.txt")).unwrap(),
+        "kytely\n"
+    );
+    quit_clean(&mut p);
+    let mut p = open_writing(&env, &f, "");
+    p.wait_for("A kytely word", TIMEOUT);
+    assert!(!word_underlined(&p, "kytely"), "{}", p.dump());
+    quit_clean(&mut p);
+}
+
+#[cfg(feature = "spell")]
+#[test]
+fn ignoring_a_word_lasts_only_until_kyte_closes() {
+    let env = Env::new();
+    let f = env.write("notes.md", "A kytely word.\n");
+    let mut p = open_writing(&env, &f, "");
+    wait_underlined(&p, "kytely");
+    esc_then(&mut p, "m");
+    open_overlay(&mut p);
+    p.send_str("z");
+    p.wait_for("Fix kytely", TIMEOUT);
+    p.send_str("ignore");
+    p.wait_for("▸ Ignore kytely for now", TIMEOUT);
+    p.send_keys(&["Enter"]);
+    wait_insert(&p);
+    assert!(!env.path("words.txt").exists());
+    assert!(!word_underlined(&p, "kytely"), "{}", p.dump());
+    quit_clean(&mut p);
+    let mut p = open_writing(&env, &f, "");
+    wait_underlined(&p, "kytely");
+    quit_clean(&mut p);
+}
+
+#[cfg(all(feature = "spell", feature = "highlight"))]
+#[test]
+fn latex_commands_math_and_citations_arent_spell_checked() {
+    let env = Env::new();
+    let text = concat!(
+        "\\documentclass{tehclass}\n",
+        "\\begin{document}\n",
+        "\\section{Introdction}\n",
+        "Prose wrongg here \\tehcmd{} and \\cite{tehkey} and $tehmath$.\n",
+        "% tehcomment\n",
+        "\\label{sec:tehlabel}\n",
+        "\\end{document}\n",
+    );
+    let f = env.write("paper.tex", text);
+    let mut p = open_writing(&env, &f, "");
+    wait_underlined(&p, "wrongg");
+    wait_underlined(&p, "Introdction");
+    for fine in [
+        "tehclass",
+        "tehcmd",
+        "tehkey",
+        "tehmath",
+        "tehcomment",
+        "tehlabel",
+    ] {
+        assert!(!word_underlined(&p, fine), "{fine}\n{}", p.dump());
+    }
+    quit_clean(&mut p);
+}
+
+#[cfg(all(feature = "spell", feature = "highlight"))]
+#[test]
+fn code_in_markdown_isnt_spell_checked() {
+    let env = Env::new();
+    let f = env.write("a.md", "Some wrongg text.\n\n```\nlet tehvar = 1;\n```\n");
+    let mut p = open_writing(&env, &f, "");
+    wait_underlined(&p, "wrongg");
+    assert!(!word_underlined(&p, "tehvar"), "{}", p.dump());
+    quit_clean(&mut p);
+}
+
+#[cfg(feature = "spell")]
+#[test]
+fn code_files_have_no_spell_check_until_asked() {
+    let env = Env::new();
+    let f = env.write("a.xyz", "wrongg\n");
+    let mut p = open_writing(&env, &f, "");
+    p.wait_for("wrongg", TIMEOUT);
+    assert!(!word_underlined(&p, "wrongg"), "{}", p.dump());
+    open_overlay(&mut p);
+    assert!(!p.screen().contains("next misspelling"), "{}", p.dump());
+    p.send_keys(&["Esc"]);
+    p.wait_for("Command palette", TIMEOUT);
+    p.send_keys(&["Esc"]);
+    wait_insert(&p);
+    run_from_palette(&mut p, "Toggle spell check");
+    wait_underlined(&p, "wrongg");
+    quit_clean(&mut p);
+}
+
+#[cfg(feature = "spell")]
+#[test]
+fn the_setting_turns_spell_check_off() {
+    let env = Env::new();
+    let f = env.write("a.md", "wrongg\n");
+    let mut p = open_writing(&env, &f, "spell_check = false\n");
+    p.wait_for("wrongg", TIMEOUT);
+    wait_status(&p, "1 word");
+    assert!(!word_underlined(&p, "wrongg"), "{}", p.dump());
+    esc_then(&mut p, "m");
+    p.wait_for("Spell check is off", TIMEOUT);
+    quit_clean(&mut p);
+}
+
+#[cfg(feature = "spell")]
+#[test]
+fn next_misspelling_wraps_and_says_when_there_are_none() {
+    let env = Env::new();
+    let f = env.write("a.md", "one wrongg\ntwo\nthree wrongger\n");
+    let mut p = open_writing(&env, &f, "");
+    wait_underlined(&p, "wrongg");
+    esc_then(&mut p, "m");
+    wait_status(&p, "Ln 1, Col 5");
+    esc_then(&mut p, "m");
+    wait_status(&p, "Ln 3, Col 7");
+    esc_then(&mut p, "m");
+    wait_status(&p, "Ln 1, Col 5");
+    quit_clean(&mut p);
+    let clean = env.write("b.md", "all fine\n");
+    let mut p = open_writing(&env, &clean, "");
+    esc_then(&mut p, "m");
+    p.wait_for("No misspellings", TIMEOUT);
+    quit_clean(&mut p);
+}
+
+#[cfg(feature = "highlight")]
+#[test]
+fn a_latex_word_count_catches_up_when_typing_pauses() {
+    let env = Env::new();
+    let f = env.write("paper.tex", "One two.\n");
+    let mut p = open_writing(&env, &f, "");
+    wait_status(&p, "2 words");
+    type_text(&mut p, "three ");
+    wait_status(&p, "3 words");
+    p.send_keys(&["C-q"]);
+    p.wait_for("Unsaved changes", TIMEOUT);
+    p.send_str("n");
     assert_eq!(p.wait_exit(TIMEOUT), 0);
 }
