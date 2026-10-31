@@ -261,3 +261,40 @@ fn t13_plain_text_file_is_not_highlighted() {
     p.send_keys(&["C-q"]);
     p.wait_exit(TIMEOUT);
 }
+
+#[test]
+fn a_dockerfile_is_colored_from_its_name_and_comments_toggle_with_a_hash() {
+    let (_dir, mut p) = open_named("Dockerfile", "FROM rust:1\nRUN echo hi\n");
+    p.wait_for("FROM rust", TIMEOUT);
+    let col = col_of(&p, 0, "FROM");
+    assert_eq!(p.fg(0, col), Some(vt100::Color::Idx(205)), "{}", p.dump());
+    p.send_keys(&["Esc"]);
+    p.wait_for("comment line", TIMEOUT);
+    p.send_str("#");
+    p.wait_for("# FROM rust", TIMEOUT);
+    p.send_keys(&["C-q"]);
+    p.wait_for("Unsaved changes", TIMEOUT);
+    p.send_str("n");
+    p.wait_exit(TIMEOUT);
+}
+
+#[test]
+fn the_reader_and_function_keys_work_in_ruby() {
+    let text = "class Foo\n  def one\n    1\n  end\n\n  def two\n    2\n  end\nend\n";
+    let (_dir, mut p) = open_named("a.rb", text);
+    p.wait_for("class Foo", TIMEOUT);
+    p.send_keys(&["Esc"]);
+    p.wait_for("next function", TIMEOUT);
+    p.send_str("n");
+    p.wait_for("Ln 2,", TIMEOUT);
+    p.send_keys(&["Esc"]);
+    p.wait_for("reader mode", TIMEOUT);
+    p.send_str("v");
+    p.wait_for("class Foo › def one", TIMEOUT);
+    p.send_keys(&["Esc"]);
+    p.wait_gone("read on", TIMEOUT);
+    p.send_keys(&["Esc"]);
+    p.wait_for(" INSERT ", TIMEOUT);
+    p.send_keys(&["C-q"]);
+    p.wait_exit(TIMEOUT);
+}

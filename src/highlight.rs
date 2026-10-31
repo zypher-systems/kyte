@@ -34,11 +34,26 @@ pub enum Lang {
     Toml,
     Yaml,
     Markdown,
+    Sql,
+    Java,
+    CSharp,
+    Php,
+    Ruby,
+    Lua,
+    Make,
+    Dockerfile,
+    Xml,
+    Diff,
+    Ini,
+    Cmake,
+    Fish,
+    Nix,
+    Zig,
 }
 
 impl Lang {
     /// Every language, in the order of the `CONFIGS` table.
-    pub const ALL: [Lang; 15] = [
+    pub const ALL: [Lang; 30] = [
         Lang::Rust,
         Lang::Python,
         Lang::Bash,
@@ -54,6 +69,21 @@ impl Lang {
         Lang::Toml,
         Lang::Yaml,
         Lang::Markdown,
+        Lang::Sql,
+        Lang::Java,
+        Lang::CSharp,
+        Lang::Php,
+        Lang::Ruby,
+        Lang::Lua,
+        Lang::Make,
+        Lang::Dockerfile,
+        Lang::Xml,
+        Lang::Diff,
+        Lang::Ini,
+        Lang::Cmake,
+        Lang::Fish,
+        Lang::Nix,
+        Lang::Zig,
     ];
 
     /// Picks the grammar from the file's name, or failing that the `#!` line
@@ -66,6 +96,10 @@ impl Lang {
         match crate::syntax::shebang_program(head)? {
             "sh" | "bash" | "zsh" | "dash" | "ksh" => Some(Lang::Bash),
             "node" | "nodejs" | "deno" | "bun" => Some(Lang::JavaScript),
+            "ruby" => Some(Lang::Ruby),
+            "lua" => Some(Lang::Lua),
+            "php" => Some(Lang::Php),
+            "fish" => Some(Lang::Fish),
             name if name.starts_with("python") => Some(Lang::Python),
             _ => None,
         }
@@ -78,6 +112,12 @@ impl Lang {
                 return Some(Lang::Bash)
             }
             "Cargo.lock" | "uv.lock" | "poetry.lock" => return Some(Lang::Toml),
+            "Makefile" | "makefile" | "GNUmakefile" => return Some(Lang::Make),
+            "Dockerfile" | "Containerfile" => return Some(Lang::Dockerfile),
+            name if name.starts_with("Dockerfile.") => return Some(Lang::Dockerfile),
+            "Gemfile" | "Rakefile" | "Vagrantfile" | "Brewfile" => return Some(Lang::Ruby),
+            "CMakeLists.txt" => return Some(Lang::Cmake),
+            ".gitconfig" | ".gitmodules" | ".editorconfig" => return Some(Lang::Ini),
             _ => {}
         }
         Some(match path.extension()?.to_str()? {
@@ -96,6 +136,21 @@ impl Lang {
             "toml" => Lang::Toml,
             "yaml" | "yml" => Lang::Yaml,
             "md" | "markdown" => Lang::Markdown,
+            "sql" => Lang::Sql,
+            "java" => Lang::Java,
+            "cs" => Lang::CSharp,
+            "php" | "phtml" => Lang::Php,
+            "rb" | "rake" | "gemspec" => Lang::Ruby,
+            "lua" => Lang::Lua,
+            "mk" => Lang::Make,
+            "dockerfile" => Lang::Dockerfile,
+            "xml" | "svg" | "xsd" | "xsl" | "xslt" | "plist" => Lang::Xml,
+            "diff" | "patch" => Lang::Diff,
+            "ini" | "cfg" | "desktop" | "service" | "timer" | "socket" => Lang::Ini,
+            "cmake" => Lang::Cmake,
+            "fish" => Lang::Fish,
+            "nix" => Lang::Nix,
+            "zig" => Lang::Zig,
             _ => return None,
         })
     }
@@ -118,6 +173,21 @@ impl Lang {
             Lang::Toml => tree_sitter_toml_ng::LANGUAGE.into(),
             Lang::Yaml => tree_sitter_yaml::LANGUAGE.into(),
             Lang::Markdown => tree_sitter_md::LANGUAGE.into(),
+            Lang::Sql => tree_sitter_sequel::LANGUAGE.into(),
+            Lang::Java => tree_sitter_java::LANGUAGE.into(),
+            Lang::CSharp => tree_sitter_c_sharp::LANGUAGE.into(),
+            Lang::Php => tree_sitter_php::LANGUAGE_PHP.into(),
+            Lang::Ruby => tree_sitter_ruby::LANGUAGE.into(),
+            Lang::Lua => tree_sitter_lua::LANGUAGE.into(),
+            Lang::Make => tree_sitter_make::LANGUAGE.into(),
+            Lang::Dockerfile => tree_sitter_containerfile::LANGUAGE.into(),
+            Lang::Xml => tree_sitter_xml::LANGUAGE_XML.into(),
+            Lang::Diff => tree_sitter_diff::LANGUAGE.into(),
+            Lang::Ini => tree_sitter_ini::LANGUAGE.into(),
+            Lang::Cmake => tree_sitter_cmake::LANGUAGE.into(),
+            Lang::Fish => tree_sitter_fish::language(),
+            Lang::Nix => tree_sitter_nix::LANGUAGE.into(),
+            Lang::Zig => tree_sitter_zig::LANGUAGE.into(),
         }
     }
 
@@ -146,6 +216,24 @@ impl Lang {
             Lang::Toml => tree_sitter_toml_ng::HIGHLIGHTS_QUERY.to_string(),
             Lang::Yaml => tree_sitter_yaml::HIGHLIGHTS_QUERY.to_string(),
             Lang::Markdown => tree_sitter_md::HIGHLIGHT_QUERY_BLOCK.to_string(),
+            // These two carry Lua patterns, written for Neovim.
+            Lang::Sql => tree_sitter_sequel::HIGHLIGHTS_QUERY.replace("%d", "[0-9]"),
+            Lang::Cmake => {
+                tree_sitter_cmake::HIGHLIGHTS_QUERY.replace("[%u@][%u%d_]+", "[A-Z@][A-Z0-9_]+")
+            }
+            Lang::Java => tree_sitter_java::HIGHLIGHTS_QUERY.to_string(),
+            Lang::CSharp => tree_sitter_c_sharp::HIGHLIGHTS_QUERY.to_string(),
+            Lang::Php => tree_sitter_php::HIGHLIGHTS_QUERY.to_string(),
+            Lang::Ruby => tree_sitter_ruby::HIGHLIGHTS_QUERY.to_string(),
+            Lang::Lua => tree_sitter_lua::HIGHLIGHTS_QUERY.to_string(),
+            Lang::Make => tree_sitter_make::HIGHLIGHTS_QUERY.to_string(),
+            Lang::Dockerfile => tree_sitter_containerfile::HIGHLIGHTS_QUERY.to_string(),
+            Lang::Xml => tree_sitter_xml::XML_HIGHLIGHT_QUERY.to_string(),
+            Lang::Diff => tree_sitter_diff::HIGHLIGHTS_QUERY.to_string(),
+            Lang::Ini => tree_sitter_ini::HIGHLIGHTS_QUERY.to_string(),
+            Lang::Fish => tree_sitter_fish::HIGHLIGHTS_QUERY.to_string(),
+            Lang::Nix => tree_sitter_nix::HIGHLIGHTS_QUERY.to_string(),
+            Lang::Zig => tree_sitter_zig::HIGHLIGHTS_QUERY.to_string(),
         }
     }
 }
@@ -162,7 +250,7 @@ pub enum HighlightKind {
 }
 
 /// Capture names Kyte colors, in the order of [`HighlightKind`].
-const NAMES: [&str; 13] = [
+const NAMES: [&str; 26] = [
     "keyword",
     "string",
     "comment",
@@ -177,8 +265,22 @@ const NAMES: [&str; 13] = [
     "text.title",
     "text.literal",
     "text.uri",
+    // Finer names some grammars use for the same things.
+    "conditional",
+    "repeat",
+    "include",
+    "exception",
+    "storageclass",
+    "preproc",
+    "variable.builtin",
+    "boolean",
+    "float",
+    "escape",
+    "method",
+    "constructor",
+    "module",
 ];
-const KINDS: [HighlightKind; 13] = [
+const KINDS: [HighlightKind; 26] = [
     HighlightKind::Keyword,
     HighlightKind::String,
     HighlightKind::Comment,
@@ -192,7 +294,29 @@ const KINDS: [HighlightKind; 13] = [
     HighlightKind::Keyword,
     HighlightKind::String,
     HighlightKind::Constant,
+    HighlightKind::Keyword,
+    HighlightKind::Keyword,
+    HighlightKind::Keyword,
+    HighlightKind::Keyword,
+    HighlightKind::Keyword,
+    HighlightKind::Keyword,
+    HighlightKind::Keyword,
+    HighlightKind::Constant,
+    HighlightKind::Number,
+    HighlightKind::Constant,
+    HighlightKind::Function,
+    HighlightKind::Type,
+    HighlightKind::Type,
 ];
+
+/// A grammar's query, made fit for this highlighter. A second capture on a
+/// node would win over the first, and `@spell` isn't a color.
+fn adapted(query: &str) -> String {
+    query
+        .replace(" @nospell", "")
+        .replace(" @spell", "")
+        .replace("#lua-match?", "#match?")
+}
 
 impl HighlightKind {
     /// This kind's look in `theme`.
@@ -215,9 +339,8 @@ fn config(lang: Lang) -> Option<&'static HighlightConfiguration> {
     CONFIGS[lang as usize]
         .get_or_init(|| {
             let name = format!("{lang:?}");
-            let mut c =
-                HighlightConfiguration::new(lang.language(), name, &lang.highlights(), "", "")
-                    .ok()?;
+            let query = adapted(&lang.highlights());
+            let mut c = HighlightConfiguration::new(lang.language(), name, &query, "", "").ok()?;
             c.configure(&NAMES);
             Some(c)
         })
@@ -387,6 +510,189 @@ mod tests {
             Some(Lang::Bash)
         );
         assert_eq!(Lang::from_path(Path::new("Cargo.lock")), Some(Lang::Toml));
+        for (name, lang) in [
+            ("Dockerfile", Lang::Dockerfile),
+            ("Containerfile", Lang::Dockerfile),
+            ("Dockerfile.dev", Lang::Dockerfile),
+            ("GNUmakefile", Lang::Make),
+            ("Gemfile", Lang::Ruby),
+            ("Rakefile", Lang::Ruby),
+            ("CMakeLists.txt", Lang::Cmake),
+            (".gitconfig", Lang::Ini),
+        ] {
+            assert_eq!(Lang::from_path(Path::new(name)), Some(lang), "{name}");
+        }
+    }
+
+    #[test]
+    fn every_grammar_loads_with_its_query() {
+        for lang in Lang::ALL {
+            assert!(config(lang).is_some(), "{lang:?}");
+        }
+    }
+
+    /// Whole samples, because a query can load and still leave most of a file
+    /// plain: each has to color every token named here, as that kind.
+    #[test]
+    fn the_later_languages_color_a_real_file() {
+        use HighlightKind as K;
+        let cases: &[(Lang, &str, &[(&str, HighlightKind)])] = &[
+            (
+                Lang::Sql,
+                "-- users\nSELECT id FROM users WHERE age > 18.5 AND name = 'bob';\n",
+                &[
+                    ("-- users", K::Comment),
+                    ("SELECT", K::Keyword),
+                    ("18.5", K::Number),
+                    ("'bob'", K::String),
+                ],
+            ),
+            (
+                Lang::Java,
+                "// note\nclass Foo { int hello() { return 1; } }\n",
+                &[
+                    ("// note", K::Comment),
+                    ("class", K::Keyword),
+                    ("Foo", K::Type),
+                    ("hello", K::Function),
+                    ("1", K::Number),
+                ],
+            ),
+            (
+                Lang::CSharp,
+                "// note\nclass Foo { string Hello() { return \"hi\"; } }\n",
+                &[
+                    ("// note", K::Comment),
+                    ("class", K::Keyword),
+                    ("Hello", K::Function),
+                    ("\"hi\"", K::String),
+                ],
+            ),
+            (
+                Lang::Php,
+                "<?php\n// note\nfunction hello() { return \"hi\"; }\n",
+                &[
+                    ("// note", K::Comment),
+                    ("function", K::Keyword),
+                    ("hello", K::Function),
+                ],
+            ),
+            (
+                Lang::Ruby,
+                "# note\nclass Foo\n  def hello\n    self\n  end\nend\n",
+                &[
+                    ("# note", K::Comment),
+                    ("class", K::Keyword),
+                    ("Foo", K::Type),
+                    ("def", K::Keyword),
+                    ("hello", K::Function),
+                    ("self", K::Keyword),
+                ],
+            ),
+            (
+                Lang::Lua,
+                "-- note\nif true then\n  print(\"hi\", nil)\nend\nfor i = 1, 2 do end\n",
+                &[
+                    ("-- note", K::Comment),
+                    ("if", K::Keyword),
+                    ("for", K::Keyword),
+                    ("true", K::Constant),
+                    ("print", K::Function),
+                    ("\"hi\"", K::String),
+                ],
+            ),
+            (
+                Lang::Make,
+                "# note\nCC := gcc\nifeq (1,1)\nall:\n\techo hi\nendif\n",
+                &[
+                    ("# note", K::Comment),
+                    ("CC", K::Constant),
+                    ("ifeq", K::Keyword),
+                    ("all", K::Constant),
+                ],
+            ),
+            (
+                Lang::Dockerfile,
+                "# note\nFROM rust:1\nRUN echo hi\n",
+                &[
+                    ("# note", K::Comment),
+                    ("FROM", K::Keyword),
+                    ("RUN", K::Keyword),
+                ],
+            ),
+            (
+                Lang::Xml,
+                "<!-- note -->\n<root a=\"1\"><b>x</b></root>\n",
+                &[
+                    ("<!-- note -->", K::Comment),
+                    ("root", K::Keyword),
+                    ("\"1\"", K::String),
+                ],
+            ),
+            (
+                Lang::Diff,
+                "--- a.txt\n+++ b.txt\n@@ -1 +1 @@\n-old\n+new\n",
+                &[("new", K::String), ("old", K::Keyword)],
+            ),
+            (
+                Lang::Ini,
+                "; note\n[core]\nname = kyte\n",
+                &[
+                    ("; note", K::Comment),
+                    ("core", K::Type),
+                    ("name", K::Function),
+                ],
+            ),
+            (
+                Lang::Cmake,
+                "# note\nif(FOO)\n  message(\"hi\")\nendif()\n",
+                &[
+                    ("# note", K::Comment),
+                    ("if", K::Keyword),
+                    ("\"hi\"", K::String),
+                ],
+            ),
+            (
+                Lang::Fish,
+                "# note\nfunction hello\n  echo \"hi\"\nend\n",
+                &[
+                    ("# note", K::Comment),
+                    ("function", K::Keyword),
+                    ("\"hi\"", K::String),
+                ],
+            ),
+            (
+                Lang::Nix,
+                "# note\nlet a = \"hi\"; in a\n",
+                &[
+                    ("# note", K::Comment),
+                    ("let", K::Keyword),
+                    ("\"hi\"", K::String),
+                ],
+            ),
+            (
+                Lang::Zig,
+                "// note\nfn hello() u8 { return 1; }\n",
+                &[
+                    ("// note", K::Comment),
+                    ("fn", K::Keyword),
+                    ("hello", K::Function),
+                    ("u8", K::Type),
+                    ("1", K::Number),
+                ],
+            ),
+        ];
+        let mut wrong = Vec::new();
+        for (lang, src, want) in cases {
+            let spans = highlight(*lang, src, 0..20);
+            let k = kinds_of(src, &spans);
+            for (token, kind) in *want {
+                if !k.iter().any(|(t, x)| t.contains(token) && x == kind) {
+                    wrong.push(format!("{lang:?} {token:?} {kind:?} in {k:?}"));
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 
     #[test]
@@ -419,6 +725,11 @@ mod tests {
         assert_eq!(Lang::from_path(Path::new("a.tsx")), Some(Lang::Tsx));
         assert_eq!(Lang::from_path(Path::new("a.hpp")), Some(Lang::Cpp));
         assert_eq!(Lang::from_path(Path::new("a.yml")), Some(Lang::Yaml));
-        assert_eq!(Lang::from_path(Path::new("Makefile")), None);
+        assert_eq!(Lang::from_path(Path::new("Makefile")), Some(Lang::Make));
+        assert_eq!(Lang::from_path(Path::new("a/b.java")), Some(Lang::Java));
+        assert_eq!(Lang::from_path(Path::new("a.cs")), Some(Lang::CSharp));
+        assert_eq!(Lang::from_path(Path::new("a.patch")), Some(Lang::Diff));
+        assert_eq!(Lang::from_path(Path::new("a.svg")), Some(Lang::Xml));
+        assert_eq!(Lang::from_path(Path::new("a.service")), Some(Lang::Ini));
     }
 }

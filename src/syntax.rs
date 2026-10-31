@@ -30,9 +30,10 @@ fn extension_prefix(extension: &str) -> Option<&'static str> {
     match extension {
         "rs" | "c" | "h" | "cc" | "cpp" | "cxx" | "hh" | "hpp" | "hxx" | "go" | "java" | "js"
         | "mjs" | "cjs" | "jsx" | "ts" | "mts" | "cts" | "tsx" | "jsonc" | "swift" | "kt"
-        | "scala" | "cs" | "zig" => Some("//"),
+        | "scala" | "cs" | "zig" | "php" | "phtml" => Some("//"),
         "py" | "pyi" | "sh" | "bash" | "zsh" | "fish" | "rb" | "pl" | "toml" | "yaml" | "yml"
-        | "conf" | "ini" | "mk" | "r" | "ex" | "exs" => Some("#"),
+        | "conf" | "ini" | "cfg" | "mk" | "r" | "ex" | "exs" | "rake" | "gemspec" | "nix"
+        | "cmake" | "dockerfile" | "desktop" | "service" | "timer" | "socket" => Some("#"),
         "lua" | "sql" | "hs" => Some("--"),
         "vim" => Some("\""),
         _ => None,
@@ -47,6 +48,10 @@ pub fn comment_prefix(path: &Path, head: &str) -> Option<&'static str> {
         .and_then(|n| n.to_str())
         .and_then(|n| match n {
             ".bashrc" | ".bash_profile" | ".profile" | ".zshrc" | "PKGBUILD" => Some("#"),
+            "Makefile" | "makefile" | "GNUmakefile" | "Dockerfile" | "Containerfile"
+            | "Gemfile" | "Rakefile" | "Vagrantfile" | "Brewfile" | "CMakeLists.txt"
+            | ".gitconfig" | ".gitmodules" | ".editorconfig" => Some("#"),
+            n if n.starts_with("Dockerfile.") => Some("#"),
             _ => None,
         });
     let by_extension = path
@@ -55,7 +60,8 @@ pub fn comment_prefix(path: &Path, head: &str) -> Option<&'static str> {
         .and_then(extension_prefix);
     by_name.or(by_extension).or_else(|| {
         shebang_program(head).map(|program| match program {
-            "node" | "nodejs" | "deno" | "bun" => "//",
+            "node" | "nodejs" | "deno" | "bun" | "php" => "//",
+            "lua" => "--",
             _ => "#",
         })
     })
@@ -77,7 +83,9 @@ mod code {
         let kind = node.kind();
         match lang {
             Lang::Rust => kind == "function_item",
-            Lang::Python | Lang::Bash | Lang::C | Lang::Cpp => kind == "function_definition",
+            Lang::Python | Lang::Bash | Lang::C | Lang::Cpp | Lang::Fish => {
+                kind == "function_definition"
+            }
             Lang::JavaScript | Lang::TypeScript | Lang::Tsx => matches!(
                 kind,
                 "function_declaration"
@@ -87,6 +95,12 @@ mod code {
                     | "arrow_function"
             ),
             Lang::Go => matches!(kind, "function_declaration" | "method_declaration"),
+            Lang::Java | Lang::CSharp => {
+                matches!(kind, "method_declaration" | "constructor_declaration")
+            }
+            Lang::Php => matches!(kind, "function_definition" | "method_declaration"),
+            Lang::Ruby => matches!(kind, "method" | "singleton_method"),
+            Lang::Lua | Lang::Zig => kind == "function_declaration",
             _ => false,
         }
     }
@@ -111,6 +125,13 @@ mod code {
                     | Lang::C
                     | Lang::Cpp
                     | Lang::Go
+                    | Lang::Java
+                    | Lang::CSharp
+                    | Lang::Php
+                    | Lang::Ruby
+                    | Lang::Lua
+                    | Lang::Fish
+                    | Lang::Zig
             )
         )
     }
@@ -174,6 +195,18 @@ mod code {
             (Lang::Cpp, "namespace_definition") => ("namespace", "name"),
             (Lang::Go, "function_declaration") => ("func", "name"),
             (Lang::Go, "method_declaration") => ("func", "name"),
+            (Lang::Java | Lang::CSharp | Lang::Php, "class_declaration") => ("class", "name"),
+            (Lang::Java | Lang::CSharp, "interface_declaration") => ("interface", "name"),
+            (Lang::Java | Lang::CSharp | Lang::Php, "method_declaration") => ("method", "name"),
+            (Lang::Java | Lang::CSharp, "constructor_declaration") => ("new", "name"),
+            (Lang::CSharp, "namespace_declaration") => ("namespace", "name"),
+            (Lang::Php, "function_definition") => ("function", "name"),
+            (Lang::Ruby, "class") => ("class", "name"),
+            (Lang::Ruby, "module") => ("module", "name"),
+            (Lang::Ruby, "method" | "singleton_method") => ("def", "name"),
+            (Lang::Lua, "function_declaration") => ("function", "name"),
+            (Lang::Fish, "function_definition") => ("function", "name"),
+            (Lang::Zig, "function_declaration") => ("fn", "name"),
             _ => return None,
         };
         Some(format!("{word} {}", name(field)?))
@@ -312,6 +345,96 @@ mod tests {
         let at = SH.find("echo").unwrap();
         let r = function_at(Path::new("a.sh"), SH, at).unwrap();
         assert!(SH[r].starts_with("one()"));
+    }
+
+    /// `(file, text, a place inside, what the function starts with, its crumb)`.
+    const LATER: &[(&str, &str, &str, &str, &str)] = &[
+        (
+            "A.java",
+            "class A {\n  int one() {\n    return 1;\n  }\n}\n",
+            "return",
+            "int one",
+            "method one",
+        ),
+        (
+            "A.cs",
+            "class A {\n  int One() {\n    return 1;\n  }\n}\n",
+            "return",
+            "int One",
+            "method One",
+        ),
+        (
+            "a.php",
+            "<?php\nclass A {\n  function one() {\n    return 1;\n  }\n}\n",
+            "return",
+            "function one",
+            "method one",
+        ),
+        (
+            "a.php",
+            "<?php\nfunction one() {\n  return 1;\n}\n",
+            "return",
+            "function one",
+            "function one",
+        ),
+        (
+            "a.rb",
+            "class A\n  def one\n    1\n  end\nend\n",
+            "1",
+            "def one",
+            "def one",
+        ),
+        (
+            "a.lua",
+            "function one()\n  return 1\nend\n",
+            "return",
+            "function one",
+            "function one",
+        ),
+        (
+            "a.fish",
+            "function one\n  echo hi\nend\n",
+            "echo",
+            "function one",
+            "function one",
+        ),
+        (
+            "a.zig",
+            "fn one() u8 {\n    return 1;\n}\n",
+            "return",
+            "fn one",
+            "fn one",
+        ),
+    ];
+
+    #[test]
+    fn functions_are_found_in_the_later_languages() {
+        for (file, text, inside, start, crumb) in LATER {
+            let path = Path::new(file);
+            assert!(has_functions(path, text), "{file}");
+            let at = text.find(inside).unwrap();
+            let r = function_at(path, text, at).unwrap_or_else(|| panic!("{file}"));
+            assert!(text[r.clone()].starts_with(start), "{file}: {:?}", &text[r]);
+            let crumbs = breadcrumb(path, text, at);
+            assert_eq!(crumbs.last().map(String::as_str), Some(*crumb), "{file}");
+            let found = prev_function(path, text, text.len());
+            assert_eq!(found, Some(text.find(start).unwrap()), "{file}");
+        }
+    }
+
+    #[test]
+    fn languages_without_functions_keep_those_keys_off_the_menu() {
+        for file in [
+            "a.sql",
+            "a.xml",
+            "Dockerfile",
+            "Makefile",
+            "a.ini",
+            "a.diff",
+        ] {
+            assert!(!has_functions(Path::new(file), ""), "{file}");
+            assert!(supported(Path::new(file), ""), "{file}");
+        }
     }
 
     #[test]
@@ -486,7 +609,13 @@ mod prefix_tests {
         assert_eq!(comment_prefix(Path::new("a.py"), ""), Some("#"));
         assert_eq!(comment_prefix(Path::new("a.sql"), ""), Some("--"));
         assert_eq!(comment_prefix(Path::new("notes.txt"), ""), None);
-        assert_eq!(comment_prefix(Path::new("Makefile"), ""), None);
+        assert_eq!(comment_prefix(Path::new("Makefile"), ""), Some("#"));
+        assert_eq!(comment_prefix(Path::new("Dockerfile.dev"), ""), Some("#"));
+        assert_eq!(comment_prefix(Path::new("a.php"), ""), Some("//"));
+        assert_eq!(
+            comment_prefix(Path::new("tool"), "#!/usr/bin/lua\n"),
+            Some("--")
+        );
         assert_eq!(comment_prefix(Path::new("tool"), "#!/bin/sh\n"), Some("#"));
     }
 

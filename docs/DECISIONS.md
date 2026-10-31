@@ -84,6 +84,24 @@ These replace the matching parts of `ARCHITECTURE`. `docs/ROADMAP.md` holds the 
 - The cost is size: the binary goes from about 7 MB to about 15 MB, nearly all of it grammar tables, and the release profile now strips symbols. `--no-default-features` gives about 1.3 MB.
 - Typing at the end of a file, per key on a release build: 12 to 22 ms at 100 KB across languages, and 64 ms (Go) to 113 ms (C++) at 500 KB. That's usable, so the 512 KiB cap stays, and incremental parsing is still the way to improve it.
 
+## Even more languages
+
+- Added SQL, Java, C#, PHP, Ruby, Lua, Make, Dockerfile, XML, diff, INI, CMake, Fish, Nix and Zig, which makes 30. The ones with functions get `f`, `n`, `p` and the reader's focus.
+- Each grammar was tried on a real sample before it went in, because a query can load and still leave a file mostly plain. That found three problems, all from queries written for Neovim:
+  - `@comment @spell` left comments uncolored, because the second capture won. `adapted` strips `@spell` and `@nospell`.
+  - `#lua-match?` isn't a predicate here, and an unknown predicate doesn't filter, so it's mapped to `#match?`. SQL and CMake also needed their Lua patterns rewritten as regex.
+  - Older names such as `conditional`, `repeat` and `boolean` weren't Kyte colors, so `if` in Lua stayed plain. They're mapped now, along with `constructor`, `escape` and `variable.builtin`, which also adds color to `self` and `\\n` in the earlier languages.
+- `tests` in `highlight.rs` check named tokens in a whole sample for each language, so a query update that drops comments will fail.
+- Left out, and why:
+  - LaTeX: `tree-sitter-latex` 0.1.0 ships without its scanner and doesn't link. A working one would mean keeping a grammar in this repo.
+  - `tree-sitter-dockerfile`: it needs an old tree-sitter. `tree-sitter-containerfile` covers Dockerfiles instead.
+  - Kotlin: one crate needs an old tree-sitter and the other has no highlight query.
+  - Protobuf and HCL: no highlight query in the crate.
+  - Perl: it doesn't resolve against tree-sitter 0.27.
+  - Swift, Scala, Haskell, Dart and Elixir: they work, but each adds megabytes for languages seldom edited in a Linux terminal. They can go in later.
+- The binary grows from about 15 MB to about 26 MB. C#, Ruby, SQL and PHP are most of that.
+- Measured on a release build, mid-file on repeated samples: the first highlight of a language in a session takes 21 ms at most, for building its query. A keystroke costs 5 to 20 ms at 100 KB and 23 to 103 ms at 500 KB, so nothing is slower than C++ was, and the 512 KiB cap stays.
+
 ## CI
 
 - That image has no Node, which `actions/checkout` needs, so the job checks out with git.

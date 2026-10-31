@@ -34,7 +34,7 @@ The Makefile targets are thin wrappers:
 | `make demo` | `scripts/demo.sh` (see [Demo](#demo)) |
 | `make docker-test` | `cargo test` inside the Docker dev image (see [Docker](#docker)) |
 
-Kyte highlights Rust, Python, Bash, JavaScript, TypeScript, TSX, C, C++, Go, JSON, HTML, CSS, TOML, YAML and Markdown, picked by file name or extension, or the `#!` line of a script, using tree-sitter. Building needs a C compiler for the grammars. To leave highlighting and the code actions out, which shrinks the binary from about 15 MB to about 1.3 MB:
+Kyte highlights Rust, Python, Bash, Fish, JavaScript, TypeScript, TSX, C, C++, C#, Go, Java, PHP, Ruby, Lua, Zig, SQL, Nix, JSON, HTML, CSS, XML, TOML, YAML, INI, Markdown, Makefiles, Dockerfiles, CMake and diffs, picked by file name or extension, or the `#!` line of a script, using tree-sitter. Building needs a C compiler for the grammars. To leave highlighting and the code actions out, which shrinks the binary from about 26 MB to about 1.3 MB:
 
 ```
 cargo build --release --no-default-features
@@ -132,7 +132,7 @@ The menu changes with where you are, and only lists what works there:
 | With more than one file open | `b` open files, `.` next file, `,` previous file |
 | In a file with a line comment syntax | `#` comment or uncomment the line |
 | In any language Kyte highlights | `e` select the syntax under the cursor |
-| In Rust, Python, Bash, JavaScript, TypeScript, C, C++ or Go | `f` select function, `n` and `p` next and previous function |
+| In Rust, Python, Bash, Fish, JavaScript, TypeScript, C, C++, C#, Go, Java, PHP, Ruby, Lua or Zig | `f` select function, `n` and `p` next and previous function |
 
 With text selected, Esc shows the selection's menu instead. Actions leave the result selected where that makes sense, so they chain:
 
