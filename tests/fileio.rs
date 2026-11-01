@@ -21,6 +21,30 @@ fn names(dir: &Path) -> Vec<String> {
 }
 
 #[test]
+fn the_longest_file_name_saves_over_itself_and_as_new() {
+    let d = tempfile::tempdir().unwrap();
+    let name = "x".repeat(255);
+    let f = d.path().join(&name);
+    save_atomic(&f, "first").unwrap();
+    assert_eq!(fs::read_to_string(&f).unwrap(), "first");
+    save_atomic(&f, "second").unwrap();
+    assert_eq!(fs::read_to_string(&f).unwrap(), "second");
+    assert_eq!(names(d.path()), vec![name]);
+}
+
+#[test]
+fn the_longest_file_name_saves_in_place_when_hard_linked() {
+    let d = tempfile::tempdir().unwrap();
+    let f = d.path().join("x".repeat(255));
+    let other = d.path().join("other");
+    fs::write(&f, "old").unwrap();
+    fs::hard_link(&f, &other).unwrap();
+    save_atomic(&f, "new").unwrap();
+    assert_eq!(fs::read_to_string(&other).unwrap(), "new");
+    assert_eq!(names(d.path()).len(), 2);
+}
+
+#[test]
 fn load_nonexistent_is_empty_and_not_existing() {
     let d = tempfile::tempdir().unwrap();
     let l = load(&d.path().join("new.txt")).unwrap();

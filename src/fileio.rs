@@ -348,16 +348,15 @@ pub fn save_atomic(path: &Path, text: &str) -> io::Result<()> {
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
-    let name = target
-        .file_name()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no file name"))?
-        .to_string_lossy()
-        .into_owned();
+    if target.file_name().is_none() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "no file name"));
+    }
     let old = fs::metadata(&target).ok();
     let mode = old.as_ref().map(|m| m.permissions().mode() & 0o7777);
     let n = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
     let pid = std::process::id();
-    let tmp = dir.join(format!(".{name}.kyte-tmp.{pid}.{n}"));
+    // Not built from the file's name, which may already be as long as they get.
+    let tmp = dir.join(format!(".kyte-tmp.{pid}.{n}"));
     let mut in_place = false;
     let result = (|| {
         let mut f = OpenOptions::new()
@@ -382,7 +381,7 @@ pub fn save_atomic(path: &Path, text: &str) -> io::Result<()> {
     })();
     if in_place {
         let _ = fs::remove_file(&tmp);
-        let backup = dir.join(format!(".{name}.kyte-bak.{pid}.{n}"));
+        let backup = dir.join(format!(".kyte-bak.{pid}.{n}"));
         return save_in_place(&target, &backup, text);
     }
     if let Err(e) = result {

@@ -3964,6 +3964,66 @@ fn a_symlink_moved_onto_an_open_file_cant_save_over_its_swap() {
 }
 
 #[test]
+fn a_symlink_moved_onto_a_crashed_file_cant_save_over_its_edits() {
+    let env = Env::new();
+    let a = work_file(&env, "a.txt", "aaa\n");
+    let b = work_file(&env, "b.txt", "bbb\n");
+    edit_and_kill(&env, &b, "precious ");
+    let link = a.parent().unwrap().join("link.txt");
+    std::os::unix::fs::symlink(&a, &link).unwrap();
+    let mut p = env.open(&link);
+    p.wait_for("1 │ aaa", TIMEOUT);
+    type_text(&mut p, "other ");
+    fs::remove_file(&link).unwrap();
+    std::os::unix::fs::symlink(&b, &link).unwrap();
+    p.send_keys(&["C-s"]);
+    p.wait_for("changed on disk", TIMEOUT);
+    p.send_str("y");
+    p.wait_for("edits from a crash", TIMEOUT);
+    assert_eq!(fs::read_to_string(&b).unwrap(), "bbb\n");
+    p.kill9();
+    assert_eq!(print_swap(&env, &b), (0, "precious bbb\n".to_string()));
+}
+
+#[test]
+fn a_symlink_moved_onto_a_file_open_elsewhere_cant_save_over_it() {
+    let env = Env::new();
+    let a = work_file(&env, "a.txt", "aaa\n");
+    let b = work_file(&env, "b.txt", "bbb\n");
+    let mut other = env.open(&b);
+    other.wait_for("1 │ bbb", TIMEOUT);
+    type_text(&mut other, "precious ");
+    let link = a.parent().unwrap().join("link.txt");
+    std::os::unix::fs::symlink(&a, &link).unwrap();
+    let mut p = env.open(&link);
+    p.wait_for("1 │ aaa", TIMEOUT);
+    type_text(&mut p, "other ");
+    fs::remove_file(&link).unwrap();
+    std::os::unix::fs::symlink(&b, &link).unwrap();
+    p.send_keys(&["C-s"]);
+    p.wait_for("changed on disk", TIMEOUT);
+    p.send_str("y");
+    p.wait_for("Open in another kyte", TIMEOUT);
+    assert_eq!(fs::read_to_string(&b).unwrap(), "bbb\n");
+    p.kill9();
+    other.kill9();
+    assert_eq!(print_swap(&env, &b), (0, "precious bbb\n".to_string()));
+}
+
+#[test]
+fn the_longest_file_name_saves() {
+    let env = Env::new();
+    let f = work_file(&env, &"x".repeat(255), "base\n");
+    let mut p = env.open(&f);
+    p.wait_for("1 │ base", TIMEOUT);
+    type_text(&mut p, "more ");
+    p.send_keys(&["C-s"]);
+    p.wait_for("Saved 1 line", TIMEOUT);
+    assert_eq!(fs::read_to_string(&f).unwrap(), "more base\n");
+    quit_clean(&mut p);
+}
+
+#[test]
 fn save_as_wont_overwrite_edits_left_by_a_crash() {
     let env = Env::new();
     let notes = env.path("work/notes.txt");
