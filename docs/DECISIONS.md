@@ -17,10 +17,30 @@ These replace the matching parts of `ARCHITECTURE`. `docs/ROADMAP.md` holds the 
 - A release carries a `.tar.gz` for x86-64 and arm64, a `.deb` and an `.rpm` for each, signed checksums and `install.sh`. They all come from one workflow, so what's tested is what ships.
 - Binaries are static, built against musl, so one build runs on any Linux whatever its glibc. Kyte depends on nothing at run time, so the packages declare nothing.
 - The installer needs no root and goes to `~/.local/bin`. It checks a signature against a key it carries, so a mirror can't swap the files. `--from` skips that for a file someone already has.
-- Kyte has no updater. The README promises it makes no network connections, and that's worth more than the convenience. Updating is the installer again, or a package manager.
+- Updating was the installer again, or a package manager, to keep the promise of no network connections. See "Updates" for what replaced that.
 - A tag makes a draft release, which a person publishes. A tag can't be released unsigned.
 - Third-party notices ship in every package: the crates that reach the binary, and the files kept in `vendor/`.
 - Linux only, because the swap lock reads `/proc`.
+
+## Updates
+
+- This reverses "Kyte has no updater" from 0.6.0, by decision on Oct 31, 2026. Kyte updates the way Ryter and Reeve do, and checks where it came from first, as Reeve does. The README's promise is now that the network is used for this and nothing else.
+- `kyte --update` installs by the route this copy came in: the release's install script, the release's package, the repository it came from, or the AUR helper. A package from a repository stays that repository's, so the release's own package never replaces it. An origin the package manager can't give is refused, not taken for a hand install.
+- These are flags, not `kyte update`, because `kyte NAME` opens `NAME`. A subcommand would take a file called `update` away, or do different things in different folders.
+- The path can't tell a release from a cargo build copied into `~/.local/bin`, so the release workflow marks its binaries with `KYTE_RELEASE_BUILD`, and an unmarked copy is refused. A package manager's copy doesn't need the mark, so a distribution's own build still updates through its repository.
+- A release binary in `/usr/bin` or `/bin` that no package owns is refused. It usually means the package lookup failed, and taking it for the installer's copy would overwrite a package's file.
+- A release binary not named `kyte` is refused too. The install script only writes `kyte`, so `kyte-old --update` would replace a different file, with no rollback.
+- apt versions stay with the repository that offers them. Of several repositories, the package's is the one offering the installed version, and if that isn't exactly one the origin is unknown. One repository that no longer offers the installed version still counts, because repositories drop old versions. apt can't be told which source to take a version from, so a version two repositories offer is refused. Any source with an address is a repository, `file:` included.
+- Package tools are asked in the C locale. `apt-cache` translates its output, so on a French or German system its `Version table:` heading wouldn't be found and every `.deb` would be refused.
+- With no `HOME` or state folder, Kyte's state falls back to `/tmp`, where anyone could have laid out the path, and the update's downloads get run. The updater refuses there, and the launch check doesn't start.
+- The launch check runs beside the editor, at most once a day, and only says a release is out. An editor shouldn't replace itself unasked, and a package needs sudo, which a background job can't ask for. A failed check says nothing and is tried at the next launch. Debug builds and builds in a checkout never ask, which keeps the tests off the network.
+- A note waits for a free status bar and a second's pause in the typing, because any key clears the bar.
+- One signature over `SHA256SUMS`, checked with the key built into Kyte, covers every file, including the install script that gets run. The signature doesn't say which release a file belongs to, so a tarball's binary must also report the expected version, which stops an old signed release passing for a new one. That check has a time limit, kills the whole process group, and reads a capped amount of output, so a binary that hangs or floods can't stall the update.
+- A mirror (`KYTE_DOWNLOAD_URL`, `KYTE_RELEASES_API`) changes where files come from and not what's accepted. It can withhold a release, but not change one.
+- What's on disk decides the outcome, not the installer's exit code. A failed install may already have replaced the binary, and `--update-rollback` must still know what to put back. State is written under a lock, so a Kyte starting up can't drop the rollback target.
+- Crates, all under the `update` feature: `ureq` with rustls for HTTPS, chosen over `reqwest`, which brings an async runtime, and over running `curl`, because Kyte depends on nothing at run time. `ed25519-dalek` and `sha2` for the signature and checksums, the same as Ryter and Reeve. `base64` for the key and signature, and `serde_json` for GitHub's answer. TLS checks against the Mozilla roots built into the binary, as Ryter and Reeve do, so a proxy that re-signs TLS with its own CA fails the check. A mirror over plain HTTP works there, because the signature is what's trusted.
+- `--update` needs `tar` and `sh`, as the install script does. It can't run as root, because its state and downloads belong to you; it asks for sudo itself.
+- The install script's `--from` and `KYTE_INSTALL_DIR` are now a contract: `kyte --update` calls them on every future release's script.
 
 ## Several open files
 
@@ -451,3 +471,17 @@ The versioning rule makes any release with a new feature a MINOR bump, and 0.1.1
 - Colors sit on the text background: keyword (bold), string, comment (italic), function, type and constant/number. `src/ui/theme.rs` has the values.
 - The text view uses a styled per-grapheme path only for lines that have spans; other lines take the unchanged `render_line` path. Without the feature, none of this code is compiled.
 - Tests: four unit tests in `highlight.rs` (a Rust snippet is tokenized into comment, keyword, function and string; only the requested lines are returned; the Python and Bash grammars load; extension mapping) and `tests/e2e_highlight.rs` (`fn` in a `.rs` file is drawn with foreground index 176 in the vt100 screen; a `.txt` file stays at the default 252).
+
+## Unsaved buffers
+
+- File history and highlighting both went by the file's path, so a buffer with no name had neither. Ctrl-Z always worked, because undo lives in the buffer.
+- An unsaved buffer's log is named after its swap, `untitled-<pid>-<start>.kytehist`. Going by the swap rather than the process means a crashed session's log is found again when its swap is adopted, whatever the new process is. So recovery adopts the swap first, then starts the history.
+- The log lives as long as the swap. The first save moves it to the file's log, so the file's history starts at the first keystroke. It's a rename while the file has no log, and the open descriptor carries on. Otherwise the records go after the file's own: a log starts with a snapshot, so the two join without rewriting either. Other Save as moves still start a new history, because the old file keeps its log.
+- Discarding an unsaved buffer deletes its log. Nothing could reach it by then, since it's only ever found through the swap, and text someone threw away shouldn't stay on disk under a name they can't find. It's the one place a history is dropped without being asked.
+- A bare `kyte` sweeps logs of unsaved buffers that have no swap. The name check wants digits on both sides, because a long path's log keeps the end of the path and could start with `untitled-`.
+- A language is carried as the extension that stands for it, and `Buffer::kind_path` gives a name built from it. Every check on a file's kind already took a path (`Lang::detect`, `syntax::prose`, `comment_prefix`), so they all work with no change, including with `highlight` off, where `Lang` doesn't exist. Use `kind_path` to judge text and `path` to reach the file.
+- The order is: the language chosen, the file's name, then for a buffer with no name a guess from its opening lines. A `#!` line needs no guess, since an empty name falls through to it.
+- The guess is a list of line starts, not a parse or a statistical model. Running every grammar over the text on each key would be slow and no more certain. It's deliberately timid, and case-sensitive so a sentence's first word can't trip it: a wrong guess colors someone's prose, and a missed one costs only what they had before. The language box covers the rest.
+- A guess changes colors and the code keys only. It doesn't switch on the Writing setup, which changes wrapping and adds a spell check, because that's too much to do to a buffer on a guess. Choosing a language does, like saving under that name would.
+- Saving under a name that gives a language drops the choice. Saving under one that doesn't keeps it, and turns a guess into a choice, because otherwise colors would vanish on save.
+- The language box is the palette with a different list, like the theme picker. It's a palette command rather than an Esc key, since the keys are for what you do all the time.

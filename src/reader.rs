@@ -49,9 +49,11 @@ fn paragraph_at(b: &Buffer, line: usize) -> Range<usize> {
 }
 
 /// The file's path and text, when it's code small enough to parse on each key.
-fn code(b: &Buffer) -> Option<(&std::path::Path, String)> {
-    let path = b.path().filter(|p| syntax::supported(p, &b.head()))?;
-    (b.rope().len_bytes() <= syntax::MAX_LIVE_PARSE_BYTES).then(|| (path, b.to_string()))
+fn code(b: &Buffer) -> Option<(std::borrow::Cow<'_, std::path::Path>, String)> {
+    let path = b.kind_path();
+    let parsed =
+        syntax::supported(&path, &b.head()) && b.rope().len_bytes() <= syntax::MAX_LIVE_PARSE_BYTES;
+    parsed.then(|| (path, b.to_string()))
 }
 
 /// Whether a line belongs to the function below it: a comment or an attribute.
@@ -68,12 +70,12 @@ pub fn section_at(b: &Buffer) -> (Range<usize>, String) {
     };
     let rope = b.rope();
     let at = rope.char_to_byte(b.cursor());
-    let crumbs = syntax::breadcrumb(path, &text, at).join(" › ");
-    let Some(r) = syntax::function_at(path, &text, at) else {
+    let crumbs = syntax::breadcrumb(&path, &text, at).join(" › ");
+    let Some(r) = syntax::function_at(&path, &text, at) else {
         return (paragraph_at(b, line), crumbs);
     };
     let mut start = rope.byte_to_line(r.start);
-    let prefix = syntax::comment_prefix(path, &b.head());
+    let prefix = syntax::comment_prefix(&path, &b.head());
     while start > 0 && leads_in(&b.line_text(start - 1), prefix) {
         start -= 1;
     }
@@ -89,9 +91,9 @@ pub fn step(b: &Buffer, forward: bool) -> Option<usize> {
     if let Some((path, text)) = code(b) {
         let at = rope.char_to_byte(b.cursor());
         let hit = if forward {
-            syntax::next_function(path, &text, at)
+            syntax::next_function(&path, &text, at)
         } else {
-            syntax::prev_function(path, &text, at)
+            syntax::prev_function(&path, &text, at)
         };
         if let Some(byte) = hit {
             return Some(rope.byte_to_char(byte));

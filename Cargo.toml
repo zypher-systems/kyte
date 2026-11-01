@@ -1,6 +1,6 @@
 [package]
 name = "kyte-editor"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 description = "Kyte: a terminal text editor"
 license = "MIT"
@@ -28,6 +28,12 @@ crc32fast = "1"
 anyhow = "1"
 rustix = { version = "1", features = ["fs", "process"] }
 signal-hook = "0.3"
+# Updates, on by default (`--no-default-features` leaves them out).
+ureq = { version = "3", default-features = false, features = ["rustls"], optional = true }
+ed25519-dalek = { version = "2", optional = true }
+sha2 = { version = "0.10", optional = true }
+base64 = { version = "0.22", optional = true }
+serde_json = { version = "1", optional = true }
 # Spell checking, on by default.
 spellbook = { version = "0.4", optional = true }
 # Syntax highlighting, on by default (`--no-default-features` leaves it out).
@@ -67,7 +73,7 @@ tree-sitter-latex = { version = "0.1", optional = true }
 tree-sitter-language = { version = "0.1", optional = true }
 
 [features]
-default = ["highlight", "spell"]
+default = ["highlight", "spell", "update"]
 spell = ["dep:spellbook"]
 highlight = [
     "dep:tree-sitter",
@@ -105,6 +111,14 @@ highlight = [
     "dep:tree-sitter-latex",
     "dep:tree-sitter-language",
     "dep:cc",
+]
+# The only network code in Kyte: `kyte --update` and the daily check.
+update = [
+    "dep:ureq",
+    "dep:ed25519-dalek",
+    "dep:sha2",
+    "dep:base64",
+    "dep:serde_json",
 ]
 
 [build-dependencies]

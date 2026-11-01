@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use crate::buffer::Indent;
 use crate::config;
 use crate::ui::theme::ThemeName;
+use crate::update::{Action, Request};
 
 /// Default double-tap Esc window in milliseconds.
 pub const DEFAULT_ESC_MS: u64 = 300;
@@ -21,6 +22,10 @@ pub struct Options {
     pub print_swap: Option<PathBuf>,
     pub break_lock: bool,
     pub no_history: bool,
+    /// Run the updater instead of the editor.
+    pub update: Option<Request>,
+    /// Ask once a day, at launch, whether a newer release is out.
+    pub update_check: bool,
     /// Columns a tab takes up on screen.
     pub tab_width: usize,
     /// What Tab inserts in a file with no indent to go by.
@@ -53,6 +58,8 @@ impl Default for Options {
             print_swap: None,
             break_lock: false,
             no_history: false,
+            update: None,
+            update_check: true,
             tab_width: 4,
             default_indent: Indent::Tabs,
             indent_width: 4,
@@ -90,7 +97,7 @@ impl fmt::Display for CliError {
     }
 }
 
-/// `kyte 0.6.0`, taken from the crate version.
+/// `kyte 0.7.0`, taken from the crate version.
 pub fn version() -> String {
     format!("kyte {}", env!("CARGO_PKG_VERSION"))
 }
@@ -107,11 +114,18 @@ Options:\n\
       --no-kitty         Never enable the kitty keyboard protocol\n\
       --break-lock       Open FILE even if another kyte seems to hold it\n\
       --no-history       Keep no file history this session\n\
-      --print-swap FILE  Print the content recovered from FILE's swap and exit (exit 3 if none)\n\n\
+      --print-swap FILE  Print the content recovered from FILE's swap and exit (exit 3 if none)\n\
+      --update           Install the newest release, the way this copy was installed\n\
+      --update-check     Only say whether a newer release is out\n\
+      --update-to V      Install version V instead of the newest\n\
+      --update-rollback  Go back to the version the last update replaced\n\
+  -y, --yes              Don't ask before updating\n\n\
 Environment:\n\
   KYTE_STATE_DIR         Swap directory override\n\
   KYTE_CONFIG            Settings file (default ~/.config/kyte/config.toml)\n\
-  KYTE_ESC_MS            Default for --esc-ms\n\n\
+  KYTE_ESC_MS            Default for --esc-ms\n\
+  KYTE_RELEASES_API      Where --update asks for the latest release\n\
+  KYTE_DOWNLOAD_URL      Where --update downloads from (a mirror; signatures still apply)\n\n\
 Exit codes: 0 ok, 1 runtime error, 2 bad usage or refused file, 3 no swap for --print-swap\n",
         version()
     )
@@ -145,6 +159,14 @@ pub fn parse_onto(
     }
     let mut args = args.peekable();
     let mut only_files = false;
+    let mut action = None;
+    let mut yes = false;
+    let mut choose = |wanted: Action, name: &str| match action.replace(wanted) {
+        None => Ok(()),
+        Some(_) => Err(CliError::Usage(format!(
+            "'{name}' can't go with another update option"
+        ))),
+    };
     while let Some(arg) = args.next() {
         if only_files || arg == "-" || !arg.starts_with('-') {
             if opts.file.is_some() {
@@ -165,6 +187,14 @@ pub fn parse_onto(
             "--no-kitty" => opts.no_kitty = true,
             "--break-lock" => opts.break_lock = true,
             "--no-history" => opts.no_history = true,
+            "--update" => choose(Action::Latest, "--update")?,
+            "--update-check" => choose(Action::Check, "--update-check")?,
+            "--update-rollback" => choose(Action::Rollback, "--update-rollback")?,
+            "--update-to" => {
+                let v = value(inline, &mut args, "--update-to")?;
+                choose(Action::To(v), "--update-to")?;
+            }
+            "-y" | "--yes" => yes = true,
             "--esc-ms" => {
                 let v = value(inline, &mut args, "--esc-ms")?;
                 opts.esc_ms = parse_ms(&v, "--esc-ms")?;
@@ -176,7 +206,19 @@ pub fn parse_onto(
             _ => return Err(CliError::Usage(format!("unknown option '{arg}'"))),
         }
     }
-    Ok(opts)
+    match action {
+        Some(_) if opts.file.is_some() => Err(CliError::Usage(
+            "the update options don't open files".to_string(),
+        )),
+        Some(action) => {
+            opts.update = Some(Request { action, yes });
+            Ok(opts)
+        }
+        None if yes => Err(CliError::Usage(
+            "'--yes' only goes with an update option".to_string(),
+        )),
+        None => Ok(opts),
+    }
 }
 
 fn value(
@@ -235,7 +277,7 @@ mod tests {
         assert_eq!(p(&["--help"]), Err(CliError::Help));
         assert_eq!(p(&["-V"]), Err(CliError::Version));
         assert_eq!(p(&["--version"]), Err(CliError::Version));
-        assert_eq!(version(), "kyte 0.6.0");
+        assert_eq!(version(), "kyte 0.7.0");
     }
 
     #[test]
@@ -247,6 +289,11 @@ mod tests {
             "--esc-ms",
             "--no-kitty",
             "--print-swap",
+            "--update",
+            "--update-check",
+            "--update-to",
+            "--update-rollback",
+            "--yes",
             "-h",
             "-V",
         ] {
@@ -270,6 +317,51 @@ mod tests {
         assert_eq!(env("450", &[]).unwrap().esc_ms, 450);
         assert_eq!(env("450", &["--esc-ms", "100"]).unwrap().esc_ms, 100);
         assert!(matches!(env("x", &[]), Err(CliError::Usage(_))));
+    }
+
+    #[test]
+    fn update_options() {
+        let wants = |args: &[&str]| p(args).unwrap().update;
+        let request = |action, yes| Some(Request { action, yes });
+        assert_eq!(wants(&[]), None);
+        assert_eq!(wants(&["--update"]), request(Action::Latest, false));
+        assert_eq!(wants(&["--update", "-y"]), request(Action::Latest, true));
+        assert_eq!(wants(&["--yes", "--update"]), request(Action::Latest, true));
+        assert_eq!(wants(&["--update-check"]), request(Action::Check, false));
+        assert_eq!(
+            wants(&["--update-rollback"]),
+            request(Action::Rollback, false)
+        );
+        assert_eq!(
+            wants(&["--update-to", "0.6.0"]),
+            request(Action::To("0.6.0".into()), false)
+        );
+        assert_eq!(
+            wants(&["--update-to=v0.6.0"]),
+            request(Action::To("v0.6.0".into()), false)
+        );
+    }
+
+    #[test]
+    fn update_options_dont_mix() {
+        for bad in [
+            &["--update", "--update-check"][..],
+            &["--update-to", "0.6.0", "--update-rollback"],
+            &["--update", "notes.txt"],
+            &["--yes"],
+            &["--yes", "notes.txt"],
+            &["--update-to"],
+        ] {
+            assert!(matches!(p(bad), Err(CliError::Usage(_))), "{bad:?}");
+        }
+    }
+
+    /// `kyte NAME` keeps opening NAME, even when that's the word.
+    #[test]
+    fn a_file_called_update_is_a_file() {
+        let o = p(&["update"]).unwrap();
+        assert_eq!(o.file, Some(PathBuf::from("update")));
+        assert_eq!(o.update, None);
     }
 
     #[test]

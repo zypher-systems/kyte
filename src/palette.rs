@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use crate::build::Problem;
 use crate::command::{Command, REGISTRY};
+use crate::language::LANGUAGES;
 use crate::ui::theme::ThemeName;
 
 /// Rows of results the popup shows at once.
@@ -49,6 +50,9 @@ pub fn filter(query: &str) -> Vec<Command> {
     scored.into_iter().map(|(_, _, c)| c).collect()
 }
 
+/// The language box's first row, which leaves the language to the file's name.
+const AUTOMATIC: &str = "Automatic";
+
 /// One row of the palette.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Entry {
@@ -61,6 +65,11 @@ pub enum Entry {
     Find(String),
     /// A row of the theme picker.
     Theme(ThemeName),
+    /// A row of the language box. No extension goes back to the file's name.
+    Language {
+        name: &'static str,
+        extension: Option<&'static str>,
+    },
     /// A work to cite, shown as `line`.
     Citation {
         key: String,
@@ -93,6 +102,7 @@ impl Entry {
             Entry::Line(n) => format!("Go to line {n}"),
             Entry::Find(q) => format!("Find {q}"),
             Entry::Theme(t) => t.label().to_string(),
+            Entry::Language { name, .. } => name.to_string(),
             Entry::OpenFile { name, .. } => name.clone(),
             Entry::Citation { line, .. } => line.clone(),
             Entry::Problem(p) => p.label(),
@@ -112,7 +122,8 @@ impl Entry {
             | Entry::Problem(_)
             | Entry::Spelling { .. }
             | Entry::AddWord(_)
-            | Entry::IgnoreWord(_) => "",
+            | Entry::IgnoreWord(_)
+            | Entry::Language { .. } => "",
             Entry::Theme(t) if t.is_light() => "light",
             Entry::Theme(_) => "dark",
             Entry::OpenFile { note, .. } => note,
@@ -177,6 +188,8 @@ enum Source {
     Themes {
         before: ThemeName,
     },
+    /// The languages to choose from.
+    Languages(Arc<Vec<Entry>>),
     /// The open files.
     OpenFiles(Arc<Vec<Entry>>),
     /// The works to cite.
@@ -229,6 +242,31 @@ impl PaletteState {
         state
     }
 
+    /// The language box, starting on `current`, as an extension.
+    pub fn languages(current: Option<&str>) -> PaletteState {
+        let automatic = Entry::Language {
+            name: AUTOMATIC,
+            extension: None,
+        };
+        let chosen = LANGUAGES
+            .into_iter()
+            .map(|(name, extension)| Entry::Language {
+                name,
+                extension: Some(extension),
+            });
+        let rows: Vec<Entry> = std::iter::once(automatic).chain(chosen).collect();
+        let on_current =
+            |r: &Entry| matches!(r, Entry::Language { extension, .. } if *extension == current);
+        let selected = rows.iter().position(on_current).unwrap_or(0);
+        let mut state = PaletteState {
+            source: Source::Languages(Arc::new(rows)),
+            ..PaletteState::default()
+        };
+        state.set_query(String::new());
+        state.selected = selected;
+        state
+    }
+
     /// The open files, starting on the row at `current`.
     pub fn open_files(files: Vec<Entry>, current: usize) -> PaletteState {
         let mut state = PaletteState {
@@ -271,6 +309,7 @@ impl PaletteState {
     pub fn own_title(&self) -> Option<String> {
         match &self.source {
             Source::Spelling { word, .. } => Some(format!("Fix {word}")),
+            Source::Languages(_) => Some("Set language".to_string()),
             Source::Problems { title, .. } => Some(title.clone()),
             _ => None,
         }
@@ -348,7 +387,9 @@ impl PaletteState {
                 scored.sort_by_key(|(s, _)| std::cmp::Reverse(*s));
                 scored.into_iter().map(|(_, f)| f.clone()).collect()
             }
-            Source::Spelling { rows, .. } | Source::Problems { rows, .. } => rows
+            Source::Languages(rows)
+            | Source::Spelling { rows, .. }
+            | Source::Problems { rows, .. } => rows
                 .iter()
                 .filter(|r| score(&self.query, &r.label()).is_some())
                 .cloned()
@@ -403,7 +444,7 @@ mod tests {
     #[test]
     fn empty_query_keeps_registry_order() {
         assert_eq!(filter(""), REGISTRY.to_vec());
-        assert_eq!(PaletteState::default().results.len(), 36);
+        assert_eq!(PaletteState::default().results.len(), 38);
     }
 
     #[test]
@@ -445,6 +486,23 @@ mod tests {
         let mut s = PaletteState::open_files(files, 0);
         typed(&mut s, "b.txt");
         assert_eq!(s.selected_entry(), Some(&row(1, "/tmp/bx/b.txt")));
+    }
+
+    #[test]
+    fn the_language_box_starts_on_the_current_language_and_filters() {
+        let mut s = PaletteState::languages(None);
+        assert_eq!(s.selected_entry().unwrap().label(), "Automatic");
+        s = PaletteState::languages(Some("rs"));
+        assert_eq!(s.selected_entry().unwrap().label(), "Rust");
+        assert_eq!(s.own_title().as_deref(), Some("Set language"));
+        typed(&mut s, "pyth");
+        assert_eq!(
+            s.selected_entry(),
+            Some(&Entry::Language {
+                name: "Python",
+                extension: Some("py")
+            })
+        );
     }
 
     #[test]
@@ -571,13 +629,13 @@ mod tests {
         for _ in 0..40 {
             s.down();
         }
-        assert_eq!(s.selected, 35);
+        assert_eq!(s.selected, 37);
         assert_eq!(s.selected_command(), Some(Command::ShowKeyHelp));
-        assert_eq!(s.scroll_offset(), 28);
+        assert_eq!(s.scroll_offset(), 30);
         s.push('s');
         assert_eq!(s.selected, 0);
         assert_eq!(s.selected_command(), Some(Command::Save));
         s.pop();
-        assert_eq!(s.results.len(), 36);
+        assert_eq!(s.results.len(), 38);
     }
 }

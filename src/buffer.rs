@@ -10,6 +10,8 @@ use ropey::Rope;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+use crate::language;
+
 static TAB_WIDTH: AtomicUsize = AtomicUsize::new(4);
 
 /// Tabs render to the next multiple of this many columns.
@@ -214,6 +216,9 @@ fn detect_indent(text: &str) -> Option<Indent> {
 pub struct Buffer {
     rope: Rope,
     path: Option<PathBuf>,
+    /// The language chosen for this text, as its extension. It goes ahead of
+    /// the file's name.
+    language: Option<&'static str>,
     cursor: usize,
     want_col: usize,
     dirty: bool,
@@ -247,6 +252,7 @@ impl Buffer {
         Buffer {
             rope: Rope::from_str(text),
             path,
+            language: None,
             cursor: 0,
             want_col: 0,
             dirty: false,
@@ -262,6 +268,11 @@ impl Buffer {
 
     /// The start of the file, enough to read a `#!` line.
     pub fn head(&self) -> String {
+        // A chosen language outranks the `#!` line, which is what lets Plain
+        // text turn a script's highlighting off.
+        if self.language.is_some() {
+            return String::new();
+        }
         self.rope.line(0).chars().take(256).collect()
     }
 
@@ -270,6 +281,7 @@ impl Buffer {
         Buffer {
             rope,
             path: self.path.clone(),
+            language: self.language,
             cursor: 0,
             want_col: 0,
             dirty: false,
@@ -625,6 +637,40 @@ impl Buffer {
 
     pub fn rope(&self) -> &Rope {
         &self.rope
+    }
+
+    /// The start of the text, enough to tell what language it looks like.
+    fn opening(&self) -> String {
+        self.rope.chars().take(language::OPENING).collect()
+    }
+
+    /// The language chosen for this text, as its extension.
+    pub fn language(&self) -> Option<&'static str> {
+        self.language
+    }
+
+    pub fn set_language(&mut self, language: Option<&'static str>) {
+        self.language = language;
+    }
+
+    /// The language chosen, or failing that the one this text looks like. The
+    /// text is only looked at when there's no file name to go by.
+    pub fn language_or_guess(&self) -> Option<&'static str> {
+        let guessed = || language::guess(&self.opening());
+        self.language
+            .or_else(|| self.path.is_none().then(guessed).flatten())
+    }
+
+    /// The name that says what kind of text this is: the one for its language,
+    /// else the file's. It's empty when nothing says, which leaves the `#!`
+    /// line. Use this to judge the text, and `path` to reach the file.
+    pub fn kind_path(&self) -> std::borrow::Cow<'_, std::path::Path> {
+        use std::borrow::Cow;
+        match (self.language_or_guess(), &self.path) {
+            (Some(ext), _) => Cow::Owned(PathBuf::from(language::file_name(ext))),
+            (None, Some(path)) => Cow::Borrowed(path),
+            (None, None) => Cow::Owned(PathBuf::new()),
+        }
     }
 
     pub fn path(&self) -> Option<&std::path::Path> {
@@ -1083,6 +1129,17 @@ impl Buffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A chosen language outranks the `#!` line as well as the guess.
+    #[test]
+    fn a_chosen_language_outranks_the_first_line() {
+        let mut b = Buffer::from_str("#!/bin/sh\necho hi\n", None);
+        assert!(b.head().starts_with("#!/bin/sh"));
+        b.set_language(Some("txt"));
+        assert_eq!(b.head(), "");
+        b.set_language(None);
+        assert!(b.head().starts_with("#!/bin/sh"));
+    }
 
     fn b(s: &str) -> Buffer {
         Buffer::from_str(s, None)

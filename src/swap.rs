@@ -31,10 +31,10 @@ const EDIT_FIXED: usize = 1 + 8 + 8 + 4;
 const HEADER_FIXED: usize = 40;
 /// The base snapshot is split into records of about this many bytes.
 const BASE_CHUNK: usize = 1 << 20;
-const SUFFIX: &str = ".kyteswp";
+pub(crate) const SUFFIX: &str = ".kyteswp";
 /// Swaps of buffers with no file name start with this. No escaped path can,
 /// because every path starts with `%2F`.
-const UNTITLED_PREFIX: &str = "untitled-";
+pub(crate) const UNTITLED_PREFIX: &str = "untitled-";
 /// File-name limit on Linux file systems, in bytes.
 const NAME_MAX: usize = 255;
 

@@ -21,6 +21,7 @@ pub enum Command {
     ToggleIndent,
     ToggleWrap,
     ChooseTheme,
+    SetLanguage,
     FileTree,
     InsertCitation,
     BuildPdf,
@@ -38,6 +39,7 @@ pub enum Command {
     DeleteHistory,
     Reader,
     Settings,
+    CheckUpdates,
     ShowKeyHelp,
 }
 
@@ -61,6 +63,7 @@ pub const REGISTRY: &[Command] = &[
     Command::ToggleIndent,
     Command::ToggleWrap,
     Command::ChooseTheme,
+    Command::SetLanguage,
     Command::FileTree,
     Command::InsertCitation,
     Command::BuildPdf,
@@ -78,6 +81,7 @@ pub const REGISTRY: &[Command] = &[
     Command::DeleteHistory,
     Command::Reader,
     Command::Settings,
+    Command::CheckUpdates,
     Command::ShowKeyHelp,
 ];
 
@@ -102,6 +106,7 @@ impl Command {
             Command::ToggleIndent => "Toggle tabs and spaces",
             Command::ToggleWrap => "Toggle soft wrap",
             Command::ChooseTheme => "Choose theme",
+            Command::SetLanguage => "Set language",
             Command::FileTree => "File tree",
             Command::InsertCitation => "Insert citation",
             Command::BuildPdf => "Build PDF",
@@ -119,6 +124,7 @@ impl Command {
             Command::DeleteHistory => "Delete file history",
             Command::Reader => "Reader mode",
             Command::Settings => "Open settings",
+            Command::CheckUpdates => "Check for updates",
             Command::ShowKeyHelp => "Show key help",
         }
     }
@@ -144,6 +150,7 @@ impl Command {
             Command::ToggleIndent => "",
             Command::ToggleWrap => "",
             Command::ChooseTheme => "",
+            Command::SetLanguage => "",
             Command::FileTree => "Ctrl-T",
             Command::InsertCitation => "Esc q",
             Command::BuildPdf => "Ctrl-B",
@@ -161,6 +168,7 @@ impl Command {
             Command::DeleteHistory => "",
             Command::Reader => "Esc v",
             Command::Settings => "",
+            Command::CheckUpdates => "",
             Command::ShowKeyHelp => "",
         }
     }
@@ -224,7 +232,7 @@ mod tests {
 
     #[test]
     fn every_command_has_a_label() {
-        assert_eq!(REGISTRY.len(), 36);
+        assert_eq!(REGISTRY.len(), 38);
         let labels: Vec<&str> = REGISTRY.iter().map(|c| c.label()).collect();
         assert_eq!(
             labels,
@@ -247,6 +255,7 @@ mod tests {
                 "Toggle tabs and spaces",
                 "Toggle soft wrap",
                 "Choose theme",
+                "Set language",
                 "File tree",
                 "Insert citation",
                 "Build PDF",
@@ -264,6 +273,7 @@ mod tests {
                 "Delete file history",
                 "Reader mode",
                 "Open settings",
+                "Check for updates",
                 "Show key help"
             ]
         );

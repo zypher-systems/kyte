@@ -5,7 +5,10 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use kyte::buffer::Edit;
-use kyte::history::{compact, log_path_in, Change, FileHistory, SnapshotKind, Timeline};
+use kyte::history::{
+    compact, log_path_in, sweep_unsaved_in, unsaved_log_path_in, Change, FileHistory, SnapshotKind,
+    Timeline,
+};
 use proptest::prelude::*;
 use ropey::Rope;
 
@@ -23,6 +26,13 @@ fn del(at: usize, s: &str) -> Edit {
         removed: s.to_string(),
         inserted: String::new(),
     }
+}
+
+/// An unsaved buffer's log with `text` typed into it.
+fn unsaved(t: &T, text: &str) -> FileHistory {
+    let mut h = FileHistory::unsaved_in(&t.dir, Path::new("/state/untitled-7-9.kyteswp"), &r(""));
+    h.append(&[ins(0, text)]).unwrap();
+    h
 }
 
 struct T {
@@ -647,4 +657,170 @@ fn edit_past_the_text_ends_the_timeline_there() {
     assert_eq!(tl.len(), 2);
     assert_eq!(text(&tl, 1), "abc");
     assert!(matches!(tl.version(1).change, Change::Edit { .. }));
+}
+
+// ---------------------------------------------------------------- unsaved buffers
+
+#[test]
+fn an_unsaved_log_goes_by_its_swap() {
+    let t = setup();
+    let h = unsaved(&t, "a");
+    assert!(h.is_unsaved());
+    assert_eq!(h.path(), t.dir.join("untitled-7-9.kytehist"));
+    assert!(h.path().exists());
+}
+
+#[test]
+fn an_unsaved_log_moves_to_a_file_with_no_log() {
+    let t = setup();
+    let mut h = unsaved(&t, "ab");
+    let old = h.path().to_path_buf();
+    h.move_to_in(&t.dir, &t.target).unwrap();
+    assert!(!old.exists());
+    assert!(!h.is_unsaved());
+    assert_eq!(h.target(), t.target);
+    // The open log carries on where it was, with no second snapshot.
+    h.append(&[ins(2, "c")]).unwrap();
+    h.mark_saved(&r("abc")).unwrap();
+    h.close(&r("abc")).unwrap();
+    let tl = Timeline::load(&log_path_in(&t.dir, &t.target)).unwrap();
+    assert_eq!(tl.len(), 3);
+    assert_eq!(tl.text_at(0), r(""));
+    assert_eq!(tl.text_at(1), r("ab"));
+    assert_eq!(tl.text_at(2), r("abc"));
+    assert!(tl.version(2).saved);
+}
+
+#[test]
+fn an_unsaved_log_with_no_edits_moves_as_nothing() {
+    let t = setup();
+    let swap = Path::new("/state/untitled-7-9.kyteswp");
+    let mut h = FileHistory::unsaved_in(&t.dir, swap, &r(""));
+    h.move_to_in(&t.dir, &t.target).unwrap();
+    assert!(
+        !h.path().exists(),
+        "nothing is written until there's something to keep"
+    );
+    h.append(&[ins(0, "x")]).unwrap();
+    h.close(&r("x")).unwrap();
+    let tl = Timeline::load(&log_path_in(&t.dir, &t.target)).unwrap();
+    assert_eq!(tl.text_at(tl.len() - 1), r("x"));
+}
+
+#[test]
+fn an_unsaved_log_goes_after_a_log_the_file_already_has() {
+    let t = setup();
+    let mut old = FileHistory::new_in(&t.dir, &t.target, &r("old"));
+    old.append(&[ins(3, "er")]).unwrap();
+    old.close(&r("older")).unwrap();
+
+    let mut h = unsaved(&t, "new");
+    let from = h.path().to_path_buf();
+    h.move_to_in(&t.dir, &t.target).unwrap();
+    assert!(!from.exists());
+    h.mark_saved(&r("new")).unwrap();
+    h.append(&[ins(3, "s")]).unwrap();
+    h.close(&r("news")).unwrap();
+
+    let tl = Timeline::load(&log_path_in(&t.dir, &t.target)).unwrap();
+    let texts: Vec<String> = (0..tl.len()).map(|i| tl.text_at(i).to_string()).collect();
+    assert_eq!(texts, ["old", "older", "", "new", "news"]);
+    assert!(tl.version(3).saved);
+}
+
+#[test]
+fn moving_into_a_log_with_a_torn_tail_drops_the_tail() {
+    let t = setup();
+    let mut old = FileHistory::new_in(&t.dir, &t.target, &r("old"));
+    old.append(&[ins(3, "er")]).unwrap();
+    old.close(&r("older")).unwrap();
+    let log = log_path_in(&t.dir, &t.target);
+    let mut bytes = fs::read(&log).unwrap();
+    bytes.extend_from_slice(&[9, 0, 0, 0, 1, 2]);
+    fs::write(&log, bytes).unwrap();
+
+    let mut h = unsaved(&t, "new");
+    h.move_to_in(&t.dir, &t.target).unwrap();
+    h.close(&r("new")).unwrap();
+    let tl = Timeline::load(&log).unwrap();
+    assert_eq!(tl.text_at(tl.len() - 1), r("new"));
+    assert_eq!(tl.text_at(1), r("older"));
+}
+
+#[test]
+fn moving_a_log_with_a_torn_tail_leaves_the_tail_behind() {
+    let t = setup();
+    let mut old = FileHistory::new_in(&t.dir, &t.target, &r("old"));
+    old.append(&[ins(3, "er")]).unwrap();
+    old.close(&r("older")).unwrap();
+
+    let mut h = unsaved(&t, "new");
+    let mut torn = OpenOptions::new().append(true).open(h.path()).unwrap();
+    std::io::Write::write_all(&mut torn, &[9, 0, 0, 0, 1, 2]).unwrap();
+    h.move_to_in(&t.dir, &t.target).unwrap();
+    h.append(&[ins(3, "s")]).unwrap();
+    h.close(&r("news")).unwrap();
+    let tl = Timeline::load(&log_path_in(&t.dir, &t.target)).unwrap();
+    assert_eq!(tl.text_at(tl.len() - 1), r("news"));
+}
+
+#[test]
+fn a_moved_log_stays_private() {
+    let t = setup();
+    let mut h = unsaved(&t, "a");
+    h.move_to_in(&t.dir, &t.target).unwrap();
+    let mode = fs::metadata(h.path()).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o600);
+}
+
+#[test]
+fn the_sweep_takes_only_unsaved_logs_with_no_swap() {
+    let t = setup();
+    let swaps = t.dir.with_file_name("swap");
+    fs::create_dir_all(&t.dir).unwrap();
+    fs::create_dir_all(&swaps).unwrap();
+    fs::write(swaps.join("untitled-1-2.kyteswp"), "").unwrap();
+    let keep = |name: &str| fs::write(t.dir.join(name), "x").unwrap();
+    keep("untitled-1-2.kytehist");
+    keep("untitled-3-4.kytehist");
+    // A long path's log keeps the end of the path, so it can start this way.
+    keep("untitled-notes.txt~0000000100000020.kytehist");
+    keep("untitled-1.kytehist");
+    keep("untitled-1-x.kytehist");
+    keep("%2Fhome%2Funtitled-3-4.kytehist");
+    keep("untitled-3-4.compact-tried");
+
+    sweep_unsaved_in(&t.dir, &swaps);
+
+    let mut left: Vec<String> = fs::read_dir(&t.dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    left.sort();
+    assert_eq!(
+        left,
+        [
+            "%2Fhome%2Funtitled-3-4.kytehist",
+            "untitled-1-2.kytehist",
+            "untitled-1-x.kytehist",
+            "untitled-1.kytehist",
+            "untitled-3-4.compact-tried",
+            "untitled-notes.txt~0000000100000020.kytehist",
+        ]
+    );
+}
+
+#[test]
+fn the_sweep_survives_no_history_directory() {
+    let t = setup();
+    sweep_unsaved_in(&t.dir, &t.dir);
+}
+
+#[test]
+fn an_unsaved_log_name_comes_from_the_swap_name() {
+    assert_eq!(
+        unsaved_log_path_in(Path::new("/h"), Path::new("/s/untitled-12-34.kyteswp")),
+        Path::new("/h/untitled-12-34.kytehist")
+    );
 }

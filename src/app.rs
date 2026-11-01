@@ -1,6 +1,7 @@
 //! Application state and the mode state machine (sections 5 and 8).
 //! `handle_key` takes `now` so tests control time.
 
+use std::sync::mpsc::TryRecvError;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -283,7 +284,10 @@ impl Doc {
 
     fn set_view(&mut self, view: View) {
         let head = self.buffer.head();
-        self.prose = self.buffer.path().and_then(|p| syntax::prose(p, &head));
+        // A guess only reaches colors and code keys: Writing wraps the text and
+        // spell-checks it, which takes a file name or a choice.
+        let guessing = self.buffer.path().is_none() && self.buffer.language().is_none();
+        self.prose = syntax::prose(&self.buffer.kind_path(), &head).filter(|_| !guessing);
         self.writing = view.writing && self.prose.is_some();
         self.spelling = view.spell_check && self.writing;
         self.soft_wrap = view.soft_wrap || self.writing;
@@ -357,7 +361,12 @@ impl Doc {
     fn close(&mut self) {
         let text = self.buffer.rope().clone();
         if let Some(h) = self.history.as_mut() {
-            let _ = h.close(&text);
+            // Nothing can reach an unsaved buffer's log once its swap is gone.
+            let _ = if h.is_unsaved() && !self.keep_swap {
+                h.delete(&text)
+            } else {
+                h.close(&text)
+            };
         }
         self.history = None;
         if let Some(w) = self.swap.take() {
@@ -382,6 +391,10 @@ pub struct App {
     pub message: Option<String>,
     /// The message is an error (drawn in the error style).
     pub message_is_error: bool,
+    /// The update check running beside the editor.
+    pub update: Option<std::sync::mpsc::Receiver<String>>,
+    /// What it said, until there's a moment to show it.
+    update_note: Option<String>,
     pub esc_window: Duration,
     pub quit: bool,
     /// Characters still to discard from a split key sequence.
@@ -445,6 +458,13 @@ const MAX_COUNTED_BYTES: usize = 2 * 1024 * 1024;
 /// How long typing stops before a LaTeX file's words are counted again.
 const RECOUNT_PAUSE: Duration = Duration::from_millis(500);
 
+/// A key clears the status bar, so a note from the update check waits for a
+/// pause in the typing.
+const UPDATE_NOTE_PAUSE: Duration = Duration::from_secs(1);
+
+/// On the bar while the palette's update check runs.
+const CHECKING: &str = "Checking for updates…";
+
 /// Shown on the message line only while the overlay is open (section 5.4).
 /// The Esc layer's core keys, shown on top of whatever the context adds.
 pub const LEGEND: &[(&str, &str)] = &[
@@ -503,6 +523,8 @@ impl App {
             mode: Mode::Insert,
             message: None,
             message_is_error: false,
+            update: None,
+            update_note: None,
             esc_window: Duration::from_millis(opts.esc_ms),
             quit: false,
             default_view,
@@ -527,9 +549,15 @@ impl App {
         self.doc.history = None;
         self.doc.history_failed = false;
         if self.history_on {
-            self.doc.history = self.doc.swap_target.as_ref().map(|t| {
-                FileHistory::new(t, self.doc.buffer.rope()).with_limit(self.history_limit)
-            });
+            let text = self.doc.buffer.rope();
+            let log = match (&self.doc.swap_target, &self.doc.swap) {
+                (Some(target), _) => Some(FileHistory::new(target, text)),
+                (None, Some(swap)) if self.doc.buffer.path().is_none() => {
+                    Some(FileHistory::unsaved(swap.path(), text))
+                }
+                _ => None,
+            };
+            self.doc.history = log.map(|h| h.with_limit(self.history_limit));
         }
     }
 
@@ -897,14 +925,14 @@ impl App {
                     self.doc.disk = None;
                     self.doc.disk_text = None;
                 }
+                // An unsaved buffer's history goes by its swap, so that comes first.
+                let adopted = SwapWriter::adopt(&info.swap_path);
+                let result = adopted.map(|w| self.doc.swap = Some(w));
                 self.start_history();
                 let recovered = self.doc.buffer.rope().clone();
                 self.with_history(|h| h.snapshot(&recovered, SnapshotKind::Recovered));
-                match SwapWriter::adopt(&info.swap_path) {
-                    Ok(w) => {
-                        self.doc.swap = Some(w);
-                        self.set_message("Recovered unsaved changes; Ctrl-S saves them");
-                    }
+                match result {
+                    Ok(()) => self.set_message("Recovered unsaved changes; Ctrl-S saves them"),
                     Err(e) => {
                         self.set_error(format!("Recovered, but the swap could not be reused: {e}"))
                     }
@@ -913,7 +941,9 @@ impl App {
             Key::Char('d') => {
                 let _ = std::fs::remove_file(&info.swap_path);
                 self.mode = Mode::Insert;
-                let fresh = if info.target.as_os_str().is_empty() {
+                let unsaved = info.target.as_os_str().is_empty();
+                let fresh = if unsaved {
+                    let _ = std::fs::remove_file(history::unsaved_log_path(&info.swap_path));
                     SwapWriter::create_untitled()
                 } else {
                     SwapWriter::create(&info.target, self.doc.buffer.rope())
@@ -921,6 +951,9 @@ impl App {
                 match fresh {
                     Ok(w) => {
                         self.doc.swap = Some(w);
+                        if unsaved {
+                            self.start_history();
+                        }
                         self.set_message("Discarded the swap file");
                     }
                     Err(e) => self.set_error(format!("Discarded the swap; new swap failed: {e}")),
@@ -1125,30 +1158,21 @@ impl App {
         }
     }
 
-    /// The file's path, when Kyte can parse its language.
-    fn code_path(&self) -> Option<&std::path::Path> {
+    /// The name that gives the language, when Kyte can parse it.
+    fn code_path(&self) -> Option<std::borrow::Cow<'_, std::path::Path>> {
         let head = self.doc.buffer.head();
-        self.doc
-            .buffer
-            .path()
-            .filter(|p| syntax::supported(p, &head))
+        Some(self.doc.buffer.kind_path()).filter(|p| syntax::supported(p, &head))
     }
 
     /// Whether the file's language has functions to work with.
     fn has_functions(&self) -> bool {
         let head = self.doc.buffer.head();
-        self.doc
-            .buffer
-            .path()
-            .is_some_and(|p| syntax::has_functions(p, &head))
+        syntax::has_functions(&self.doc.buffer.kind_path(), &head)
     }
 
     fn comment_prefix(&self) -> Option<&'static str> {
         let head = self.doc.buffer.head();
-        self.doc
-            .buffer
-            .path()
-            .and_then(|p| syntax::comment_prefix(p, &head))
+        syntax::comment_prefix(&self.doc.buffer.kind_path(), &head)
     }
 
     /// Whether the cursor is on a bracket that has a partner.
@@ -1297,7 +1321,7 @@ impl App {
             .buffer
             .rope()
             .char_to_byte(self.doc.buffer.cursor());
-        f(path, &self.doc.buffer.to_string(), at)
+        f(&path, &self.doc.buffer.to_string(), at)
     }
 
     /// Selects a byte range of the text.
@@ -1613,6 +1637,7 @@ impl App {
                     s.ignore(&word);
                 }
             }
+            Entry::Language { name, extension } => self.set_language(name, extension),
             Entry::Theme(t) => {
                 self.theme = t;
                 let name = t.label();
@@ -1628,6 +1653,18 @@ impl App {
                 self.mode = Mode::Prompt(Prompt::Search { query, origin });
             }
         }
+    }
+
+    /// Treats this text as `extension`'s language, or as its name says if `None`.
+    fn set_language(&mut self, name: &str, extension: Option<&'static str>) {
+        let line_numbers = self.doc.line_numbers;
+        self.doc.buffer.set_language(extension);
+        self.doc.set_view(self.default_view);
+        self.doc.line_numbers = line_numbers;
+        self.doc.scroll_row = 0;
+        self.doc.scroll_left = 0;
+        self.load_speller();
+        self.set_message(format!("Language: {name}"));
     }
 
     fn go_to_line(&mut self, n: usize) {
@@ -1697,6 +1734,10 @@ impl App {
                 self.doc.scroll_left = 0;
             }
             Command::ChooseTheme => self.mode = Mode::Palette(PaletteState::themes(self.theme)),
+            Command::SetLanguage => {
+                let current = self.doc.buffer.language();
+                self.mode = Mode::Palette(PaletteState::languages(current));
+            }
             Command::FileTree => self.open_tree(),
             Command::InsertCitation => self.insert_citation(),
             Command::BuildPdf => self.build_pdf(),
@@ -1718,6 +1759,10 @@ impl App {
             Command::Settings => self.open_settings(),
             Command::DeleteHistory => {
                 self.mode = Mode::Prompt(Prompt::ConfirmDeleteHistory);
+            }
+            Command::CheckUpdates => {
+                self.update = Some(crate::update::check_now());
+                self.set_message(CHECKING);
             }
             Command::ShowKeyHelp => self.mode = Mode::Help { top: 0 },
         }
@@ -1862,6 +1907,7 @@ impl App {
     /// fsyncs a dirty swap at most once per second.
     pub fn tick(&mut self, now: Instant) -> Result<()> {
         self.check_build();
+        self.check_update(now);
         let due = self
             .last_fsync
             .is_none_or(|t| now.saturating_duration_since(t) >= Duration::from_secs(1));
@@ -1888,6 +1934,31 @@ impl App {
             self.last_fsync = Some(now);
         }
         Ok(())
+    }
+
+    /// Shows what the update check said, when nothing else is on the bar and
+    /// the next key wouldn't wipe it at once.
+    fn check_update(&mut self, now: Instant) {
+        if let Some(receiver) = &self.update {
+            match receiver.try_recv() {
+                Ok(note) => {
+                    self.update_note = Some(note);
+                    self.update = None;
+                }
+                Err(TryRecvError::Disconnected) => self.update = None,
+                Err(TryRecvError::Empty) => {}
+            }
+        }
+        let free = self.message.is_none() || self.message.as_deref() == Some(CHECKING);
+        let paused = self
+            .last_key
+            .is_none_or(|t| now.saturating_duration_since(t) >= UPDATE_NOTE_PAUSE);
+        if free && paused && self.mode == Mode::Insert {
+            if let Some(note) = self.update_note.take() {
+                self.set_message(note);
+                self.needs_redraw = true;
+            }
+        }
     }
 
     /// Ctrl-S: atomic save, asking first if it would lose something.
@@ -2077,7 +2148,7 @@ impl App {
             self.set_message("Already building; Stop build is in the palette");
         } else if self.doc.prose != Some(Prose::Latex) {
             self.set_message("Build PDF works on LaTeX files");
-        } else if self.doc.buffer.is_dirty() {
+        } else if self.doc.buffer.is_dirty() || self.doc.buffer.path().is_none() {
             self.start_save(After::Build);
         } else {
             self.start_build();
@@ -2187,14 +2258,15 @@ impl App {
 
     /// Hands the paper's PDF to a viewer.
     fn open_pdf(&mut self) {
-        let Some(pdf) = self.build_root().map(|r| r.with_extension("pdf")) else {
+        if self.doc.prose != Some(Prose::Latex) {
             self.set_message("Open PDF works on LaTeX files");
             return;
-        };
-        if !pdf.exists() {
+        }
+        let pdf = self.build_root().map(|r| r.with_extension("pdf"));
+        let Some(pdf) = pdf.filter(|p| p.exists()) else {
             self.set_message("No PDF yet; Ctrl-B builds it");
             return;
-        }
+        };
         if let Err(e) = build::open_pdf(self.pdf_command.as_deref(), &pdf) {
             self.set_error(format!("Can't open the PDF: {e}"));
         }
@@ -2376,7 +2448,7 @@ impl App {
         let b = &self.doc.buffer;
         let mut out = vec![Vec::new(); lines.len()];
         let head = b.head();
-        let Some(lang) = b.path().and_then(|p| Lang::detect(p, &head)) else {
+        let Some(lang) = Lang::detect(&b.kind_path(), &head) else {
             return out;
         };
         let rope = b.rope();
@@ -2939,7 +3011,7 @@ impl App {
             let why = if !self.history_on {
                 "File history is off this session"
             } else {
-                "This buffer has no file yet, so it has no history"
+                "This buffer has no swap, so it has no history"
             };
             self.set_message(why);
             return;
@@ -3118,7 +3190,12 @@ impl App {
                 self.doc.outside_change = false;
                 self.needs_redraw = true;
                 if self.doc.buffer.path() != Some(path) {
+                    // A name that doesn't say leaves the language as it was.
+                    let language = self.doc.buffer.language_or_guess();
                     self.doc.buffer.set_path(path.to_path_buf());
+                    self.doc
+                        .buffer
+                        .set_language(language.filter(|_| !syntax::name_says(path)));
                     self.doc.swap_target = fileio::resolve_target(path).ok();
                     self.doc.set_view(self.default_view);
                     self.load_speller();
@@ -3160,10 +3237,20 @@ impl App {
 
     /// Records a finished save in the history, for the file it went to.
     fn note_save(&mut self, path: &std::path::Path, overwritten: Option<String>) {
+        let target = fileio::resolve_target(path).ok();
         let moved = self.doc.history.as_ref().map(|h| h.target());
-        if moved != fileio::resolve_target(path).ok().as_deref() {
-            self.doc.swap_target = fileio::resolve_target(path).ok();
-            self.start_history();
+        if moved != target.as_deref() {
+            let unsaved = self
+                .doc
+                .history
+                .as_ref()
+                .is_some_and(FileHistory::is_unsaved);
+            self.doc.swap_target.clone_from(&target);
+            match target.filter(|_| unsaved) {
+                // Its first save takes its past along.
+                Some(target) => self.with_history(|h| h.move_to(&target)),
+                None => self.start_history(),
+            }
         }
         let text = self.doc.buffer.rope().clone();
         self.with_history(|h| {
@@ -3830,6 +3917,104 @@ mod tests {
         a.handle_key(Key::Esc, t).unwrap();
         assert_eq!(a.mode, Mode::Insert);
         assert_eq!(a.doc.buffer.line_col(), (5, 1));
+    }
+
+    /// A guess changes colors and code keys. Writing takes a choice or a name.
+    #[test]
+    fn automatic_doesnt_turn_writing_on_from_a_guess() {
+        for text in ["# Notes\n\nSome text.\n", "\\documentclass{article}\n"] {
+            let mut a = app(text);
+            assert_ne!(a.doc.buffer.language_or_guess(), None, "{text}");
+            a.set_language("Automatic", None);
+            assert_eq!(a.doc.prose, None, "{text}");
+            assert!(
+                !a.doc.writing && !a.doc.spelling && !a.doc.soft_wrap,
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn choosing_a_language_does_turn_writing_on() {
+        let mut a = app("# Notes\n");
+        a.set_language("Markdown", Some("md"));
+        assert!(a.doc.writing && a.doc.soft_wrap);
+    }
+
+    /// A note from the update check, waiting to be shown.
+    fn note_from_check(a: &mut App, note: &str) {
+        let (send, receive) = std::sync::mpsc::channel();
+        send.send(note.to_string()).unwrap();
+        a.update = Some(receive);
+    }
+
+    #[test]
+    fn an_update_note_shows_on_a_free_bar() {
+        let t = Instant::now();
+        let mut a = app("x");
+        note_from_check(&mut a, "Kyte 9.9.9 is out");
+        a.tick(t).unwrap();
+        assert_eq!(a.message.as_deref(), Some("Kyte 9.9.9 is out"));
+        assert!(!a.message_is_error);
+        assert!(a.update.is_none());
+    }
+
+    #[test]
+    fn an_update_note_waits_for_the_bar_and_the_typing() {
+        let t = Instant::now();
+        let mut a = app("x");
+        // A warning from opening the file is more urgent.
+        a.message = Some("Warning".into());
+        note_from_check(&mut a, "Kyte 9.9.9 is out");
+        a.tick(t).unwrap();
+        assert_eq!(a.message.as_deref(), Some("Warning"));
+        // The next key would wipe it, so it waits for a pause.
+        a.handle_key(Key::Char('y'), t).unwrap();
+        a.tick(t).unwrap();
+        assert_eq!(a.message, None);
+        a.tick(t + UPDATE_NOTE_PAUSE).unwrap();
+        assert_eq!(a.message.as_deref(), Some("Kyte 9.9.9 is out"));
+        a.handle_key(Key::Char('y'), t + UPDATE_NOTE_PAUSE).unwrap();
+        a.tick(t + UPDATE_NOTE_PAUSE * 3).unwrap();
+        assert_eq!(a.message, None, "said once");
+    }
+
+    #[test]
+    fn an_update_note_waits_for_a_box_to_close() {
+        let t = Instant::now();
+        let mut a = app("x");
+        a.run_command(Command::ShowKeyHelp);
+        note_from_check(&mut a, "Kyte 9.9.9 is out");
+        a.tick(t).unwrap();
+        assert_eq!(a.message, None);
+        a.mode = Mode::Insert;
+        a.tick(t).unwrap();
+        assert_eq!(a.message.as_deref(), Some("Kyte 9.9.9 is out"));
+    }
+
+    #[test]
+    fn the_checking_line_gives_way_to_the_answer() {
+        let t = Instant::now();
+        let mut a = app("x");
+        a.message = Some(CHECKING.into());
+        note_from_check(&mut a, "Kyte 0.6.0 is the newest release");
+        a.tick(t).unwrap();
+        assert_eq!(
+            a.message.as_deref(),
+            Some("Kyte 0.6.0 is the newest release")
+        );
+    }
+
+    #[test]
+    fn a_check_that_ends_with_nothing_to_say_is_dropped() {
+        let t = Instant::now();
+        let mut a = app("x");
+        let (send, receive) = std::sync::mpsc::channel::<String>();
+        drop(send);
+        a.update = Some(receive);
+        a.tick(t).unwrap();
+        assert!(a.update.is_none());
+        assert_eq!(a.message, None);
     }
 
     #[test]

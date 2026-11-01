@@ -1083,7 +1083,7 @@ fn ac16_empty_query_does_nothing() {
 
 // ---------------------------------------------------------------- AC-17
 
-const COMMANDS: [&str; 36] = [
+const COMMANDS: [&str; 38] = [
     "Save",
     "Save as",
     "Open file",
@@ -1102,6 +1102,7 @@ const COMMANDS: [&str; 36] = [
     "Toggle tabs and spaces",
     "Toggle soft wrap",
     "Choose theme",
+    "Set language",
     "File tree",
     "Insert citation",
     "Build PDF",
@@ -1119,6 +1120,7 @@ const COMMANDS: [&str; 36] = [
     "Delete file history",
     "Reader mode",
     "Open settings",
+    "Check for updates",
     "Show key help",
 ];
 
@@ -1155,7 +1157,7 @@ fn ac17_palette_lists_every_command() {
         .collect();
     assert!(first_result(&p).contains("▸ Save"), "{}", p.dump());
     // 8 rows are visible at once; scrolling down reveals the rest
-    for _ in 0..35 {
+    for _ in 0..37 {
         p.send_keys(&["Down"]);
         std::thread::sleep(Duration::from_millis(5));
         for c in COMMANDS {
@@ -2526,6 +2528,216 @@ fn save_as_gives_the_new_file_its_own_history() {
     p.wait_gone(" HISTORY ", TIMEOUT);
     save_and_wait(&mut p);
     quit_clean(&mut p);
+}
+
+// ---------------------------------------------------------------- unsaved buffers
+
+/// The logs in the history directory.
+fn history_logs(env: &Env) -> Vec<String> {
+    let Ok(dir) = fs::read_dir(env.state.join("history")) else {
+        return Vec::new();
+    };
+    dir.flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect()
+}
+
+#[test]
+fn ctrl_z_and_ctrl_y_work_in_an_untitled_buffer() {
+    let env = Env::new();
+    let mut p = open_untitled(&env);
+    type_text(&mut p, "first");
+    p.send_keys(&["C-z"]);
+    p.wait_gone("first", TIMEOUT);
+    p.send_keys(&["C-y"]);
+    p.wait_for("1 │ first", TIMEOUT);
+    p.send_keys(&["C-q"]);
+    p.wait_for("Unsaved changes", TIMEOUT);
+    p.send_str("n");
+    assert_eq!(p.wait_exit(TIMEOUT), 0);
+}
+
+#[test]
+fn an_untitled_buffer_has_history_from_the_first_key() {
+    let env = Env::new();
+    let mut p = open_untitled(&env);
+    open_overlay(&mut p);
+    p.send_str("h");
+    p.wait_for("No history yet", TIMEOUT);
+    type_text(&mut p, "abc");
+    open_history(&mut p);
+    wait_status(&p, "4 of 4");
+    p.send_keys(&["Home"]);
+    wait_status(&p, "as opened");
+    p.wait_gone("abc", TIMEOUT);
+    p.send_keys(&["End", "Left"]);
+    wait_status(&p, "3 of 4");
+    p.wait_for("1 │ ab", TIMEOUT);
+    p.send_keys(&["Enter"]);
+    p.wait_for("Restored the version from", TIMEOUT);
+    p.send_keys(&["C-z"]);
+    p.wait_for("1 │ abc", TIMEOUT);
+    p.send_keys(&["C-q"]);
+    p.wait_for("Unsaved changes", TIMEOUT);
+    p.send_str("n");
+    assert_eq!(p.wait_exit(TIMEOUT), 0);
+}
+
+#[test]
+fn saving_an_untitled_buffer_keeps_its_history() {
+    let env = Env::new();
+    let f = env.path("named.txt");
+    let mut p = open_untitled(&env);
+    type_text(&mut p, "abc");
+    p.send_keys(&["C-s"]);
+    p.wait_for("Save as:", TIMEOUT);
+    p.send_str(f.to_str().unwrap());
+    p.send_keys(&["Enter"]);
+    p.wait_for("Saved 1 line", TIMEOUT);
+    // Undo carries on across the save.
+    p.send_keys(&["C-z"]);
+    p.wait_gone("abc", TIMEOUT);
+    p.send_keys(&["C-y"]);
+    p.wait_for("1 │ abc", TIMEOUT);
+    type_text(&mut p, "d");
+    save_and_wait(&mut p);
+    quit_clean(&mut p);
+    assert_eq!(fs::read_to_string(&f).unwrap(), "abcd");
+    assert_eq!(history_logs(&env).len(), 1, "one log, the file's");
+    assert!(history_logs(&env)[0].contains("named.txt"));
+
+    // The next session sees all of it, back to the empty buffer.
+    let mut p = env.open(&f);
+    open_history(&mut p);
+    wait_status(&p, " of ");
+    p.send_keys(&["Home"]);
+    wait_status(&p, "as opened");
+    p.wait_gone("abcd", TIMEOUT);
+    p.send_keys(&["Esc"]);
+    p.wait_gone(" HISTORY ", TIMEOUT);
+    quit_clean(&mut p);
+}
+
+#[test]
+fn saving_an_untitled_buffer_over_a_file_keeps_that_files_history() {
+    let env = Env::new();
+    let f = work_file(&env, "old.txt", "old\n");
+    let mut p = env.open(&f);
+    type_text(&mut p, "x");
+    save_and_wait(&mut p);
+    quit_clean(&mut p);
+
+    let mut p = open_untitled(&env);
+    type_text(&mut p, "new");
+    p.send_keys(&["C-s"]);
+    p.wait_for("Save as:", TIMEOUT);
+    p.send_str(f.to_str().unwrap());
+    p.send_keys(&["Enter"]);
+    p.wait_for("File exists!", TIMEOUT);
+    p.send_str("y");
+    p.wait_for("Saved 1 line", TIMEOUT);
+    open_history(&mut p);
+    p.send_keys(&["Home"]);
+    wait_status(&p, "as opened");
+    p.wait_for("1 │ old", TIMEOUT);
+    p.send_keys(&["End"]);
+    wait_status(&p, "added 1, saved");
+    p.wait_for("1 │ new", TIMEOUT);
+    p.send_keys(&["Esc"]);
+    p.wait_gone(" HISTORY ", TIMEOUT);
+    quit_clean(&mut p);
+    assert_eq!(history_logs(&env).len(), 1, "the unsaved log went in");
+}
+
+#[test]
+fn discarding_an_untitled_buffer_leaves_nothing_behind() {
+    let env = Env::new();
+    let mut p = open_untitled(&env);
+    type_text(&mut p, "throw away");
+    assert_eq!(history_logs(&env).len(), 1);
+    p.send_keys(&["C-q"]);
+    p.wait_for("Unsaved changes", TIMEOUT);
+    p.send_str("n");
+    assert_eq!(p.wait_exit(TIMEOUT), 0);
+    assert!(history_logs(&env).is_empty());
+    assert!(swap_files(&env).is_empty());
+}
+
+#[test]
+fn a_crashed_untitled_buffer_keeps_its_history() {
+    let env = Env::new();
+    let f = env.path("named.txt");
+    let mut p = open_untitled(&env);
+    type_text(&mut p, "abc");
+    std::thread::sleep(Duration::from_millis(100));
+    p.kill9();
+    let mut p = Pty::kyte(&bin(), &env.state, &[]);
+    p.wait_for("Recover unsaved changes", TIMEOUT);
+    p.send_str("r");
+    p.wait_for("1 │ abc", TIMEOUT);
+    open_history(&mut p);
+    p.send_keys(&["Home"]);
+    wait_status(&p, "as opened");
+    p.wait_gone("abc", TIMEOUT);
+    p.send_keys(&["Esc"]);
+    p.wait_gone(" HISTORY ", TIMEOUT);
+    p.send_keys(&["C-s"]);
+    p.wait_for("Save as:", TIMEOUT);
+    p.send_str(f.to_str().unwrap());
+    p.send_keys(&["Enter"]);
+    p.wait_for("Saved 1 line", TIMEOUT);
+    quit_clean(&mut p);
+    assert_eq!(history_logs(&env).len(), 1);
+    assert!(history_logs(&env)[0].contains("named.txt"));
+}
+
+#[test]
+fn discarding_a_crashed_untitled_buffer_drops_its_history() {
+    let env = Env::new();
+    let mut p = open_untitled(&env);
+    type_text(&mut p, "abc");
+    std::thread::sleep(Duration::from_millis(100));
+    p.kill9();
+    let mut p = Pty::kyte(&bin(), &env.state, &[]);
+    p.wait_for("Recover unsaved changes", TIMEOUT);
+    p.send_str("d");
+    p.wait_for("Discarded the swap file", TIMEOUT);
+    assert!(history_logs(&env).is_empty());
+    // The fresh buffer starts a history of its own.
+    type_text(&mut p, "new");
+    assert_eq!(history_logs(&env).len(), 1);
+    p.send_keys(&["C-q"]);
+    p.wait_for("Unsaved changes", TIMEOUT);
+    p.send_str("n");
+    assert_eq!(p.wait_exit(TIMEOUT), 0);
+}
+
+#[test]
+fn a_crashed_buffer_that_held_nothing_leaves_no_log() {
+    let env = Env::new();
+    let mut p = open_untitled(&env);
+    type_text(&mut p, "a");
+    p.send_keys(&["Backspace"]);
+    p.wait_gone("Ln 1, Col 2", TIMEOUT);
+    std::thread::sleep(Duration::from_millis(100));
+    p.kill9();
+    assert_eq!(history_logs(&env).len(), 1);
+    let mut p = open_untitled(&env);
+    assert!(history_logs(&env).is_empty());
+    quit_clean(&mut p);
+}
+
+#[test]
+fn no_history_flag_keeps_nothing_for_an_untitled_buffer() {
+    let env = Env::new();
+    let mut p = Pty::kyte(&bin(), &env.state, &["--no-history"]);
+    p.wait_for("Ln 1, Col 1", TIMEOUT);
+    type_text(&mut p, "secret");
+    assert!(history_logs(&env).is_empty());
+    p.send_keys(&["C-q"]);
+    p.wait_for("Unsaved changes", TIMEOUT);
+    p.send_str("n");
+    assert_eq!(p.wait_exit(TIMEOUT), 0);
 }
 
 // ---------------------------------------------------------------- universal palette
@@ -4794,4 +5006,26 @@ fn next_misspelling_walks_a_long_paper_in_batches_and_wraps() {
     esc_then(&mut p, "m");
     wait_status(&p, "Ln 1, Col 1");
     quit_clean(&mut p);
+}
+
+/// The palette's check answers on the status bar, and a failed one says so.
+#[cfg(feature = "update")]
+#[test]
+fn check_for_updates_answers_on_the_status_bar() {
+    let env = Env::new();
+    let mut p = Pty::spawn(
+        Spawn::new(bin())
+            .arg("--no-kitty")
+            .env("KYTE_STATE_DIR", env.state.to_string_lossy())
+            .env("KYTE_RELEASES_API", "http://127.0.0.1:1/latest"),
+    );
+    p.wait_for("Ln 1, Col 1", TIMEOUT);
+    p.send_keys(&["C-p"]);
+    p.wait_for("Command palette", TIMEOUT);
+    p.send_str("check for updates");
+    p.wait_for("Check for updates", TIMEOUT);
+    p.send_keys(&["Enter"]);
+    p.wait_for("Couldn't check for updates", TIMEOUT);
+    p.send_keys(&["C-q"]);
+    p.wait_exit(TIMEOUT);
 }

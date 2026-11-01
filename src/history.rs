@@ -3,6 +3,10 @@
 //! the current session; this keeps the rest. The log is one file per edited
 //! file, 0600 in a 0700 directory, and nothing is written until the first edit.
 //!
+//! A buffer with no file name has a log too, named after its swap and living
+//! as long as it does. Its first save moves the log to the file, so the file's
+//! history starts at the first keystroke.
+//!
 //! Each record is framed like a swap record (length, CRC, payload). A payload
 //! is a kind byte, the time in milliseconds, then the fields for that kind.
 //! A snapshot is a start record followed by data records.
@@ -20,7 +24,7 @@ use crate::buffer::Edit;
 use crate::diff::diff_lines;
 use crate::fileio::{self, DiskState};
 use crate::review;
-use crate::swap::{frame, name_for, record_at};
+use crate::swap::{self, frame, name_for, record_at};
 
 const MAGIC: &[u8; 8] = b"KYTEHST1";
 const SUFFIX: &str = ".kytehist";
@@ -101,6 +105,46 @@ pub fn log_path_in(dir: &Path, target: &Path) -> PathBuf {
 
 pub fn log_path(target: &Path) -> PathBuf {
     log_path_in(&fileio::history_dir(), target)
+}
+
+/// Where the log of the buffer with no file name and swap `swap` lives inside `dir`.
+pub fn unsaved_log_path_in(dir: &Path, swap: &Path) -> PathBuf {
+    let mut name = swap.file_stem().unwrap_or_default().to_os_string();
+    name.push(SUFFIX);
+    dir.join(name)
+}
+
+pub fn unsaved_log_path(swap: &Path) -> PathBuf {
+    unsaved_log_path_in(&fileio::history_dir(), swap)
+}
+
+/// The swap name an unsaved buffer's log file goes with, if `log_name` is one.
+/// Checking the digits matters: a long path's log can start with anything.
+fn swap_of_unsaved(log_name: &str) -> Option<String> {
+    let stem = log_name.strip_suffix(SUFFIX)?;
+    let (pid, start) = stem.strip_prefix(swap::UNTITLED_PREFIX)?.split_once('-')?;
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    (digits(pid) && digits(start)).then(|| format!("{stem}{}", swap::SUFFIX))
+}
+
+/// Removes logs of unsaved buffers whose swap has gone, which a crash at the
+/// wrong moment or a swap with nothing in it can leave behind.
+pub fn sweep_unsaved_in(logs: &Path, swaps: &Path) {
+    let Ok(entries) = fs::read_dir(logs) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let swap = swap_of_unsaved(&name.to_string_lossy());
+        if swap.is_some_and(|s| !swaps.join(s).exists()) {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// [`sweep_unsaved_in`] in the configured directories.
+pub fn sweep_unsaved() {
+    sweep_unsaved_in(&fileio::history_dir(), &fileio::state_dir());
 }
 
 fn now_ms() -> u64 {
@@ -252,6 +296,33 @@ fn walk(bytes: &[u8], mut f: impl FnMut(Record, Option<DiskState>)) -> usize {
     valid
 }
 
+/// Opens the log at `path` for appending, creating it if there's none and
+/// dropping a torn tail. Also says what the log ends at, if it says.
+fn open_log(path: &Path) -> io::Result<(File, Option<DiskState>)> {
+    if let Some(dir) = path.parent() {
+        DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+    }
+    let mut file = OpenOptions::new()
+        .read(true)
+        .append(true)
+        .create(true)
+        .mode(0o600)
+        .open(path)?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    let mut last = None;
+    let valid = if bytes.starts_with(MAGIC) {
+        walk(&bytes, |_, state| last = state)
+    } else {
+        file.set_len(0)?;
+        file.seek(SeekFrom::Start(0))?;
+        file.write_all(MAGIC)?;
+        MAGIC.len()
+    };
+    file.set_len(valid as u64)?;
+    Ok((file, last))
+}
+
 /// The writer for one file's log. It touches the disk only once there's
 /// something to keep.
 #[derive(Debug)]
@@ -273,8 +344,21 @@ impl FileHistory {
     }
 
     pub fn new_in(dir: &Path, target: &Path, base: &Rope) -> FileHistory {
+        Self::at(log_path_in(dir, target), target, base)
+    }
+
+    /// The log of a buffer with no file name, whose swap is `swap`.
+    pub fn unsaved(swap: &Path, base: &Rope) -> FileHistory {
+        Self::unsaved_in(&fileio::history_dir(), swap, base)
+    }
+
+    pub fn unsaved_in(dir: &Path, swap: &Path, base: &Rope) -> FileHistory {
+        Self::at(unsaved_log_path_in(dir, swap), Path::new(""), base)
+    }
+
+    fn at(path: PathBuf, target: &Path, base: &Rope) -> FileHistory {
         FileHistory {
-            path: log_path_in(dir, target),
+            path,
             target: target.to_path_buf(),
             base: base.clone(),
             file: None,
@@ -282,6 +366,11 @@ impl FileHistory {
             pending_fsync: false,
             limit: LOG_LIMIT,
         }
+    }
+
+    /// Whether this log belongs to a buffer with no file name.
+    pub fn is_unsaved(&self) -> bool {
+        self.target.as_os_str().is_empty()
     }
 
     /// Sets the size that trims the log.
@@ -304,27 +393,7 @@ impl FileHistory {
         if self.file.is_some() {
             return Ok(());
         }
-        if let Some(dir) = self.path.parent() {
-            DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
-        }
-        let mut file = OpenOptions::new()
-            .read(true)
-            .append(true)
-            .create(true)
-            .mode(0o600)
-            .open(&self.path)?;
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)?;
-        let mut last = None;
-        let valid = if bytes.starts_with(MAGIC) {
-            walk(&bytes, |_, state| last = state)
-        } else {
-            file.set_len(0)?;
-            file.seek(SeekFrom::Start(0))?;
-            file.write_all(MAGIC)?;
-            MAGIC.len()
-        };
-        file.set_len(valid as u64)?;
+        let (file, last) = open_log(&self.path)?;
         self.file = Some(file);
         if last == Some(DiskState::of_rope(&self.base)) {
             self.synced = true;
@@ -420,6 +489,34 @@ impl FileHistory {
             Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
             _ => Ok(()),
         }
+    }
+
+    /// Makes this the log of `target`, for an unsaved buffer's first save. If
+    /// `target` already has a log, its versions stay and these go after them.
+    pub fn move_to(&mut self, target: &Path) -> io::Result<()> {
+        self.move_to_in(&fileio::history_dir(), target)
+    }
+
+    pub fn move_to_in(&mut self, dir: &Path, target: &Path) -> io::Result<()> {
+        let dest = log_path_in(dir, target);
+        if self.file.is_some() {
+            if dest.exists() {
+                let bytes = fs::read(&self.path)?;
+                let end = walk(&bytes, |_, _| {});
+                let (mut into, _) = open_log(&dest)?;
+                into.write_all(&bytes[MAGIC.len()..end])?;
+                // On disk before the only other copy goes.
+                into.sync_data()?;
+                fs::remove_file(&self.path)?;
+                self.file = Some(into);
+            } else {
+                // The open file stays good through the rename.
+                fs::rename(&self.path, &dest)?;
+            }
+        }
+        self.path = dest;
+        self.target = target.to_path_buf();
+        Ok(())
     }
 
     pub fn target(&self) -> &Path {

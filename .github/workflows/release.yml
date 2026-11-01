@@ -47,6 +47,10 @@ jobs:
       - name: musl tools
         run: sudo apt-get update && sudo apt-get install -y musl-tools
       - name: build
+        # The mark is what lets a copy update itself: without it, `kyte --update`
+        # takes it for a build from source.
+        env:
+          KYTE_RELEASE_BUILD: "1"
         run: cargo build --release --locked --target ${{ matrix.target }}
       - name: smoke test
         run: |
@@ -90,6 +94,15 @@ jobs:
           sudo apt-get install -y ./dist/kyte_*.deb
           /usr/bin/kyte --version
           test -f /usr/share/doc/kyte/third-party/README.md
+          # Told of a newer release, it must see that it's a package from a file.
+          mkdir "$RUNNER_TEMP/api"
+          echo '{"tag_name":"v99.0.0"}' > "$RUNNER_TEMP/api/latest"
+          (cd "$RUNNER_TEMP/api" && exec python3 -m http.server 8767 --bind 127.0.0.1) >/dev/null 2>&1 &
+          api=$!
+          trap 'kill "$api"' EXIT
+          sleep 1
+          KYTE_RELEASES_API=http://127.0.0.1:8767/latest /usr/bin/kyte --update </dev/null | tee "$RUNNER_TEMP/plan"
+          grep -q 'Debian package installed from a file' "$RUNNER_TEMP/plan"
           sudo apt-get remove -y kyte
           test ! -e /usr/bin/kyte
       - uses: actions/upload-artifact@v4
@@ -168,6 +181,13 @@ jobs:
           mkdir -p "$HOME"
           KYTE_DOWNLOAD_URL=http://127.0.0.1:8765 ./install.sh
           "$HOME/.local/bin/kyte" --version
+          # Told of a newer release, the installed copy must see that the install
+          # script put it there, which it can't without the release build's mark.
+          # It's asked with no input, so it answers no and changes nothing.
+          echo '{"tag_name":"v99.0.0"}' > dist/latest
+          KYTE_RELEASES_API=http://127.0.0.1:8765/latest "$HOME/.local/bin/kyte" --update </dev/null | tee "$RUNNER_TEMP/plan"
+          rm dist/latest
+          grep -q 'Installed by the install script' "$RUNNER_TEMP/plan"
           ./install.sh --uninstall
           if KYTE_DOWNLOAD_URL=http://127.0.0.1:8766 ./install.sh; then
             echo "::error::a tampered release was installed"

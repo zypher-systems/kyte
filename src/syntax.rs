@@ -150,6 +150,11 @@ mod code {
         Lang::detect(path, head).is_some()
     }
 
+    /// Whether a file's name gives its language, whatever it holds.
+    pub fn named_language(path: &Path) -> bool {
+        Lang::from_path(path).is_some()
+    }
+
     /// Whether this file's language has functions to move between. Data and
     /// markup formats don't.
     pub fn has_functions(path: &Path, head: &str) -> bool {
@@ -412,6 +417,10 @@ mod code {
         false
     }
 
+    pub fn named_language(path: &Path) -> bool {
+        comment_prefix(path, "").is_some()
+    }
+
     pub fn has_functions(_: &Path, _: &str) -> bool {
         false
     }
@@ -438,9 +447,14 @@ mod code {
 }
 
 pub use code::{
-    breadcrumb, expand, function_at, has_functions, latex_words, next_function, prev_function,
-    supported,
+    breadcrumb, expand, function_at, has_functions, latex_words, named_language, next_function,
+    prev_function, supported,
 };
+
+/// Whether a file's name says what kind of text it holds.
+pub fn name_says(path: &Path) -> bool {
+    prose(path, "").is_some() || named_language(path)
+}
 
 #[cfg(all(test, feature = "highlight"))]
 mod tests {

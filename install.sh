@@ -11,6 +11,9 @@
 #   KYTE_INSTALL_DIR   where the binary goes (default: ~/.local/bin)
 #   KYTE_DOWNLOAD_URL  where release files are (default: GitHub; for mirrors)
 #
+# `kyte --update` runs this script from the release it installs, with --from
+# and KYTE_INSTALL_DIR, so both have to keep working.
+#
 # Linux only (x86_64, arm64; static, any distro). Every download is checked
 # against signed SHA256SUMS using the key below. Needs OpenSSL 3+.
 
