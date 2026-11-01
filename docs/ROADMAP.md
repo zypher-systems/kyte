@@ -81,6 +81,7 @@ Kyte's pitch is an editor you can't lose work in and don't have to learn.
 - [x] Releases with an installer, `.deb`, `.rpm` and signed checksums
 - [x] Open source on GitHub
 - [x] Highlighting and file history before a file is saved, and a language box
+- [x] `kyte --update`, which checks where this copy came from and updates it the same way, from signed releases
 
 ## Next
 

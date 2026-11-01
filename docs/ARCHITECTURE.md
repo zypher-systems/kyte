@@ -84,7 +84,7 @@ stateDiagram-v2
 
 Do not add anything else without a written reason in `docs/DECISIONS.md`. When a version does not resolve, take the newest compatible one and record it there.
 
-Hard rules: no network access at runtime, no secrets anywhere, no telemetry. Linux only for the MVP (it may use `/proc` to check whether a PID is alive).
+Hard rules: no network access at runtime except the update check, which is its own feature (see "Updates" in `docs/DECISIONS.md`), no secrets anywhere, no telemetry. Linux only for the MVP (it may use `/proc` to check whether a PID is alive).
 
 ## 4\. Repo, naming and layout
 

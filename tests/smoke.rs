@@ -41,3 +41,16 @@ fn ac01_missing_value_exits_2() {
     let out = kyte().arg("--esc-ms").output().unwrap();
     assert_eq!(out.status.code(), Some(2));
 }
+
+/// A build without the updater says so, and has nothing to reach the network with.
+#[cfg(not(feature = "update"))]
+#[test]
+fn a_build_without_the_updater_says_so() {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_kyte"))
+        .arg("--update")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(said.contains("no updater"), "{said}");
+}

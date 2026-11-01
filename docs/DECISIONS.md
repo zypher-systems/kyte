@@ -17,10 +17,26 @@ These replace the matching parts of `ARCHITECTURE`. `docs/ROADMAP.md` holds the 
 - A release carries a `.tar.gz` for x86-64 and arm64, a `.deb` and an `.rpm` for each, signed checksums and `install.sh`. They all come from one workflow, so what's tested is what ships.
 - Binaries are static, built against musl, so one build runs on any Linux whatever its glibc. Kyte depends on nothing at run time, so the packages declare nothing.
 - The installer needs no root and goes to `~/.local/bin`. It checks a signature against a key it carries, so a mirror can't swap the files. `--from` skips that for a file someone already has.
-- Kyte has no updater. The README promises it makes no network connections, and that's worth more than the convenience. Updating is the installer again, or a package manager.
+- Updating was the installer again, or a package manager, to keep the promise of no network connections. See "Updates" for what replaced that.
 - A tag makes a draft release, which a person publishes. A tag can't be released unsigned.
 - Third-party notices ship in every package: the crates that reach the binary, and the files kept in `vendor/`.
 - Linux only, because the swap lock reads `/proc`.
+
+## Updates
+
+- This reverses "Kyte has no updater" from 0.6.0, by decision on Oct 31, 2026. Kyte updates the way Ryter and Reeve do, and checks where it came from first, as Reeve does. The README's promise is now that the network is used for this and nothing else.
+- `kyte --update` installs by the route this copy came in: the release's install script, the release's package, the repository it came from, or the AUR helper. A package from a repository stays that repository's, so the release's own package never replaces it. An origin the package manager can't give is refused, not taken for a hand install.
+- These are flags, not `kyte update`, because `kyte NAME` opens `NAME`. A subcommand would take a file called `update` away, or do different things in different folders.
+- The path can't tell a release from a cargo build copied into `~/.local/bin`, so the release workflow marks its binaries with `KYTE_RELEASE_BUILD`, and an unmarked copy is refused. A package manager's copy doesn't need the mark, so a distribution's own build still updates through its repository.
+- A release binary in `/usr/bin` or `/bin` that no package owns is refused. It usually means the package lookup failed, and taking it for the installer's copy would overwrite a package's file.
+- The launch check runs beside the editor, at most once a day, and only says a release is out. An editor shouldn't replace itself unasked, and a package needs sudo, which a background job can't ask for. A failed check says nothing and is tried at the next launch. Debug builds and builds in a checkout never ask, which keeps the tests off the network.
+- A note waits for a free status bar and a second's pause in the typing, because any key clears the bar.
+- One signature over `SHA256SUMS`, checked with the key built into Kyte, covers every file, including the install script that gets run. The signature doesn't say which release a file belongs to, so a tarball's binary must also report the expected version, which stops an old signed release passing for a new one. That check has a time limit, kills the whole process group, and reads a capped amount of output, so a binary that hangs or floods can't stall the update.
+- A mirror (`KYTE_DOWNLOAD_URL`, `KYTE_RELEASES_API`) changes where files come from and not what's accepted. It can withhold a release, but not change one.
+- What's on disk decides the outcome, not the installer's exit code. A failed install may already have replaced the binary, and `--update-rollback` must still know what to put back. State is written under a lock, so a Kyte starting up can't drop the rollback target.
+- Crates, all under the `update` feature: `ureq` with rustls for HTTPS, chosen over `reqwest`, which brings an async runtime, and over running `curl`, because Kyte depends on nothing at run time. `ed25519-dalek` and `sha2` for the signature and checksums, the same as Ryter and Reeve. `base64` for the key and signature, and `serde_json` for GitHub's answer. TLS checks against the Mozilla roots built into the binary, as Ryter and Reeve do, so a proxy that re-signs TLS with its own CA fails the check. A mirror over plain HTTP works there, because the signature is what's trusted.
+- `--update` needs `tar` and `sh`, as the install script does. It can't run as root, because its state and downloads belong to you; it asks for sudo itself.
+- The install script's `--from` and `KYTE_INSTALL_DIR` are now a contract: `kyte --update` calls them on every future release's script.
 
 ## Several open files
 

@@ -29,6 +29,7 @@ pub mod syntax;
 pub mod term;
 pub mod tree;
 pub mod ui;
+pub mod update;
 pub mod wrap;
 
 use std::io::{IsTerminal, Write};
@@ -56,6 +57,9 @@ pub fn run(opts: Options) -> anyhow::Result<ExitCode> {
     if let Some(p) = &opts.print_swap {
         return Ok(print_swap(p));
     }
+    if let Some(request) = &opts.update {
+        return Ok(update::run(request));
+    }
     buffer::set_tab_width(opts.tab_width);
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
         eprintln!("kyte: stdin and stdout must be a terminal");
@@ -77,6 +81,7 @@ pub fn run(opts: Options) -> anyhow::Result<ExitCode> {
     }
     app.queue_files(opts.more_files.clone());
     app.load_speller();
+    app.update = update::start_check(opts.update_check);
     let result = event_loop(&mut app, opts.no_kitty);
     if result.is_ok() {
         app.finish();

@@ -39,6 +39,7 @@ pub enum Command {
     DeleteHistory,
     Reader,
     Settings,
+    CheckUpdates,
     ShowKeyHelp,
 }
 
@@ -80,6 +81,7 @@ pub const REGISTRY: &[Command] = &[
     Command::DeleteHistory,
     Command::Reader,
     Command::Settings,
+    Command::CheckUpdates,
     Command::ShowKeyHelp,
 ];
 
@@ -122,6 +124,7 @@ impl Command {
             Command::DeleteHistory => "Delete file history",
             Command::Reader => "Reader mode",
             Command::Settings => "Open settings",
+            Command::CheckUpdates => "Check for updates",
             Command::ShowKeyHelp => "Show key help",
         }
     }
@@ -165,6 +168,7 @@ impl Command {
             Command::DeleteHistory => "",
             Command::Reader => "Esc v",
             Command::Settings => "",
+            Command::CheckUpdates => "",
             Command::ShowKeyHelp => "",
         }
     }
@@ -228,7 +232,7 @@ mod tests {
 
     #[test]
     fn every_command_has_a_label() {
-        assert_eq!(REGISTRY.len(), 37);
+        assert_eq!(REGISTRY.len(), 38);
         let labels: Vec<&str> = REGISTRY.iter().map(|c| c.label()).collect();
         assert_eq!(
             labels,
@@ -269,6 +273,7 @@ mod tests {
                 "Delete file history",
                 "Reader mode",
                 "Open settings",
+                "Check for updates",
                 "Show key help"
             ]
         );

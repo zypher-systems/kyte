@@ -1083,7 +1083,7 @@ fn ac16_empty_query_does_nothing() {
 
 // ---------------------------------------------------------------- AC-17
 
-const COMMANDS: [&str; 37] = [
+const COMMANDS: [&str; 38] = [
     "Save",
     "Save as",
     "Open file",
@@ -1120,6 +1120,7 @@ const COMMANDS: [&str; 37] = [
     "Delete file history",
     "Reader mode",
     "Open settings",
+    "Check for updates",
     "Show key help",
 ];
 
@@ -1156,7 +1157,7 @@ fn ac17_palette_lists_every_command() {
         .collect();
     assert!(first_result(&p).contains("▸ Save"), "{}", p.dump());
     // 8 rows are visible at once; scrolling down reveals the rest
-    for _ in 0..36 {
+    for _ in 0..37 {
         p.send_keys(&["Down"]);
         std::thread::sleep(Duration::from_millis(5));
         for c in COMMANDS {
@@ -5005,4 +5006,26 @@ fn next_misspelling_walks_a_long_paper_in_batches_and_wraps() {
     esc_then(&mut p, "m");
     wait_status(&p, "Ln 1, Col 1");
     quit_clean(&mut p);
+}
+
+/// The palette's check answers on the status bar, and a failed one says so.
+#[cfg(feature = "update")]
+#[test]
+fn check_for_updates_answers_on_the_status_bar() {
+    let env = Env::new();
+    let mut p = Pty::spawn(
+        Spawn::new(bin())
+            .arg("--no-kitty")
+            .env("KYTE_STATE_DIR", env.state.to_string_lossy())
+            .env("KYTE_RELEASES_API", "http://127.0.0.1:1/latest"),
+    );
+    p.wait_for("Ln 1, Col 1", TIMEOUT);
+    p.send_keys(&["C-p"]);
+    p.wait_for("Command palette", TIMEOUT);
+    p.send_str("check for updates");
+    p.wait_for("Check for updates", TIMEOUT);
+    p.send_keys(&["Enter"]);
+    p.wait_for("Couldn't check for updates", TIMEOUT);
+    p.send_keys(&["C-q"]);
+    p.wait_exit(TIMEOUT);
 }

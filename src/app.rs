@@ -1,6 +1,7 @@
 //! Application state and the mode state machine (sections 5 and 8).
 //! `handle_key` takes `now` so tests control time.
 
+use std::sync::mpsc::TryRecvError;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -387,6 +388,10 @@ pub struct App {
     pub message: Option<String>,
     /// The message is an error (drawn in the error style).
     pub message_is_error: bool,
+    /// The update check running beside the editor.
+    pub update: Option<std::sync::mpsc::Receiver<String>>,
+    /// What it said, until there's a moment to show it.
+    update_note: Option<String>,
     pub esc_window: Duration,
     pub quit: bool,
     /// Characters still to discard from a split key sequence.
@@ -450,6 +455,13 @@ const MAX_COUNTED_BYTES: usize = 2 * 1024 * 1024;
 /// How long typing stops before a LaTeX file's words are counted again.
 const RECOUNT_PAUSE: Duration = Duration::from_millis(500);
 
+/// A key clears the status bar, so a note from the update check waits for a
+/// pause in the typing.
+const UPDATE_NOTE_PAUSE: Duration = Duration::from_secs(1);
+
+/// On the bar while the palette's update check runs.
+const CHECKING: &str = "Checking for updates…";
+
 /// Shown on the message line only while the overlay is open (section 5.4).
 /// The Esc layer's core keys, shown on top of whatever the context adds.
 pub const LEGEND: &[(&str, &str)] = &[
@@ -508,6 +520,8 @@ impl App {
             mode: Mode::Insert,
             message: None,
             message_is_error: false,
+            update: None,
+            update_note: None,
             esc_window: Duration::from_millis(opts.esc_ms),
             quit: false,
             default_view,
@@ -1743,6 +1757,10 @@ impl App {
             Command::DeleteHistory => {
                 self.mode = Mode::Prompt(Prompt::ConfirmDeleteHistory);
             }
+            Command::CheckUpdates => {
+                self.update = Some(crate::update::check_now());
+                self.set_message(CHECKING);
+            }
             Command::ShowKeyHelp => self.mode = Mode::Help { top: 0 },
         }
     }
@@ -1886,6 +1904,7 @@ impl App {
     /// fsyncs a dirty swap at most once per second.
     pub fn tick(&mut self, now: Instant) -> Result<()> {
         self.check_build();
+        self.check_update(now);
         let due = self
             .last_fsync
             .is_none_or(|t| now.saturating_duration_since(t) >= Duration::from_secs(1));
@@ -1912,6 +1931,31 @@ impl App {
             self.last_fsync = Some(now);
         }
         Ok(())
+    }
+
+    /// Shows what the update check said, when nothing else is on the bar and
+    /// the next key wouldn't wipe it at once.
+    fn check_update(&mut self, now: Instant) {
+        if let Some(receiver) = &self.update {
+            match receiver.try_recv() {
+                Ok(note) => {
+                    self.update_note = Some(note);
+                    self.update = None;
+                }
+                Err(TryRecvError::Disconnected) => self.update = None,
+                Err(TryRecvError::Empty) => {}
+            }
+        }
+        let free = self.message.is_none() || self.message.as_deref() == Some(CHECKING);
+        let paused = self
+            .last_key
+            .is_none_or(|t| now.saturating_duration_since(t) >= UPDATE_NOTE_PAUSE);
+        if free && paused && self.mode == Mode::Insert {
+            if let Some(note) = self.update_note.take() {
+                self.set_message(note);
+                self.needs_redraw = true;
+            }
+        }
     }
 
     /// Ctrl-S: atomic save, asking first if it would lose something.
@@ -3870,6 +3914,82 @@ mod tests {
         a.handle_key(Key::Esc, t).unwrap();
         assert_eq!(a.mode, Mode::Insert);
         assert_eq!(a.doc.buffer.line_col(), (5, 1));
+    }
+
+    /// A note from the update check, waiting to be shown.
+    fn note_from_check(a: &mut App, note: &str) {
+        let (send, receive) = std::sync::mpsc::channel();
+        send.send(note.to_string()).unwrap();
+        a.update = Some(receive);
+    }
+
+    #[test]
+    fn an_update_note_shows_on_a_free_bar() {
+        let t = Instant::now();
+        let mut a = app("x");
+        note_from_check(&mut a, "Kyte 9.9.9 is out");
+        a.tick(t).unwrap();
+        assert_eq!(a.message.as_deref(), Some("Kyte 9.9.9 is out"));
+        assert!(!a.message_is_error);
+        assert!(a.update.is_none());
+    }
+
+    #[test]
+    fn an_update_note_waits_for_the_bar_and_the_typing() {
+        let t = Instant::now();
+        let mut a = app("x");
+        // A warning from opening the file is more urgent.
+        a.message = Some("Warning".into());
+        note_from_check(&mut a, "Kyte 9.9.9 is out");
+        a.tick(t).unwrap();
+        assert_eq!(a.message.as_deref(), Some("Warning"));
+        // The next key would wipe it, so it waits for a pause.
+        a.handle_key(Key::Char('y'), t).unwrap();
+        a.tick(t).unwrap();
+        assert_eq!(a.message, None);
+        a.tick(t + UPDATE_NOTE_PAUSE).unwrap();
+        assert_eq!(a.message.as_deref(), Some("Kyte 9.9.9 is out"));
+        a.handle_key(Key::Char('y'), t + UPDATE_NOTE_PAUSE).unwrap();
+        a.tick(t + UPDATE_NOTE_PAUSE * 3).unwrap();
+        assert_eq!(a.message, None, "said once");
+    }
+
+    #[test]
+    fn an_update_note_waits_for_a_box_to_close() {
+        let t = Instant::now();
+        let mut a = app("x");
+        a.run_command(Command::ShowKeyHelp);
+        note_from_check(&mut a, "Kyte 9.9.9 is out");
+        a.tick(t).unwrap();
+        assert_eq!(a.message, None);
+        a.mode = Mode::Insert;
+        a.tick(t).unwrap();
+        assert_eq!(a.message.as_deref(), Some("Kyte 9.9.9 is out"));
+    }
+
+    #[test]
+    fn the_checking_line_gives_way_to_the_answer() {
+        let t = Instant::now();
+        let mut a = app("x");
+        a.message = Some(CHECKING.into());
+        note_from_check(&mut a, "Kyte 0.6.0 is the newest release");
+        a.tick(t).unwrap();
+        assert_eq!(
+            a.message.as_deref(),
+            Some("Kyte 0.6.0 is the newest release")
+        );
+    }
+
+    #[test]
+    fn a_check_that_ends_with_nothing_to_say_is_dropped() {
+        let t = Instant::now();
+        let mut a = app("x");
+        let (send, receive) = std::sync::mpsc::channel::<String>();
+        drop(send);
+        a.update = Some(receive);
+        a.tick(t).unwrap();
+        assert!(a.update.is_none());
+        assert_eq!(a.message, None);
     }
 
     #[test]

@@ -17,7 +17,7 @@ MIT License. See [LICENSE](LICENSE).
 curl -fsSL https://raw.githubusercontent.com/zypher-systems/kyte/main/install.sh | sh
 ```
 
-This puts `kyte` in `~/.local/bin`, with no root needed, after checking the download against a signed list of checksums. It works on any x86-64 or arm64 Linux, because the binary is static. To update, run it again. To remove it, run the script with `--uninstall`.
+This puts `kyte` in `~/.local/bin`, with no root needed, after checking the download against a signed list of checksums. It works on any x86-64 or arm64 Linux, because the binary is static. To remove it, run the script with `--uninstall`.
 
 Or take a package from the [releases page](https://github.com/zypher-systems/kyte/releases):
 
@@ -26,6 +26,30 @@ Or take a package from the [releases page](https://github.com/zypher-systems/kyt
 - **Anything else:** unpack `kyte-<target>.tar.gz` and put `kyte` on your `PATH`
 
 Kyte runs on Linux only. Building a PDF needs LaTeX installed separately; see [Building the PDF](#building-the-pdf).
+
+### Updating
+
+```
+kyte --update              # install the newest release
+kyte --update-check        # only say whether one is out
+kyte --update-to 0.6.0     # install a chosen version
+kyte --update-rollback     # go back to the version the last update replaced
+```
+
+Kyte first works out how this copy got onto your machine, tells you what it's going to do and asks. `--yes` skips the question.
+
+| How it was installed | What `kyte --update` does |
+| --- | --- |
+| The install script | Runs the new release's installer over this copy, using sudo only if you can't write to its folder |
+| An RPM or `.deb` file | Installs the release's package with `dnf` or `apt-get`, using sudo |
+| An RPM or `.deb` from a repository | Updates it through that repository, by version. If the repository doesn't have the version, nothing changes |
+| pacman | Hands it to `paru` or `yay` |
+| Built from source, even if copied elsewhere | Refuses, and says how to update it |
+| Anything it can't place | Refuses, and says what to do instead |
+
+Nothing from a release is used until `SHA256SUMS` matches the signature for Kyte's release key, which is built into Kyte, and the download matches its checksum. A binary must also report the version it should be before it's installed. Kyte files you have open are safe: a running Kyte keeps working, and uses the new version once restarted.
+
+Copies from before Kyte had an updater, 0.6.0 and older, need the install script once more.
 
 ## Build from source
 
@@ -50,14 +74,14 @@ The Makefile targets are thin wrappers:
 | `make demo` | `scripts/demo.sh` (see [Demo](#demo)) |
 | `make docker-test` | `cargo test` inside the Docker dev image (see [Docker](#docker)) |
 
-Kyte highlights Rust, Python, Bash, Fish, JavaScript, TypeScript, TSX, C, C++, C#, Go, Java, PHP, Ruby, Lua, Swift, Zig, SQL, Nix, JSON, HTML, CSS, XML, TOML, YAML, INI, Markdown, LaTeX, BibTeX, Makefiles, Dockerfiles, CMake and diffs, picked by file name or extension, or the `#!` line of a script, or for a buffer with no name by its opening lines, using tree-sitter. Building needs a C compiler for the grammars. To leave highlighting, the code actions and spell check out, which shrinks the binary from about 34 MB to about 1.3 MB:
+Kyte highlights Rust, Python, Bash, Fish, JavaScript, TypeScript, TSX, C, C++, C#, Go, Java, PHP, Ruby, Lua, Swift, Zig, SQL, Nix, JSON, HTML, CSS, XML, TOML, YAML, INI, Markdown, LaTeX, BibTeX, Makefiles, Dockerfiles, CMake and diffs, picked by file name or extension, or the `#!` line of a script, or for a buffer with no name by its opening lines, using tree-sitter. Building needs a C compiler for the grammars. To leave highlighting, the code actions, spell check and the updater out, which shrinks the binary from about 38 MB to about 1.3 MB:
 
 ```
 cargo build --release --no-default-features
 cargo test --no-default-features
 ```
 
-Kyte makes no network connections and sends no telemetry.
+Kyte sends no telemetry. The only connection it makes is to ask GitHub for the latest release: when you run `kyte --update` or **Check for updates**, and at launch, at most once a day and in the background, so it can tell you on the status bar. That shows GitHub your address and Kyte's version, and never installs anything by itself. `update_check = false` turns the launch check off. A build without the `update` feature, which `--no-default-features` leaves out, has no network code at all.
 
 ## Usage
 
@@ -308,6 +332,7 @@ With soft wrap on, a long line continues on the next screen row, breaking after 
 | `esc_ms` | `300` | Milliseconds to press Esc again for the palette |
 | `history` | `true` | Keep a history of every edit to each file |
 | `history_limit_mb` | `100` | Trim a file's history when it passes this size |
+| `update_check` | `true` | Ask GitHub once a day whether a newer Kyte is out. It only tells you |
 
 Environment variables and command-line options override the file. A line Kyte can't use is skipped and reported on the first screen, and never stops Kyte from opening.
 

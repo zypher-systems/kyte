@@ -52,6 +52,9 @@ pub const TEMPLATE: &str = r#"# Kyte settings. Remove the # from a line to use i
 
 # Trim a file's history when it passes this many megabytes.
 # history_limit_mb = 100
+
+# Ask GitHub once a day whether a newer Kyte is out. It only tells you.
+# update_check = true
 "#;
 
 /// Where the settings file lives.
@@ -111,6 +114,7 @@ fn apply(opts: &mut Options, key: &str, value: &str) -> Option<Result<(), ()>> {
         "theme" => opts.theme = ThemeName::parse(value)?,
         "esc_ms" => opts.esc_ms = number(value, 10_000)?,
         "history" => opts.no_history = !boolean(value)?,
+        "update_check" => opts.update_check = boolean(value)?,
         "history_limit_mb" => {
             opts.history_limit_mb = number(value, 1_000_000).filter(|n| *n > 0)?
         }
@@ -219,8 +223,10 @@ mod tests {
             "esc_ms = 500\n",
             "history = false\n",
             "history_limit_mb = 20\n",
+            "update_check = false\n",
         ));
         assert!(p.is_empty(), "{p:?}");
+        assert!(!o.update_check);
         assert_eq!(o.tab_width, 8);
         assert!(!o.line_numbers);
         assert!(o.soft_wrap);
