@@ -162,6 +162,9 @@ pub struct ReplaceRun {
     with: String,
     /// Where it started, moved along by replacements made before that point.
     origin: usize,
+    /// The match in question. The cursor can't stand in for this: it stays on
+    /// a whole letter, and a match can start inside one.
+    at: usize,
     wrapped: bool,
     count: usize,
 }
@@ -1500,6 +1503,7 @@ impl App {
                     query,
                     with,
                     origin: from,
+                    at: from,
                     wrapped: false,
                     count: 0,
                 };
@@ -1523,8 +1527,12 @@ impl App {
             run.wrapped = true;
             hit = search::find_forward(rope, &run.query, 0);
         }
-        match hit.filter(|i| !run.wrapped || *i < run.origin) {
+        // After the wrap a match has to end by the start point: anything past
+        // that has already been looked at, and may be this run's own output.
+        let n = run.query.chars().count();
+        match hit.filter(|i| !run.wrapped || i + n <= run.origin) {
             Some(i) => {
+                run.at = i;
                 self.doc.buffer.move_to(i);
                 self.mode = Mode::Prompt(Prompt::ReplaceConfirm(run));
             }
@@ -1534,6 +1542,8 @@ impl App {
 
     fn finish_replace(&mut self, count: usize) {
         self.mode = Mode::Insert;
+        // A replacement inside a letter can leave the cursor partway through it.
+        self.doc.buffer.move_to(self.doc.buffer.cursor());
         match count {
             0 => self.set_message("No matches replaced"),
             1 => self.set_message("Replaced 1 match"),
@@ -1542,7 +1552,7 @@ impl App {
     }
 
     fn replace_confirm_key(&mut self, key: Key, mut run: ReplaceRun) {
-        let at = self.doc.buffer.cursor();
+        let at = run.at;
         match key {
             Key::Char('y') => {
                 let edit = self.replacement_at(at, &run);
@@ -1559,17 +1569,16 @@ impl App {
             }
             Key::Char('n') => self.replace_advance(run, at + 1),
             Key::Char('a') => {
-                let (origin, wrapped) = (run.origin, run.wrapped);
-                let hits = search::find_all(self.doc.buffer.rope(), &run.query);
+                let rope = self.doc.buffer.rope();
+                let hits = if run.wrapped {
+                    search::find_within(rope, &run.query, at..run.origin)
+                } else {
+                    let mut hits = search::find_within(rope, &run.query, 0..run.origin);
+                    hits.extend(search::find_within(rope, &run.query, at..rope.len_chars()));
+                    hits
+                };
                 let mut edits: Vec<Edit> = hits
                     .into_iter()
-                    .filter(|i| {
-                        if wrapped {
-                            (at..origin).contains(i)
-                        } else {
-                            *i >= at || *i < origin
-                        }
-                    })
                     .map(|i| self.replacement_at(i, &run))
                     .collect();
                 // Last first, so earlier positions stay right.
@@ -3124,19 +3133,7 @@ impl App {
             self.save_after(path, None, then);
             return Ok(());
         }
-        if self.place_of(&target).is_some() {
-            return Err("That file is open here; close it first".to_string());
-        }
-        let current = std::fs::read(&target).unwrap_or_default();
-        match swap::inspect(&target, &current) {
-            Ok(SwapStatus::LiveLock { pid }) => {
-                return Err(format!("Open in another kyte (PID {pid})"));
-            }
-            Ok(SwapStatus::Recoverable(_) | SwapStatus::Stale) => {
-                return Err("That file has edits from a crash; open it first".to_string());
-            }
-            _ => {}
-        }
+        self.can_take_over(&target)?;
         self.mode = Mode::Insert;
         if meta.is_some() {
             self.mode = Mode::Prompt(Prompt::ConfirmSave {
@@ -3148,6 +3145,22 @@ impl App {
             self.write_file(&path, then);
         }
         Ok(())
+    }
+
+    /// Whether a save can land on `target`, a file other than this buffer's. It
+    /// takes over that file's swap, so nothing else can be relying on it.
+    fn can_take_over(&self, target: &std::path::Path) -> Result<(), String> {
+        if self.place_of(target).is_some() {
+            return Err("That file is open here; close it first".to_string());
+        }
+        let current = std::fs::read(target).unwrap_or_default();
+        match swap::inspect(target, &current) {
+            Ok(SwapStatus::LiveLock { pid }) => Err(format!("Open in another kyte (PID {pid})")),
+            Ok(SwapStatus::Recoverable(_) | SwapStatus::Stale) => {
+                Err("That file has edits from a crash; open it first".to_string())
+            }
+            _ => Ok(()),
+        }
     }
 
     /// The next thing to ask about once `passed` has been answered.
@@ -3173,12 +3186,14 @@ impl App {
     }
 
     fn write_file(&mut self, path: &std::path::Path, then: After) {
-        // A symlink can move after a file is opened, so check again here: a
-        // save takes over the swap of the file it lands on.
+        // A symlink can move after a file is opened, and a question can stay
+        // open a while, so check again here.
         let target = fileio::resolve_target(path).ok();
-        if target.is_some_and(|t| self.place_of(&t).is_some_and(|p| p != self.at)) {
-            self.set_error("That file is open here; close it first");
-            return;
+        if let Some(t) = target.filter(|t| Some(t) != self.doc.swap_target.as_ref()) {
+            if let Err(e) = self.can_take_over(&t) {
+                self.set_error(e);
+                return;
+            }
         }
         let text = self.doc.buffer.to_string();
         let overwritten = self.outside_version(path);
@@ -3806,6 +3821,117 @@ mod tests {
         assert_eq!(a.mode, Mode::Insert);
         assert_eq!(a.doc.buffer.to_string(), "ab ab");
         assert_eq!(a.message.as_deref(), Some("Replaced 1 match"));
+    }
+
+    #[test]
+    fn replace_changes_the_match_not_the_letter_it_sits_on() {
+        let mut a = app("e\u{301}x");
+        start_replace(&mut a, "\u{301}", "\u{302}");
+        assert_eq!(a.doc.buffer.cursor(), 0, "the cursor stays on the letter");
+        typ(&mut a, "y");
+        assert_eq!(a.doc.buffer.to_string(), "e\u{302}x");
+    }
+
+    #[test]
+    fn skipping_a_match_inside_a_letter_moves_on() {
+        let mut a = app("e\u{301} e\u{301}");
+        start_replace(&mut a, "\u{301}", "\u{302}");
+        typ(&mut a, "n");
+        typ(&mut a, "y");
+        assert_eq!(a.doc.buffer.to_string(), "e\u{301} e\u{302}");
+        assert_eq!(a.message.as_deref(), Some("Replaced 1 match"));
+    }
+
+    #[test]
+    fn replacing_all_from_inside_a_letter_keeps_the_letters() {
+        let mut a = app("e\u{301} e\u{301}");
+        start_replace(&mut a, "\u{301}", "");
+        typ(&mut a, "a");
+        assert_eq!(a.doc.buffer.to_string(), "e e");
+    }
+
+    #[test]
+    fn a_replace_that_joins_a_letter_leaves_the_cursor_between_letters() {
+        let mut a = app("e\u{301}\u{302}");
+        start_replace(&mut a, "\u{301}", "o");
+        typ(&mut a, "y");
+        assert_eq!(a.doc.buffer.to_string(), "eo\u{302}");
+        assert_eq!(a.doc.buffer.cursor(), 1);
+    }
+
+    #[test]
+    fn redoing_a_replace_inside_a_letter_stays_between_letters() {
+        let t = Instant::now();
+        let mut a = app("e\u{301}\u{302}");
+        start_replace(&mut a, "\u{301}", "o");
+        typ(&mut a, "y");
+        a.handle_key(Key::Ctrl('z'), t).unwrap();
+        a.handle_key(Key::Ctrl('y'), t).unwrap();
+        assert_eq!(a.doc.buffer.to_string(), "eo\u{302}");
+        assert_eq!(a.doc.buffer.cursor(), 1);
+        typ(&mut a, "X");
+        assert_eq!(a.doc.buffer.to_string(), "eXo\u{302}", "the accent stays");
+    }
+
+    #[test]
+    fn redoing_replace_all_inside_a_letter_stays_between_letters() {
+        let t = Instant::now();
+        let mut a = app("e\u{301}\u{302}");
+        start_replace(&mut a, "\u{301}", "o");
+        typ(&mut a, "a");
+        assert_eq!(a.doc.buffer.cursor(), 1);
+        a.handle_key(Key::Ctrl('z'), t).unwrap();
+        a.handle_key(Key::Ctrl('y'), t).unwrap();
+        assert_eq!(a.doc.buffer.cursor(), 1);
+    }
+
+    #[test]
+    fn replace_stops_short_of_a_match_reaching_past_where_it_started() {
+        let mut a = app("aaaa");
+        a.doc.buffer.move_to(1);
+        start_replace(&mut a, "aa", "");
+        typ(&mut a, "y");
+        // What's left only matches because of the deletion.
+        assert_eq!(a.doc.buffer.to_string(), "aa");
+        assert_eq!(a.mode, Mode::Insert);
+        assert_eq!(a.message.as_deref(), Some("Replaced 1 match"));
+    }
+
+    #[test]
+    fn replace_wrapping_never_rereads_what_it_wrote_before_the_wrap() {
+        let mut a = app("aaa");
+        a.doc.buffer.move_to(1);
+        start_replace(&mut a, "aa", "a");
+        typ(&mut a, "y");
+        assert_eq!(a.doc.buffer.to_string(), "aa");
+        assert_eq!(a.mode, Mode::Insert);
+    }
+
+    #[test]
+    fn replace_all_takes_the_matches_one_by_one_would() {
+        let mut a = app("aaaa");
+        a.doc.buffer.move_to(1);
+        start_replace(&mut a, "aa", "");
+        typ(&mut a, "a");
+        assert_eq!(a.doc.buffer.to_string(), "aa");
+        assert_eq!(a.message.as_deref(), Some("Replaced 1 match"));
+
+        let mut a = app("aaa");
+        a.doc.buffer.move_to(1);
+        start_replace(&mut a, "aa", "b");
+        typ(&mut a, "a");
+        assert_eq!(a.doc.buffer.to_string(), "ab", "the match on screen");
+    }
+
+    #[test]
+    fn replace_all_after_the_wrap_stops_where_it_started() {
+        let mut a = app("aa-aa");
+        a.doc.buffer.move_to(4);
+        start_replace(&mut a, "a", "b");
+        typ(&mut a, "y"); // the last one, at the start point
+        typ(&mut a, "a"); // the wrap, up to the start point
+        assert_eq!(a.doc.buffer.to_string(), "bb-bb");
+        assert_eq!(a.message.as_deref(), Some("Replaced 4 matches"));
     }
 
     #[test]

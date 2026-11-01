@@ -90,12 +90,14 @@ impl Prepared {
         self.text[..cut].rfind(&self.query).map(|i| self.char_of(i))
     }
 
-    fn all(&self) -> Vec<usize> {
+    /// Matches inside a range of char indices, without overlaps.
+    fn within(&self, range: Range<usize>) -> Vec<usize> {
+        let (start, end) = (self.byte_of(range.start), self.byte_of(range.end));
         let mut out = Vec::new();
-        let (mut byte, mut chars) = (0, 0);
-        for (i, _) in self.text.match_indices(&self.query) {
-            chars += self.char_of_range(byte, i);
-            byte = i;
+        let (mut byte, mut chars) = (start, range.start);
+        for (i, _) in self.text[start..end].match_indices(&self.query) {
+            chars += self.char_of_range(byte, start + i);
+            byte = start + i;
             out.push(chars);
         }
         out
@@ -137,12 +139,12 @@ pub fn find_prev(rope: &Rope, query: &str, current: usize) -> Option<usize> {
     p.backward(current).or_else(|| p.backward(rope.len_chars()))
 }
 
-/// Every match in the rope, without overlaps, as char indices.
-pub fn find_all(rope: &Rope, query: &str) -> Vec<usize> {
+/// Every match lying wholly inside `range`, without overlaps, as char indices.
+pub fn find_within(rope: &Rope, query: &str, range: Range<usize>) -> Vec<usize> {
     if query.is_empty() {
         return Vec::new();
     }
-    Prepared::new(rope, query).all()
+    Prepared::new(rope, query).within(range)
 }
 
 /// Whether `query` occurs exactly at char index `at`.
@@ -236,7 +238,7 @@ mod tests {
         assert_eq!(find_from(&r("abc"), "x", 0), None);
         assert_eq!(find_next(&r(""), "x", 0), None);
         assert_eq!(find_forward(&r("abc"), "", 0), None);
-        assert!(find_all(&r("abc"), "").is_empty());
+        assert!(find_within(&r("abc"), "", 0..3).is_empty());
     }
 
     #[test]
@@ -245,8 +247,8 @@ mod tests {
         assert_eq!(find_from(&x, "hello", 1), Some(6), "lowercase matches any");
         assert_eq!(find_from(&x, "hello", 7), Some(12));
         assert_eq!(find_from(&x, "Hello", 1), Some(0), "a capital is exact");
-        assert_eq!(find_all(&x, "hello"), vec![0, 6, 12]);
-        assert_eq!(find_all(&x, "HELLO"), vec![12]);
+        assert_eq!(find_within(&x, "hello", 0..17), vec![0, 6, 12]);
+        assert_eq!(find_within(&x, "HELLO", 0..17), vec![12]);
     }
 
     #[test]
@@ -263,9 +265,23 @@ mod tests {
         // U+212A KELVIN SIGN folds to a shorter k, and İ to a plain i.
         let x = r("\u{212a}\u{212a}x İy");
         assert_eq!(find_from(&x, "x", 0), Some(2));
-        assert_eq!(find_all(&x, "y"), vec![5]);
+        assert_eq!(find_within(&x, "y", 0..6), vec![5]);
         assert_eq!(find_from(&x, "k", 1), Some(1));
         assert!(matches_at(&x, "kk", 0));
+    }
+
+    #[test]
+    fn find_within_takes_only_whole_matches_inside_the_range() {
+        let x = r("aaaa");
+        assert_eq!(find_within(&x, "aa", 1..4), vec![1]);
+        assert_eq!(find_within(&x, "aa", 0..1), Vec::<usize>::new());
+        assert_eq!(find_within(&x, "aa", 0..4), vec![0, 2]);
+        assert_eq!(
+            find_within(&r("世x世x"), "x", 2..4),
+            vec![3],
+            "char indices"
+        );
+        assert_eq!(find_within(&x, "a", 2..2), Vec::<usize>::new());
     }
 
     #[test]
