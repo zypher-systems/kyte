@@ -136,10 +136,12 @@ pub fn is_dev_build(exe: &Path) -> bool {
     })
 }
 
-/// What `prog args…` prints, when it runs and succeeds.
+/// What `prog args…` prints, when it runs and succeeds. It's asked in the C
+/// locale, because this is parsed and the tools translate their output.
 fn output_of(prog: &str, args: &[&str]) -> Option<String> {
     let out = Command::new(prog)
         .args(args)
+        .env("LC_ALL", "C")
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output()
@@ -492,6 +494,18 @@ mod tests {
                     amd64 Packages\n        500 https://b.test/d s/m amd64 Packages\n        100 \
                     /var/lib/dpkg/status\n";
         assert!(matches!(apt_policy(both), Origin::Unknown(_)));
+    }
+
+    /// apt's table is translated, so its heading must reach us in English.
+    /// On a French system it reads `Table de version :`.
+    #[test]
+    fn package_tools_answer_in_english_whatever_the_language_here() {
+        let said = output_of("sh", &["-c", "printf %s \"${LC_ALL-unset}\""]);
+        assert_eq!(said.as_deref(), Some("C"));
+        assert!(matches!(
+            apt_policy("kyte:\n  Table de version :\n"),
+            Origin::Unknown(_)
+        ));
     }
 
     /// A local repository is written without `//`.
