@@ -946,8 +946,7 @@ impl Buffer {
             self.raw_apply(&inv);
             self.pending_edits.push(inv);
         }
-        self.cursor = self.outside_crlf(g.cursor_before.min(self.rope.len_chars()));
-        self.want_col = self.cursor_display_col();
+        self.restore_cursor(g.cursor_before);
         self.dirty = true;
         self.redo.push(g);
         true
@@ -962,12 +961,18 @@ impl Buffer {
             self.raw_apply(e);
             self.pending_edits.push(e.clone());
         }
-        self.cursor = self.outside_crlf(g.cursor_after.min(self.rope.len_chars()));
-        self.want_col = self.cursor_display_col();
+        self.restore_cursor(g.cursor_after);
         self.dirty = true;
         self.close_group();
         self.undo.push(g);
         true
+    }
+
+    /// Puts the cursor back for an undo or redo. An edit can leave it inside a
+    /// letter, where typing would split the letter.
+    fn restore_cursor(&mut self, at: usize) {
+        self.cursor = self.outside_crlf(self.letter_start(at));
+        self.want_col = self.cursor_display_col();
     }
 
     pub fn take_pending_edits(&mut self) -> Vec<Edit> {
@@ -1103,6 +1108,11 @@ impl Buffer {
 
     /// Moves to `char_idx` (clamped), snapping back to a grapheme boundary.
     pub fn move_to(&mut self, char_idx: usize) {
+        self.set_cursor_h(self.letter_start(char_idx));
+    }
+
+    /// `char_idx` (clamped), snapped back to a grapheme boundary.
+    fn letter_start(&self, char_idx: usize) -> usize {
         let idx = char_idx.min(self.rope.len_chars());
         let line = self.rope.char_to_line(idx);
         let start = self.line_start(line);
@@ -1115,7 +1125,7 @@ impl Buffer {
                 break;
             }
         }
-        self.set_cursor_h(start + snapped);
+        start + snapped
     }
 
     /// Moves to display column `col` on line `l` (clamped), updating the remembered column.

@@ -3860,6 +3860,32 @@ mod tests {
     }
 
     #[test]
+    fn redoing_a_replace_inside_a_letter_stays_between_letters() {
+        let t = Instant::now();
+        let mut a = app("e\u{301}\u{302}");
+        start_replace(&mut a, "\u{301}", "o");
+        typ(&mut a, "y");
+        a.handle_key(Key::Ctrl('z'), t).unwrap();
+        a.handle_key(Key::Ctrl('y'), t).unwrap();
+        assert_eq!(a.doc.buffer.to_string(), "eo\u{302}");
+        assert_eq!(a.doc.buffer.cursor(), 1);
+        typ(&mut a, "X");
+        assert_eq!(a.doc.buffer.to_string(), "eXo\u{302}", "the accent stays");
+    }
+
+    #[test]
+    fn redoing_replace_all_inside_a_letter_stays_between_letters() {
+        let t = Instant::now();
+        let mut a = app("e\u{301}\u{302}");
+        start_replace(&mut a, "\u{301}", "o");
+        typ(&mut a, "a");
+        assert_eq!(a.doc.buffer.cursor(), 1);
+        a.handle_key(Key::Ctrl('z'), t).unwrap();
+        a.handle_key(Key::Ctrl('y'), t).unwrap();
+        assert_eq!(a.doc.buffer.cursor(), 1);
+    }
+
+    #[test]
     fn replace_stops_short_of_a_match_reaching_past_where_it_started() {
         let mut a = app("aaaa");
         a.doc.buffer.move_to(1);

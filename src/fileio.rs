@@ -272,6 +272,10 @@ pub fn is_read_only(path: &Path) -> bool {
 
 static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// How many names [`create_beside`] tries, so a save can't hang on a directory
+/// that says every name is taken.
+const NAME_TRIES: u32 = 1000;
+
 /// Gives the new file the old file's owner, group and extended attributes.
 /// Extended attributes hold SELinux labels and ACLs too.
 fn carry_metadata(new: &File, old_path: &Path, old: &Metadata) -> io::Result<()> {
@@ -302,6 +306,32 @@ fn carry_metadata(new: &File, old_path: &Path, old: &Metadata) -> io::Result<()>
     Ok(())
 }
 
+/// Creates a new file in `dir`, returning it and its name. A name already in
+/// use is passed over, whatever holds it, so what comes back is always this
+/// call's own to delete. The name doesn't come from the file being saved, which
+/// may already be as long as a name can be.
+fn create_beside(dir: &Path, label: &str, mode: u32) -> io::Result<(File, PathBuf)> {
+    let pid = std::process::id();
+    for _ in 0..NAME_TRIES {
+        let n = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = dir.join(format!(".{label}.{pid}.{n}"));
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(mode)
+            .open(&path)
+        {
+            Ok(f) => return Ok((f, path)),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "no free temporary name",
+    ))
+}
+
 fn overwrite(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let mut f = OpenOptions::new().write(true).open(path)?;
     f.write_all(bytes)?;
@@ -311,21 +341,17 @@ fn overwrite(path: &Path, bytes: &[u8]) -> io::Result<()> {
 
 /// Rewrites `target` in its own inode, for files a rename would damage. The
 /// old content goes to a backup first and is put back if the write fails.
-fn save_in_place(target: &Path, backup: &Path, text: &str) -> io::Result<()> {
+fn save_in_place(target: &Path, dir: &Path, text: &str) -> io::Result<()> {
     let old = fs::read(target)?;
-    let mut b = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(backup)?;
+    let (mut b, backup) = create_beside(dir, "kyte-bak", 0o600)?;
     if let Err(e) = b.write_all(&old).and_then(|_| b.sync_all()) {
-        let _ = fs::remove_file(backup);
+        let _ = fs::remove_file(&backup);
         return Err(e);
     }
     drop(b);
     if let Err(e) = overwrite(target, text.as_bytes()) {
         if overwrite(target, &old).is_ok() {
-            let _ = fs::remove_file(backup);
+            let _ = fs::remove_file(&backup);
             return Err(e);
         }
         return Err(io::Error::new(
@@ -333,7 +359,7 @@ fn save_in_place(target: &Path, backup: &Path, text: &str) -> io::Result<()> {
             format!("{e}; the old content is in {}", backup.display()),
         ));
     }
-    fs::remove_file(backup)
+    fs::remove_file(&backup)
 }
 
 /// Temp file in the same directory, write, fsync, copy permissions, owner and
@@ -353,17 +379,9 @@ pub fn save_atomic(path: &Path, text: &str) -> io::Result<()> {
     }
     let old = fs::metadata(&target).ok();
     let mode = old.as_ref().map(|m| m.permissions().mode() & 0o7777);
-    let n = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let pid = std::process::id();
-    // Not built from the file's name, which may already be as long as they get.
-    let tmp = dir.join(format!(".kyte-tmp.{pid}.{n}"));
+    let (mut f, tmp) = create_beside(&dir, "kyte-tmp", mode.unwrap_or(0o666))?;
     let mut in_place = false;
     let result = (|| {
-        let mut f = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(mode.unwrap_or(0o666))
-            .open(&tmp)?;
         if let Some(m) = &old {
             if m.nlink() > 1 || carry_metadata(&f, &target, m).is_err() {
                 in_place = true;
@@ -381,8 +399,7 @@ pub fn save_atomic(path: &Path, text: &str) -> io::Result<()> {
     })();
     if in_place {
         let _ = fs::remove_file(&tmp);
-        let backup = dir.join(format!(".kyte-bak.{pid}.{n}"));
-        return save_in_place(&target, &backup, text);
+        return save_in_place(&target, &dir, text);
     }
     if let Err(e) = result {
         let _ = fs::remove_file(&tmp);
