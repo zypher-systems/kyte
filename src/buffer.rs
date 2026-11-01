@@ -268,6 +268,11 @@ impl Buffer {
 
     /// The start of the file, enough to read a `#!` line.
     pub fn head(&self) -> String {
+        // A chosen language outranks the `#!` line, which is what lets Plain
+        // text turn a script's highlighting off.
+        if self.language.is_some() {
+            return String::new();
+        }
         self.rope.line(0).chars().take(256).collect()
     }
 
@@ -1124,6 +1129,17 @@ impl Buffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A chosen language outranks the `#!` line as well as the guess.
+    #[test]
+    fn a_chosen_language_outranks_the_first_line() {
+        let mut b = Buffer::from_str("#!/bin/sh\necho hi\n", None);
+        assert!(b.head().starts_with("#!/bin/sh"));
+        b.set_language(Some("txt"));
+        assert_eq!(b.head(), "");
+        b.set_language(None);
+        assert!(b.head().starts_with("#!/bin/sh"));
+    }
 
     fn b(s: &str) -> Buffer {
         Buffer::from_str(s, None)

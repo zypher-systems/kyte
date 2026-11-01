@@ -501,3 +501,23 @@ fn a_published_release_passes_every_check() {
     let binary = d.path().join(format!("kyte-{}/kyte", target()));
     assert_eq!(version_of(&binary), Some(Version(0, 6, 0)));
 }
+
+/// With nowhere of its own, Kyte's state falls back to `/tmp`, and what's
+/// downloaded there gets run.
+#[test]
+fn no_home_folder_is_refused() {
+    if as_root() {
+        return;
+    }
+    let out = Command::new(env!("CARGO_BIN_EXE_kyte"))
+        .arg("--update-check")
+        .env_remove("HOME")
+        .env_remove("XDG_STATE_HOME")
+        .env_remove("KYTE_STATE_DIR")
+        .env_remove("KYTE_CONFIG")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(said.contains("no home folder"), "{said}");
+}

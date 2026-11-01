@@ -425,6 +425,19 @@ fn set_language_colors_an_untitled_buffer() {
     p.wait_until("the color to go", TIMEOUT, |_| !colored(&p, 0, "for", "x"));
 }
 
+/// The `#!` line picks a language, so turning it off has to outrank that too.
+#[test]
+fn plain_text_turns_a_scripts_highlighting_off() {
+    let (_dir, mut p) = open_untitled();
+    p.paste("#!/bin/sh\nfor x in y; do echo hi; done");
+    p.wait_for("done", TIMEOUT);
+    p.wait_until("the keyword to color", TIMEOUT, |_| {
+        colored(&p, 1, "for", "x")
+    });
+    set_language(&mut p, "Plain text");
+    p.wait_until("the color to go", TIMEOUT, |_| !colored(&p, 1, "for", "x"));
+}
+
 #[test]
 fn set_language_opens_on_the_current_language() {
     let (_dir, mut p) = open_untitled();

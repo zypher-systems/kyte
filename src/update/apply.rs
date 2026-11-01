@@ -213,6 +213,16 @@ pub fn plan(
                             repo.name
                         ));
                     };
+                    // apt picks the source of a version by its own priorities,
+                    // so a version two repositories offer can't be held to one.
+                    if repo.shared.contains(version) {
+                        return Err(format!(
+                            "{package} comes from the {} repository, but another repository \
+                             offers {version} too, and apt could take it from there. Update it \
+                             with apt yourself.",
+                            repo.name
+                        ));
+                    }
                     let spec = format!("{package}={version}");
                     let mut command = vec!["apt-get".to_string(), "install".into(), "-y".into()];
                     if downgrade {
@@ -505,7 +515,8 @@ pub fn run_request(request: &Request) -> Result<(), String> {
     }
     let releases = Releases::default();
     let running = Version::current();
-    let dir = fileio::update_dir();
+    let dir = fileio::update_dir()
+        .ok_or("there's no home folder to keep the downloads in; set HOME and try again")?;
 
     let mut notes = None;
     let to = match &request.action {
@@ -563,9 +574,10 @@ pub fn run_request(request: &Request) -> Result<(), String> {
 
     // What's on disk decides what happened, whatever the installer said: a
     // failed install may already have replaced the binary, and then
-    // --update-rollback must still know what to put back.
+    // --update-rollback must still know what to put back. A copy that no longer
+    // answers has changed as well.
     let after = version_of(&bin);
-    let changed = after.is_some_and(|v| v != running);
+    let changed = after != Some(running);
     if changed {
         let _ = State::modify(&dir, |s| {
             s.previous = Some(running.to_string());
@@ -599,8 +611,10 @@ pub fn run_request(request: &Request) -> Result<(), String> {
             Ok(())
         }
         Err(e) => {
-            if let (true, Some(v)) = (changed, after) {
-                eprintln!("{} is now Kyte {v}. {back}", bin.display());
+            match after {
+                Some(v) if changed => eprintln!("{} is now Kyte {v}. {back}", bin.display()),
+                None => eprintln!("{} no longer reports a version. {back}", bin.display()),
+                _ => {}
             }
             Err(e)
         }
@@ -814,6 +828,7 @@ mod tests {
         let repo = AptRepo {
             name: "repo.example.org".into(),
             versions: vec!["0.7.0-2".into(), "0.5.2-1".into()],
+            shared: Vec::new(),
         };
         let from = deb(Origin::Repo(repo));
         let p = make(&from, "0.6.0", "0.7.0", &tools("dnf")).unwrap();
@@ -835,6 +850,18 @@ mod tests {
             e.contains("doesn't have 0.8.0") && e.contains("0.7.0-2, 0.5.2-1"),
             "{e}"
         );
+    }
+
+    /// `apt-get install kyte=V` takes V from whichever source apt prefers.
+    #[test]
+    fn a_version_another_repository_also_offers_is_refused() {
+        let from = deb(Origin::Repo(AptRepo {
+            name: "repo.example.org".into(),
+            versions: vec!["0.8.0-1".into(), "0.7.0-1".into()],
+            shared: vec!["0.8.0-1".into()],
+        }));
+        let e = make(&from, "0.7.0", "0.8.0", &tools("dnf")).unwrap_err();
+        assert!(e.contains("another repository"), "{e}");
     }
 
     #[test]

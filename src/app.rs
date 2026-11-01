@@ -284,7 +284,10 @@ impl Doc {
 
     fn set_view(&mut self, view: View) {
         let head = self.buffer.head();
-        self.prose = syntax::prose(&self.buffer.kind_path(), &head);
+        // A guess only reaches colors and code keys: Writing wraps the text and
+        // spell-checks it, which takes a file name or a choice.
+        let guessing = self.buffer.path().is_none() && self.buffer.language().is_none();
+        self.prose = syntax::prose(&self.buffer.kind_path(), &head).filter(|_| !guessing);
         self.writing = view.writing && self.prose.is_some();
         self.spelling = view.spell_check && self.writing;
         self.soft_wrap = view.soft_wrap || self.writing;
@@ -3914,6 +3917,28 @@ mod tests {
         a.handle_key(Key::Esc, t).unwrap();
         assert_eq!(a.mode, Mode::Insert);
         assert_eq!(a.doc.buffer.line_col(), (5, 1));
+    }
+
+    /// A guess changes colors and code keys. Writing takes a choice or a name.
+    #[test]
+    fn automatic_doesnt_turn_writing_on_from_a_guess() {
+        for text in ["# Notes\n\nSome text.\n", "\\documentclass{article}\n"] {
+            let mut a = app(text);
+            assert_ne!(a.doc.buffer.language_or_guess(), None, "{text}");
+            a.set_language("Automatic", None);
+            assert_eq!(a.doc.prose, None, "{text}");
+            assert!(
+                !a.doc.writing && !a.doc.spelling && !a.doc.soft_wrap,
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn choosing_a_language_does_turn_writing_on() {
+        let mut a = app("# Notes\n");
+        a.set_language("Markdown", Some("md"));
+        assert!(a.doc.writing && a.doc.soft_wrap);
     }
 
     /// A note from the update check, waiting to be shown.

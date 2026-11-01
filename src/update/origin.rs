@@ -53,14 +53,16 @@ pub enum Origin<R> {
     Unknown(String),
 }
 
-/// An apt repository a package is available from.
+/// The apt repository a package came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AptRepo {
-    /// The repository's host.
+    /// Its host, or its address when it has none (`file:/srv/repo`).
     pub name: String,
-    /// Its versions of the package (`0.7.0-1`), newest first, as of the last
-    /// `apt-get update`.
+    /// The versions it offers (`0.7.0-1`), newest first, as of the last
+    /// `apt-get update`. Other repositories' versions aren't here.
     pub versions: Vec<String>,
+    /// Those of them another repository offers too.
+    pub shared: Vec<String>,
 }
 
 /// Folders that belong to the package manager. A copy here with no owner means
@@ -89,8 +91,11 @@ pub fn classify(
     let Some(dir) = bin.parent() else {
         return Install::Unknown(bin.into());
     };
+    // The install script only writes `kyte`, so a copy with any other name
+    // would see a different file replaced.
+    let named = bin.file_name().is_some_and(|n| n == "kyte");
     let in_bin = dir.file_name().is_some_and(|n| n == "bin");
-    if !in_bin || PACKAGE_FOLDERS.iter().any(|f| dir == Path::new(f)) {
+    if !named || !in_bin || PACKAGE_FOLDERS.iter().any(|f| dir == Path::new(f)) {
         return Install::Unknown(bin.into());
     }
     Install::Copied {
@@ -218,15 +223,31 @@ fn apt_origin(package: &str) -> Origin<AptRepo> {
     }
 }
 
-/// Reads `apt-cache policy <package>`: the versions its table lists from a
-/// repository (a source with an address, not `/var/lib/dpkg/status`), newest
-/// first, and the first such repository's host. A table with no repository in
-/// it is a `.deb` installed by hand; no table at all is unknown.
+/// One line of apt's version table.
+struct AptVersion {
+    version: String,
+    /// The line apt marks `***`.
+    installed: bool,
+    /// The repositories offering it, by address.
+    sources: Vec<String>,
+}
+
+/// A priority in apt's table, which a pin can make negative.
+fn is_priority(word: &str) -> bool {
+    let digits = word.strip_prefix('-').unwrap_or(word);
+    !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// Reads `apt-cache policy <package>`, keeping each version with the
+/// repositories that offer it. Any source with an address is a repository,
+/// `file:` and `copy:` included; `/var/lib/dpkg/status` only says it's
+/// installed.
+///
+/// No repository is a `.deb` installed by hand, and no table at all is unknown.
+/// One repository is where the package came from. Of several, it's the one that
+/// offers the installed version, and if that isn't exactly one, the origin
+/// can't be told.
 pub fn apt_policy(text: &str) -> Origin<AptRepo> {
-    let mut name = None;
-    let mut versions: Vec<String> = Vec::new();
-    let mut current: Option<String> = None;
-    let mut listed = false;
     let mut table = text
         .lines()
         .skip_while(|l| !l.trim_start().starts_with("Version table:"))
@@ -234,34 +255,71 @@ pub fn apt_policy(text: &str) -> Origin<AptRepo> {
     if table.peek().is_none() {
         return Origin::Unknown("apt-cache doesn't list the package".into());
     }
+    let mut versions: Vec<AptVersion> = Vec::new();
     for line in table {
-        let t = line.trim_start().trim_start_matches("***").trim_start();
-        let mut words = t.split_whitespace();
+        let line = line.trim_start();
+        let installed = line.starts_with("***");
+        let mut words = line.trim_start_matches("***").split_whitespace();
         let (Some(first), Some(second)) = (words.next(), words.next()) else {
             continue;
         };
-        if first.chars().all(|c| c.is_ascii_digit()) {
-            // A source line: `500 https://host/path suite/component arch Packages`.
-            if let Some((_, rest)) = second.split_once("://") {
-                let host = rest.split('/').next().unwrap_or(rest);
-                if name.is_none() {
-                    name = Some(host.to_string());
-                }
-                if let (Some(v), false) = (&current, listed) {
-                    versions.push(v.clone());
-                    listed = true;
-                }
+        if is_priority(second) {
+            // `0.7.0-1 500`
+            versions.push(AptVersion {
+                version: first.to_string(),
+                installed,
+                sources: Vec::new(),
+            });
+        } else if is_priority(first) && second != "/var/lib/dpkg/status" {
+            // `500 https://host/path suite/component arch Packages`
+            if !second.contains(':') {
+                return Origin::Unknown(format!("apt lists an unknown source, {second}"));
             }
-        } else if second.chars().all(|c| c.is_ascii_digit()) {
-            // A version line: `0.7.0-1 500`.
-            current = Some(first.to_string());
-            listed = false;
+            match versions.last_mut() {
+                Some(v) if !v.sources.iter().any(|s| s == second) => {
+                    v.sources.push(second.to_string())
+                }
+                _ => {}
+            }
         }
     }
-    match name {
-        Some(name) => Origin::Repo(AptRepo { name, versions }),
-        None => Origin::ByHand,
+    let mut repos: Vec<&str> = Vec::new();
+    for source in versions.iter().flat_map(|v| &v.sources) {
+        if !repos.contains(&source.as_str()) {
+            repos.push(source);
+        }
     }
+    let home = match repos.as_slice() {
+        [] => return Origin::ByHand,
+        [only] => only.to_string(),
+        _ => match versions
+            .iter()
+            .find(|v| v.installed)
+            .map(|v| v.sources.as_slice())
+        {
+            Some([home]) => home.clone(),
+            _ => {
+                return Origin::Unknown(
+                    "several repositories offer it, and apt can't say which one this is from"
+                        .into(),
+                )
+            }
+        },
+    };
+    let ours = || versions.iter().filter(|v| v.sources.contains(&home));
+    Origin::Repo(AptRepo {
+        name: home
+            .split_once("://")
+            .map_or(home.as_str(), |(_, rest)| {
+                rest.split('/').next().unwrap_or(rest)
+            })
+            .to_string(),
+        versions: ours().map(|v| v.version.clone()).collect(),
+        shared: ours()
+            .filter(|v| v.sources.len() > 1)
+            .map(|v| v.version.clone())
+            .collect(),
+    })
 }
 
 #[cfg(test)]
@@ -374,6 +432,110 @@ mod tests {
         }
     }
 
+    /// The install script only ever writes `kyte`, so any other name in that
+    /// folder would see a different file replaced.
+    /// One repository's several suites are still one repository.
+    #[test]
+    fn apt_counts_a_repository_once() {
+        let policy = "kyte:\n  Version table:\n     0.7.0-1 500\n        500 https://a.test/d \
+                      stable/main amd64 Packages\n        500 https://a.test/d stable-updates/main \
+                      amd64 Packages\n *** 0.6.0-1 100\n        100 /var/lib/dpkg/status\n";
+        let Origin::Repo(repo) = apt_policy(policy) else {
+            panic!("one repository");
+        };
+        assert_eq!(repo.versions, ["0.7.0-1"]);
+        assert!(repo.shared.is_empty());
+    }
+
+    const TWO_REPOSITORIES: &str = "kyte:\n  Version table:\n     0.8.0-1 500\n        500 \
+        https://a.test/d stable/main amd64 Packages\n *** 0.7.0-1 500\n        500 https://a.test/d \
+        stable/main amd64 Packages\n        100 /var/lib/dpkg/status\n     0.6.0-1 500\n        500 \
+        https://b.test/d stable/main amd64 Packages\n";
+
+    /// Another repository's version must not read as this one's: going to
+    /// 0.6.0 here would take a version from b.test and book it to a.test.
+    #[test]
+    fn apt_keeps_each_version_with_its_repository() {
+        assert_eq!(
+            apt_policy(TWO_REPOSITORIES),
+            Origin::Repo(AptRepo {
+                name: "a.test".into(),
+                versions: vec!["0.8.0-1".into(), "0.7.0-1".into()],
+                shared: Vec::new(),
+            })
+        );
+    }
+
+    #[test]
+    fn a_version_two_repositories_offer_is_marked() {
+        let policy = TWO_REPOSITORIES.replace(
+            "0.8.0-1 500\n        500 https://a.test/d stable/main amd64 Packages\n",
+            "0.8.0-1 500\n        500 https://a.test/d stable/main amd64 Packages\n        \
+             500 https://b.test/d stable/main amd64 Packages\n",
+        );
+        let Origin::Repo(repo) = apt_policy(&policy) else {
+            panic!("the installed version says which");
+        };
+        assert_eq!(repo.name, "a.test");
+        assert_eq!(repo.shared, ["0.8.0-1"]);
+    }
+
+    #[test]
+    fn several_repositories_and_no_way_to_choose_is_unknown() {
+        // Neither offers the installed version any more.
+        let gone = "kyte:\n  Version table:\n     0.8.0-1 500\n        500 https://a.test/d s/m \
+                    amd64 Packages\n     0.7.0-1 500\n        500 https://b.test/d s/m amd64 \
+                    Packages\n *** 0.6.0-1 100\n        100 /var/lib/dpkg/status\n";
+        assert!(matches!(apt_policy(gone), Origin::Unknown(_)));
+        // Both offer it.
+        let both = "kyte:\n  Version table:\n *** 0.7.0-1 500\n        500 https://a.test/d s/m \
+                    amd64 Packages\n        500 https://b.test/d s/m amd64 Packages\n        100 \
+                    /var/lib/dpkg/status\n";
+        assert!(matches!(apt_policy(both), Origin::Unknown(_)));
+    }
+
+    /// A local repository is written without `//`.
+    #[test]
+    fn a_local_apt_repository_is_a_repository() {
+        let policy = "kyte:\n  Version table:\n     0.7.0-1 500\n        500 file:/srv/repo ./ \
+                      Packages\n *** 0.6.0-1 100\n        100 /var/lib/dpkg/status\n";
+        assert_eq!(
+            apt_policy(policy),
+            Origin::Repo(AptRepo {
+                name: "file:/srv/repo".into(),
+                versions: vec!["0.7.0-1".into()],
+                shared: Vec::new(),
+            })
+        );
+    }
+
+    #[test]
+    fn a_source_apt_cant_describe_is_unknown() {
+        let policy = "kyte:\n  Version table:\n *** 0.6.0-1 500\n        500 /some/where\n";
+        assert!(matches!(apt_policy(policy), Origin::Unknown(_)));
+    }
+
+    /// A pin can make a priority negative.
+    #[test]
+    fn apt_reads_a_negative_priority() {
+        let policy = "kyte:\n  Version table:\n     0.7.0-1 -10\n        -10 https://a.test/d s/m \
+                      amd64 Packages\n *** 0.6.0-1 100\n        100 /var/lib/dpkg/status\n";
+        let Origin::Repo(repo) = apt_policy(policy) else {
+            panic!("a repository");
+        };
+        assert_eq!(repo.versions, ["0.7.0-1"]);
+    }
+
+    #[test]
+    fn a_copy_under_another_name_is_refused() {
+        for p in ["/home/me/.local/bin/kyte-old", "/usr/local/bin/kyte.bak"] {
+            assert_eq!(
+                classify(Path::new(p), None, true, nobody),
+                Install::Unknown(p.into())
+            );
+        }
+    }
+
     #[test]
     fn dnf_says_where_a_package_came_from() {
         assert_eq!(dnf_origin("copr-kyte\n"), Origin::Repo("copr-kyte".into()));
@@ -398,6 +560,7 @@ mod tests {
             Origin::Repo(AptRepo {
                 name: "repo.example.org".into(),
                 versions: vec!["0.7.0-1".into(), "0.5.2-1".into()],
+                shared: Vec::new(),
             }),
             "the installed version is local only; the other two are the repository's"
         );

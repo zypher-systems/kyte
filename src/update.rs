@@ -63,12 +63,13 @@ pub fn start_check(enabled: bool) -> Option<Receiver<String>> {
     {
         return None;
     }
+    let dir = crate::fileio::update_dir()?;
     let (send, receive) = std::sync::mpsc::channel();
     std::thread::Builder::new()
         .name("update-check".into())
         .spawn(move || {
             let note = release::on_launch(
-                &crate::fileio::update_dir(),
+                &dir,
                 &release::Releases::default(),
                 release::Version::current(),
                 release::now(),
@@ -91,13 +92,17 @@ pub fn start_check(_enabled: bool) -> Option<Receiver<String>> {
 #[cfg(feature = "update")]
 pub fn check_now() -> Receiver<String> {
     let (send, receive) = std::sync::mpsc::channel();
+    let Some(dir) = crate::fileio::update_dir() else {
+        let _ = send.send("Couldn't check for updates: no home folder".to_string());
+        return receive;
+    };
     let spawned = std::thread::Builder::new()
         .name("update-check".into())
         .spawn({
             let send = send.clone();
             move || {
                 let note = release::on_request(
-                    &crate::fileio::update_dir(),
+                    &dir,
                     &release::Releases::default(),
                     release::Version::current(),
                     release::now(),

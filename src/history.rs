@@ -505,9 +505,10 @@ impl FileHistory {
                 let end = walk(&bytes, |_, _| {});
                 let (mut into, _) = open_log(&dest)?;
                 into.write_all(&bytes[MAGIC.len()..end])?;
+                // On disk before the only other copy goes.
+                into.sync_data()?;
                 fs::remove_file(&self.path)?;
                 self.file = Some(into);
-                self.pending_fsync = true;
             } else {
                 // The open file stays good through the rename.
                 fs::rename(&self.path, &dest)?;

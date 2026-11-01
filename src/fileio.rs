@@ -417,13 +417,23 @@ pub fn history_dir() -> PathBuf {
 }
 
 /// The updater's folder: inside `$KYTE_STATE_DIR` if set, else next to `swap`.
-pub fn update_dir() -> PathBuf {
+/// `None` with no folder of this user's to put it in: [`state_dir`] then falls
+/// back to `/tmp`, where anyone could have laid out the path, and what lands
+/// here gets run.
+pub fn update_dir() -> Option<PathBuf> {
+    let set = |name: &str| std::env::var_os(name).is_some_and(|d| !d.is_empty());
+    if !["KYTE_STATE_DIR", "XDG_STATE_HOME", "HOME"]
+        .iter()
+        .any(|n| set(n))
+    {
+        return None;
+    }
     let swap = state_dir();
-    if std::env::var_os("KYTE_STATE_DIR").is_some_and(|d| !d.is_empty()) {
+    Some(if set("KYTE_STATE_DIR") {
         swap.join("update")
     } else {
         swap.with_file_name("update")
-    }
+    })
 }
 
 /// Pure form of [`state_dir`] for tests. Empty values count as unset.
