@@ -172,7 +172,10 @@ jobs:
           (cd dist && exec python3 -m http.server 8765 --bind 127.0.0.1) >/dev/null 2>&1 &
           good=$!
           cp -r dist "$RUNNER_TEMP/tampered"
-          sed -i '1s/^./0/' "$RUNNER_TEMP/tampered/SHA256SUMS"
+          # Not a hex digit, so this always changes the file. A digit does nothing
+          # to a hash that already starts with it, and the "tampered" release
+          # then installs, as it did on the first v0.7.0 run.
+          sed -i '1s/^./x/' "$RUNNER_TEMP/tampered/SHA256SUMS"
           (cd "$RUNNER_TEMP/tampered" && exec python3 -m http.server 8766 --bind 127.0.0.1) >/dev/null 2>&1 &
           bad=$!
           trap 'kill "$good" "$bad"' EXIT
